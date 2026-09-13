@@ -1,5 +1,7 @@
 # WAHA + 本地管理面板便携版
 
+完整安装、配置、反向代理、备份、更新和故障排查请阅读：[INSTALL.zh-CN.md](INSTALL.zh-CN.md)。
+
 本发布包包含两个可独立更新的服务：
 
 - `devlikeapro/waha:latest-2026.8.2`
