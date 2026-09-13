@@ -1,0 +1,11 @@
+.env
+.env.*
+secrets/
+backups/
+*.zip
+**/__pycache__/
+**/*.pyc
+**/test_*.py
+docs/
+design-system/
+work/

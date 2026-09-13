@@ -1,0 +1,66 @@
+services:
+  waha:
+    image: ${WAHA_IMAGE:-devlikeapro/waha:latest-2026.8.2}
+    restart: unless-stopped
+    environment:
+      TZ: Asia/Shanghai
+      WAHA_API_KEY: ${WAHA_API_KEY}
+      WAHA_DASHBOARD_USERNAME: ${WAHA_DASHBOARD_USERNAME:-admin}
+      WAHA_DASHBOARD_PASSWORD: ${WAHA_DASHBOARD_PASSWORD}
+      WAHA_BASE_URL: http://waha:3000
+      WAHA_MEDIA_STORAGE: LOCAL
+      WHATSAPP_FILES_FOLDER: /app/.media
+      WAHA_LOG_FORMAT: JSON
+      WAHA_LOG_LEVEL: info
+      WAHA_PRINT_QR: "False"
+      WAHA_DASHBOARD_ENABLED: "True"
+      WHATSAPP_SWAGGER_ENABLED: "False"
+    ports:
+      - "${WAHA_BIND_ADDRESS:-127.0.0.1}:${WAHA_PORT:-3002}:3000"
+    volumes:
+      - waha_sessions:/app/.sessions
+      - waha_media:/app/.media
+    networks:
+      - internal
+
+  waha-panel:
+    image: ${PANEL_IMAGE:-docker.io/cangnan88/waha-panel:1.0.0}
+    restart: unless-stopped
+    depends_on:
+      - waha
+    environment:
+      PORT: "3001"
+      DB_PATH: /app/data/panel.sqlite3
+      CREDENTIALS_PATH: /run/panel-secrets/waha_credentials
+      WAHA_URL: http://waha:3000
+      WAHA_WEBHOOK_URL: http://waha-panel:3001/api/webhook
+      PANEL_SEED_BUSINESS_DATA: "0"
+      PANEL_ADMIN_DB_AUTH: "1"
+      PANEL_ADMIN_BOOTSTRAP_FILE: /run/panel-secrets/panel_admin_bootstrap
+      PANEL_DATA_ENCRYPTION_KEY: ${PANEL_DATA_ENCRYPTION_KEY}
+      PANEL_VERSION: ${PANEL_VERSION:-1.0.0}
+      WAHA_IMAGE_TAG: ${WAHA_IMAGE_TAG:-latest-2026.8.2}
+      PANEL_SPONSOR_ENABLED: ${PANEL_SPONSOR_ENABLED:-0}
+      PANEL_SPONSOR_IMAGE_URL: ${PANEL_SPONSOR_IMAGE_URL:-https://www.6spring.com/wp-content/uploads/2026/09/cangnan.jpg}
+      WEBHOOK_ALLOWED_CIDRS: 127.0.0.1/32,::1/128,172.16.0.0/12
+      COMMERCE_ENABLED: "0"
+    ports:
+      - "${PANEL_BIND_ADDRESS:-127.0.0.1}:${PANEL_PORT:-3003}:3001"
+    volumes:
+      - panel_data:/app/data
+      - ./secrets:/run/panel-secrets:rw
+    networks:
+      - internal
+
+volumes:
+  waha_sessions:
+    name: ${PORTABLE_VOLUME_PREFIX:-waha-release}_sessions
+  waha_media:
+    name: ${PORTABLE_VOLUME_PREFIX:-waha-release}_media
+  panel_data:
+    name: ${PORTABLE_VOLUME_PREFIX:-waha-release}_panel_data
+
+networks:
+  internal:
+    name: ${PORTABLE_NETWORK_NAME:-waha-release-internal}
+    driver: bridge

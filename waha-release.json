@@ -1,0 +1,8 @@
+{
+  "component": "waha",
+  "repository": "devlikeapro/waha",
+  "tag": "latest-2026.8.2",
+  "version_family": "latest-YYYY.M.D",
+  "update_mode": "independent",
+  "data": "sessions and media in Docker volumes"
+}
