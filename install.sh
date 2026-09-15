@@ -60,8 +60,19 @@ docker compose pull || fail 'docker compose pull failed'
 STEP="starting isolated release services"
 docker compose up -d || fail 'docker compose up failed'
 STEP="checking panel response"
-status="$(curl -ksS -o /dev/null -w '%{http_code}' --max-time 15 http://127.0.0.1:3003/ || true)"
-[[ "$status" == '200' || "$status" == '401' ]] || fail "panel returned unexpected HTTP status $status"
+PANEL_READY_TIMEOUT=90
+PANEL_READY_INTERVAL=2
+deadline=$((SECONDS + PANEL_READY_TIMEOUT))
+status="000"
+printf 'Waiting for panel to become ready (up to %ss)...\n' "$PANEL_READY_TIMEOUT"
+while (( SECONDS < deadline )); do
+  status="$(curl -ksS -o /dev/null -w '%{http_code}' --connect-timeout 3 --max-time 5 http://127.0.0.1:3003/ 2>/dev/null || true)"
+  if [[ "$status" == '200' || "$status" == '401' ]]; then
+    break
+  fi
+  sleep "$PANEL_READY_INTERVAL"
+done
+[[ "$status" == '200' || "$status" == '401' ]] || fail "panel did not become ready within ${PANEL_READY_TIMEOUT}s (last HTTP status ${status:-000}); run: docker compose logs --tail=100 waha-panel"
 
 printf 'Portable WAHA + panel release is running.\n'
 printf 'Panel: http://127.0.0.1:3003/\nWAHA:  http://127.0.0.1:3002/\n'

@@ -63,7 +63,7 @@ curl -fsSL https://raw.githubusercontent.com/CangNan99/waha-panel/main/bootstrap
 2. 创建权限受限的 `secrets/` 目录；
 3. 生成 WAHA API 密钥、webhook 密钥、面板数据加密密钥和管理员初始密码；
 4. 拉取 WAHA 与面板镜像；
-5. 启动两个服务并检查面板响应。
+5. 启动两个服务，并最长等待 90 秒确认面板响应。
 
 ### Windows PowerShell 7
 

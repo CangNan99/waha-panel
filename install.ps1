@@ -80,8 +80,23 @@ PANEL_ADMIN_PASSWORD=$adminPassword
     & docker compose up -d
     if ($LASTEXITCODE -ne 0) { throw 'docker compose up failed' }
     $step = 'checking panel response'
-    $response = Invoke-WebRequest -Uri 'http://127.0.0.1:3003/' -UseBasicParsing -SkipHttpErrorCheck -TimeoutSec 15
-    if ($response.StatusCode -notin @(200, 401)) { throw "Panel returned unexpected HTTP status $($response.StatusCode)" }
+    $panelReadyDeadline = (Get-Date).AddSeconds(90)
+    $lastStatus = 0
+    Write-Host 'Waiting for panel to become ready (up to 90s)...'
+    do {
+        try {
+            $response = Invoke-WebRequest -Uri 'http://127.0.0.1:3003/' -UseBasicParsing -SkipHttpErrorCheck -TimeoutSec 5
+            $lastStatus = $response.StatusCode
+        } catch {
+            $lastStatus = 0
+        }
+        if ($lastStatus -in @(200, 401)) { break }
+        if ((Get-Date) -lt $panelReadyDeadline) { Start-Sleep -Seconds 2 }
+    } while ((Get-Date) -lt $panelReadyDeadline)
+    if ($lastStatus -notin @(200, 401)) {
+        $lastStatusLabel = if ($lastStatus) { [string]$lastStatus } else { '000' }
+        throw "Panel did not become ready within 90 seconds (last HTTP status $lastStatusLabel). Run: docker compose logs --tail=100 waha-panel"
+    }
 
     Write-Host 'Portable WAHA + panel release is running.'
     Write-Host 'Panel: http://127.0.0.1:3003/'
