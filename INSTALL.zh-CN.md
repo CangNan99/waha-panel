@@ -3,7 +3,7 @@
 本指南适用于 GitHub 仓库 `CangNan99/waha-panel` 的便携发布版。它安装两个可以独立更新的 Docker 服务：
 
 - WAHA：`devlikeapro/waha:latest-2026.8.2`
-- 管理面板：`docker.io/cangnan88/waha-panel:1.0.1`
+- 管理面板：`docker.io/cangnan88/waha-panel:1.0.2`
 
 面板默认仅监听服务器本机，不会把管理端口直接暴露到公网。面板使用 SQLite，不部署额外数据库服务；数据通过 Docker 命名卷持久化保存。
 
@@ -350,10 +350,10 @@ docker compose start
 
 ## 13. 可选：显示赞助入口
 
-赞助入口默认关闭。确认可以访问面板后，如需启用，在安装目录的 `.env` 中设置：
+赞助入口默认开启。如需关闭，在安装目录的 `.env` 中设置：
 
 ```dotenv
-PANEL_SPONSOR_ENABLED=1
+PANEL_SPONSOR_ENABLED=0
 PANEL_SPONSOR_IMAGE_URL=https://www.6spring.com/wp-content/uploads/2026/09/cangnan.jpg
 ```
 

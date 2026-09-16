@@ -4,6 +4,7 @@ import test from 'node:test';
 import { checkInlineScripts } from '../scripts/check_frontend_syntax.mjs';
 
 const appSource = await readFile(new URL('../panel/app.py', import.meta.url), 'utf8');
+const chatSource = await readFile(new URL('../panel/chat_page.py', import.meta.url), 'utf8');
 const scripts = [...appSource.matchAll(/<script>\s*([\s\S]*?)\s*<\/script>/g)];
 
 test('every inline script in panel/app.py has valid JavaScript syntax', () => {
@@ -16,4 +17,8 @@ test('administrator save handlers close their forEach and addEventListener calls
     appSource.includes("saveAdmin(button.closest('.admin-row'))));"),
     'administrator save handler should close closest, saveAdmin, addEventListener, and forEach',
   );
+});
+
+test('chat management inline JavaScript has valid syntax', () => {
+  assert.doesNotThrow(() => checkInlineScripts(chatSource, 'panel/chat_page.py'));
 });

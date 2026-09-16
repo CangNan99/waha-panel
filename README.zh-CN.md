@@ -5,7 +5,7 @@
 本发布包包含两个可独立更新的服务：
 
 - `devlikeapro/waha:latest-2026.8.2`
-- `docker.io/cangnan88/waha-panel:1.0.1`
+- `docker.io/cangnan88/waha-panel:1.0.2`
 
 面板和 WAHA 通过 Docker 内部网络连接。默认只绑定本机端口：面板为 `127.0.0.1:3003`，WAHA 为 `127.0.0.1:3002`。数据保存在命名 Docker 卷中，分别为会话、媒体和 SQLite 面板数据。没有额外数据库服务。
 
@@ -74,4 +74,4 @@ pwsh -File .\backup.ps1
 
 ## 赞助入口
 
-默认关闭。将 `.env` 中的 `PANEL_SPONSOR_ENABLED` 改为 `1` 后重建面板容器，入口会出现在会话列表下方，图片地址由 `PANEL_SPONSOR_IMAGE_URL` 控制。默认地址为用户指定的公开图片地址。
+默认开启。将 `.env` 中的 `PANEL_SPONSOR_ENABLED` 改为 `0` 后重建面板容器即可关闭，入口会出现在会话列表下方，图片地址由 `PANEL_SPONSOR_IMAGE_URL` 控制。默认地址为用户指定的公开图片地址。

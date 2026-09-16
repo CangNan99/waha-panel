@@ -43,15 +43,15 @@ WAHA_DASHBOARD_USERNAME=admin
 WAHA_DASHBOARD_PASSWORD=$wahaDashboardPassword
 WAHA_WEBHOOK_SECRET=$webhookSecret
 PANEL_DATA_ENCRYPTION_KEY=$panelDataKey
-PANEL_IMAGE=docker.io/cangnan88/waha-panel:1.0.1
-PANEL_VERSION=1.0.1
+PANEL_IMAGE=docker.io/cangnan88/waha-panel:1.0.2
+PANEL_VERSION=1.0.2
 PANEL_PORT=3003
 PANEL_BIND_ADDRESS=127.0.0.1
 WAHA_PORT=3002
 WAHA_BIND_ADDRESS=127.0.0.1
 PORTABLE_VOLUME_PREFIX=waha-release
 PORTABLE_NETWORK_NAME=waha-release-internal
-PANEL_SPONSOR_ENABLED=0
+PANEL_SPONSOR_ENABLED=1
 PANEL_SPONSOR_IMAGE_URL=https://www.6spring.com/wp-content/uploads/2026/09/cangnan.jpg
 "@
         Write-Utf8NoBom (Join-Path $secretDir 'waha_credentials') @"

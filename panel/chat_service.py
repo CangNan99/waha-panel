@@ -115,6 +115,16 @@ def _limited_text(value, limit):
     return text[:limit]
 
 
+def _avatar_url(value):
+    """Return only a plain HTTP(S) avatar URL supplied by WAHA."""
+    if isinstance(value, dict):
+        value = value.get("url") or value.get("src") or value.get("profilePictureUrl")
+    url = str(value or "").strip()
+    if url.startswith(("https://", "http://")) and len(url) <= 2048:
+        return url
+    return ""
+
+
 class ChatService:
     def __init__(self, database_path, client, codec, hmac_secret, logger=None,
                  clock=None, broker=None):
@@ -210,6 +220,48 @@ class ChatService:
             "updated_at": row[3],
         }
 
+    def _note_for_id(self, session, chat_id):
+        name = _session_name(session)
+        key = self._chat_key(name, chat_id)
+        connection = sqlite3.connect(self.database_path)
+        try:
+            row = connection.execute(
+                "SELECT note, updated_at FROM chat_notes WHERE session_name = ? AND chat_key_hmac = ?",
+                (name, key),
+            ).fetchone()
+        finally:
+            connection.close()
+        return {"note": row[0] if row else "", "updated_at": row[1] if row else None}
+
+    def note(self, session, chat_ref):
+        name = _session_name(session)
+        chat_id = self._decode_chat(name, chat_ref)
+        return {"session": name, "chat_ref": chat_ref, **self._note_for_id(name, chat_id)}
+
+    def save_note(self, session, chat_ref, note):
+        name = _session_name(session)
+        chat_id = self._decode_chat(name, chat_ref)
+        value = _limited_text(note, 1000)
+        key = self._chat_key(name, chat_id)
+        now = int(self.clock())
+        connection = sqlite3.connect(self.database_path)
+        try:
+            if value:
+                connection.execute(
+                    "INSERT INTO chat_notes(session_name, chat_key_hmac, note, updated_at) VALUES (?, ?, ?, ?) "
+                    "ON CONFLICT(session_name, chat_key_hmac) DO UPDATE SET note=excluded.note, updated_at=excluded.updated_at",
+                    (name, key, value, now),
+                )
+            else:
+                connection.execute(
+                    "DELETE FROM chat_notes WHERE session_name = ? AND chat_key_hmac = ?",
+                    (name, key),
+                )
+            connection.commit()
+        finally:
+            connection.close()
+        return {"session": name, "chat_ref": chat_ref, "note": value, "updated_at": now}
+
     def is_human_takeover(self, session, chat_id):
         return self._takeover_state_by_id(session, chat_id)["state"] == "HUMAN_TAKEOVER"
 
@@ -274,6 +326,10 @@ class ChatService:
                 raw.get("name") or raw.get("title") or raw.get("pushName") or chat_id.split("@", 1)[0],
                 120,
             )
+            avatar = _avatar_url(
+                raw.get("avatar_url") or raw.get("avatarUrl") or raw.get("profilePictureUrl")
+                or raw.get("profile_picture_url") or raw.get("picture") or raw.get("avatar")
+            )
             display_id = chat_id.split("@", 1)[0]
             last = raw.get("lastMessage") if isinstance(raw.get("lastMessage"), dict) else {}
             last_text = _limited_text(
@@ -292,6 +348,8 @@ class ChatService:
             items.append({
                 "chat_ref": self._encode_chat(name, chat_id),
                 "name": contact_name,
+                "avatar_url": avatar,
+                "note": self._note_for_id(name, chat_id)["note"],
                 "display_id": display_id,
                 "is_group": chat_id.endswith("@g.us"),
                 "unread_count": unread,

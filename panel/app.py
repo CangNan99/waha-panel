@@ -417,6 +417,8 @@ def init_db(path, seed_business=True):
         connection.executescript(multi_session_migration.read_text(encoding="utf-8"))
         chat_ai_migration = Path(__file__).with_name("migrations") / "004_chat_ai_assistant.sql"
         connection.executescript(chat_ai_migration.read_text(encoding="utf-8"))
+        chat_metadata_migration = Path(__file__).with_name("migrations") / "006_chat_metadata.sql"
+        connection.executescript(chat_metadata_migration.read_text(encoding="utf-8"))
         admin_migration_path = Path(__file__).with_name("migrations") / "005_admin_users.sql"
         connection.executescript(admin_migration_path.read_text(encoding="utf-8"))
         apply_admin_migration(connection)
@@ -526,6 +528,10 @@ class WahaClient:
     def restart_session(self, session_name=DEFAULT_SESSION_NAME):
         name = self._session_path(session_name)
         return self.request_json(f"/api/sessions/{name}/restart", method="POST")
+
+    def delete_session(self, session_name=DEFAULT_SESSION_NAME):
+        name = self._session_path(session_name)
+        return self.request_json(f"/api/sessions/{name}", method="DELETE")
 
     def get_qr(self, session_name=DEFAULT_SESSION_NAME):
         name = self._session_path(session_name)
@@ -670,7 +676,7 @@ class PanelState:
         self.admin_service = AdminService(self.database_path)
         self._admin_db_auth = as_bool(os.environ.get("PANEL_ADMIN_DB_AUTH", "0"))
         self._update_service = UpdateService(
-            current_panel=os.environ.get("PANEL_VERSION", "1.0.1"),
+            current_panel=os.environ.get("PANEL_VERSION", "1.0.2"),
             current_waha=os.environ.get("WAHA_IMAGE_TAG", "latest-2026.8.2"),
         )
         self.sleep_fn = sleep_fn or time.sleep
@@ -1838,6 +1844,27 @@ class PanelState:
         self.log("INFO", "session.restart", "已请求重启会话", name)
         return self.session_detail(name)
 
+    def delete_session(self, session_name=DEFAULT_SESSION_NAME):
+        name = normalize_session_name(session_name)
+        managed = self.managed_session_rows()
+        if len(managed) <= 1:
+            raise ValueError("至少保留一个会话，无法删除最后一个会话")
+        self._client_session_call("delete_session", name)
+        connection = sqlite3.connect(self.database_path)
+        try:
+            connection.execute("PRAGMA foreign_keys = ON")
+            for table in (
+                "session_settings", "knowledge_base", "conversation_messages", "system_logs",
+                "chat_takeovers", "manual_send_requests", "chat_notes",
+            ):
+                connection.execute(f"DELETE FROM {table} WHERE session_name = ?", (name,))
+            connection.execute("DELETE FROM managed_sessions WHERE session_name = ?", (name,))
+            connection.commit()
+        finally:
+            connection.close()
+        self.log("INFO", "session.delete", "已删除会话", name)
+        return {"deleted": True, "session": name}
+
     def get_qr(self, session_name=DEFAULT_SESSION_NAME):
         name = normalize_session_name(session_name)
         return self._client_session_call("get_qr", name)
@@ -1987,7 +2014,7 @@ def html_page():
 
 def _sponsor_markup():
     """Return opt-in sponsor HTML and a small event binding for the console."""
-    if not as_bool(os.environ.get("PANEL_SPONSOR_ENABLED", "0")):
+    if not as_bool(os.environ.get("PANEL_SPONSOR_ENABLED", "1")):
         return "", "", ""
     sponsor_url = os.environ.get(
         "PANEL_SPONSOR_IMAGE_URL",
@@ -2078,7 +2105,7 @@ def multi_session_html_page():
     <div class="layout">
       <aside class="sidebar" aria-label="会话列表"><div class="side-head"><div><div class="side-title">会话</div><div class="side-count" id="sessionCount">读取中</div></div><button class="primary" id="newSessionButton" type="button">新建</button></div><div class="session-list" id="sessionList"><div class="empty">正在读取会话...</div></div><!-- SPONSOR_SLOT --></aside>
       <main class="main">
-        <div class="hero"><div><div class="eyebrow">SESSION WORKSPACE</div><h1 id="pageTitle">会话详情</h1><p id="pageSubtitle">选择一个会话开始管理。</p></div><div class="hero-actions"><button id="refreshButton" type="button">刷新状态</button><a id="chatLink" class="primary nav-link" href="#" style="display:inline-flex;align-items:center;min-height:42px;border:1px solid var(--accent);border-radius:11px;padding:0 14px;background:var(--accent);color:#fff;text-decoration:none;font-weight:700;">聊天管理</a><a id="settingsLink" class="subtle nav-link" href="/settings" style="display:inline-flex;align-items:center;min-height:42px;border:1px solid var(--line);border-radius:11px;padding:0 14px;color:var(--ink);text-decoration:none;font-weight:650;">设置此会话</a></div></div>
+        <div class="hero"><div><div class="eyebrow">SESSION WORKSPACE</div><h1 id="pageTitle">会话详情</h1><p id="pageSubtitle">选择一个会话开始管理。</p></div><div class="hero-actions"><button id="refreshButton" type="button">刷新状态</button><button id="deleteButton" class="danger" type="button">删除会话</button><a id="chatLink" class="primary nav-link" href="#" style="display:inline-flex;align-items:center;min-height:42px;border:1px solid var(--accent);border-radius:11px;padding:0 14px;background:var(--accent);color:#fff;text-decoration:none;font-weight:700;">聊天管理</a><a id="settingsLink" class="subtle nav-link" href="/settings" style="display:inline-flex;align-items:center;min-height:42px;border:1px solid var(--line);border-radius:11px;padding:0 14px;color:var(--ink);text-decoration:none;font-weight:650;">设置此会话</a></div></div>
         <div class="status-banner"><div class="status-copy"><div class="status-label">当前会话</div><div class="status-value" id="currentSessionLabel">—</div><div class="status-note" id="currentSessionTech">—</div></div><div class="status-badge warn" id="currentBadge"><span class="service-dot" aria-hidden="true"></span><span>读取中</span></div></div>
         <div class="detail-grid">
           <section>
@@ -2116,14 +2143,15 @@ def multi_session_html_page():
     function formatTime(value) { if (!value) return '—'; return new Date(Number(value) * 1000).toLocaleString(); }
     function currentItem() { return (statusData?.sessions || []).find(item => item.name === selected) || null; }
     function renderSessions() { const items = statusData?.sessions || []; $('sessionCount').textContent = `${items.length} 个会话`; $('sessionList').innerHTML = items.length ? items.map(item => `<button class="session-item ${item.name === selected ? 'selected' : ''}" data-session="${esc(item.name)}" type="button"><div class="session-name-row"><span class="session-display">${esc(item.display_name || item.name)}</span><span class="mini-status ${stateTone(item.state)}"><span class="service-dot"></span>${esc(stateText(item.state))}</span></div><div class="session-tech">${esc(item.name)}</div><div class="session-meta"><span>${item.auto_reply?.all_day ? '全时段自动回复' : item.auto_reply?.enabled ? '按时段自动回复' : '自动回复关闭'}</span><span>${item.auto_reply?.ai_configured ? 'AI 已配置' : '固定文案'}</span></div></button>`).join('') : '<div class="empty">WAHA 尚未返回会话。</div>'; document.querySelectorAll('[data-session]').forEach(button => button.addEventListener('click', () => selectSession(button.dataset.session))); }
-    function renderDetail() { const item = currentItem(); if (!item) { $('pageTitle').textContent = '没有可用会话'; $('pageSubtitle').textContent = '请先新建或让 WAHA 返回一个会话。'; return; } $('pageTitle').textContent = item.display_name || item.name; $('pageSubtitle').textContent = '独立管理连接状态、二维码、聊天、日志和自动回复。'; $('currentSessionLabel').textContent = item.display_name || item.name; $('currentSessionTech').textContent = item.name; $('identityName').textContent = item.display_name || item.name; $('identityTech').textContent = 'WAHA / ' + item.name; badge($('currentBadge'), item.state); badge($('identityBadge'), item.state); $('autoReplySummary').textContent = item.auto_reply?.all_day ? '全时段开启' : item.auto_reply?.enabled ? '按时段开启' : '已关闭'; $('aiSummary').textContent = item.auto_reply?.ai_configured ? '已配置（密钥隐藏）' : '未配置，使用固定文案'; $('remoteStateSummary').textContent = stateText(item.state); $('updatedSummary').textContent = formatTime(item.updated_at); $('chatLink').href = '/sessions/' + encodeURIComponent(item.name) + '/chats'; $('settingsLink').href = '/settings?session=' + encodeURIComponent(item.name); $('startButton').disabled = ['WORKING','CONNECTED','STARTING','AUTHENTICATING','SCAN_QR_CODE'].includes(item.state); $('stopButton').disabled = item.state === 'STOPPED' || item.state === 'NOT_CREATED'; $('restartButton').disabled = item.state === 'NOT_CREATED'; }
+     function renderDetail() { const item = currentItem(); if (!item) { $('pageTitle').textContent = '没有可用会话'; $('pageSubtitle').textContent = '请先新建或让 WAHA 返回一个会话。'; $('deleteButton').disabled = true; return; } $('pageTitle').textContent = item.display_name || item.name; $('pageSubtitle').textContent = '独立管理连接状态、二维码、聊天、日志和自动回复。'; $('currentSessionLabel').textContent = item.display_name || item.name; $('currentSessionTech').textContent = item.name; $('identityName').textContent = item.display_name || item.name; $('identityTech').textContent = 'WAHA / ' + item.name; badge($('currentBadge'), item.state); badge($('identityBadge'), item.state); $('autoReplySummary').textContent = item.auto_reply?.all_day ? '全时段开启' : item.auto_reply?.enabled ? '按时段开启' : '已关闭'; $('aiSummary').textContent = item.auto_reply?.ai_configured ? '已配置（密钥隐藏）' : '未配置，使用固定文案'; $('remoteStateSummary').textContent = stateText(item.state); $('updatedSummary').textContent = formatTime(item.updated_at); $('chatLink').href = '/sessions/' + encodeURIComponent(item.name) + '/chats'; $('settingsLink').href = '/settings?session=' + encodeURIComponent(item.name); $('startButton').disabled = ['WORKING','CONNECTED','STARTING','AUTHENTICATING','SCAN_QR_CODE'].includes(item.state); $('stopButton').disabled = item.state === 'STOPPED' || item.state === 'NOT_CREATED'; $('restartButton').disabled = item.state === 'NOT_CREATED'; $('deleteButton').disabled = (statusData?.sessions || []).length <= 1; }
     function renderGlobal() { const waha = statusData?.waha || {}; $('wahaSummary').textContent = waha.running ? (waha.version ? '运行中 · ' + waha.version : '运行中') : '不可用'; $('dbSummary').textContent = statusData?.database?.ok ? '数据库正常' : '数据库异常'; $('servicePill').className = 'service-pill ' + (waha.running ? 'good' : ''); $('servicePill').innerHTML = `<span class="service-dot" aria-hidden="true"></span><span>${waha.running ? 'WAHA 运行中' : 'WAHA 不可用'}</span>`; $('globalNotice').textContent = statusData?.errors?.length ? statusData.errors.join('；') : ''; }
     function renderLogs(logs, errors) { const all = [...(errors || []).map(message => ({level:'ERROR',event:'当前检查',message,created_at:Date.now()/1000})), ...(logs || [])]; $('logs').innerHTML = all.length ? all.map(log => `<div class="log ${log.level === 'ERROR' ? 'error' : ''}"><div class="log-meta"><span>${esc(log.level)} / ${esc(log.event)}</span><span>${esc(formatTime(log.created_at))}</span></div><div class="log-message">${esc(log.message)}</div></div>`).join('') : '<div class="empty">暂无当前会话记录</div>'; }
     async function refreshLogs() { if (!selected) return; try { const response = await fetch(apiSession('/logs'), {cache:'no-store'}); const data = await response.json(); if (!response.ok) throw new Error(data.message || '读取记录失败'); renderLogs(data.logs, []); } catch (error) { $('logs').innerHTML = `<div class="empty">${esc(error.message)}</div>`; } }
     function render(data) { statusData = data; const names = (data.sessions || []).map(item => item.name); if (!names.includes(selected)) selected = data.selected_session || names[0] || 'default'; renderSessions(); renderDetail(); renderGlobal(); const item = currentItem(); renderLogs(data.logs, data.errors); if (item && data.auto_reply?.theme) applyTheme(data.auto_reply.theme); const url = new URL(location.href); url.searchParams.set('session', selected); history.replaceState(null,'',url); }
     async function refresh() { try { const response = await fetch('/api/status?session=' + encodeURIComponent(selected), {cache:'no-store'}); const data = await response.json(); if (!response.ok) throw new Error(data.message || '读取状态失败'); render(data); } catch (error) { $('globalNotice').textContent = error.message; } }
     async function selectSession(name) { selected = name; $('globalNotice').textContent = ''; $('logs').innerHTML = '<div class="empty">正在读取记录...</div>'; await refresh(); }
-    async function operation(action) { const button = $(action + 'Button'); if (button) { button.disabled = true; } $('controlNotice').textContent = ''; try { const response = await mutateFetch(apiSession('/' + action), {method:'POST'}); const data = await response.json(); if (!response.ok) throw new Error(data.message || '会话操作失败'); $('controlNotice').className = 'notice success'; $('controlNotice').textContent = '操作已提交，状态正在更新。'; await refresh(); } catch (error) { $('controlNotice').className = 'notice'; $('controlNotice').textContent = error.message; } finally { renderDetail(); } }
+     async function operation(action) { const button = $(action + 'Button'); if (button) { button.disabled = true; } $('controlNotice').textContent = ''; try { const response = await mutateFetch(apiSession('/' + action), {method:'POST'}); const data = await response.json(); if (!response.ok) throw new Error(data.message || '会话操作失败'); $('controlNotice').className = 'notice success'; $('controlNotice').textContent = '操作已提交，状态正在更新。'; await refresh(); } catch (error) { $('controlNotice').className = 'notice'; $('controlNotice').textContent = error.message; } finally { renderDetail(); } }
+     async function deleteSelected() { const item = currentItem(); if (!item || (statusData?.sessions || []).length <= 1) return; if (!window.confirm('确认删除会话“' + (item.display_name || item.name) + '”？这会同时删除 WAHA 会话和面板中的关联数据。')) return; const button = $('deleteButton'); button.disabled = true; $('controlNotice').textContent = ''; try { const response = await mutateFetch('/api/sessions/' + encodeURIComponent(item.name), {method:'DELETE'}); const data = await response.json(); if (!response.ok) throw new Error(data.message || '删除会话失败'); const remaining = (statusData?.sessions || []).filter(entry => entry.name !== item.name); selected = remaining[0]?.name || 'default'; $('controlNotice').className = 'notice success'; $('controlNotice').textContent = '会话已删除。'; await refresh(); } catch (error) { $('controlNotice').className = 'notice'; $('controlNotice').textContent = error.message; } finally { renderDetail(); } }
     async function loadQr() { $('qrWrap').innerHTML = '<div class="qr-empty">正在获取二维码...</div>'; $('qrButton').disabled = true; try { const response = await fetch(apiSession('/qr?ts=' + Date.now()), {cache:'no-store'}); const type = response.headers.get('content-type') || ''; if (!response.ok || !type.startsWith('image/')) { const data = await response.json(); throw new Error(data.message || '二维码暂不可用'); } const image = document.createElement('img'); image.alt = '当前 WhatsApp 会话二维码'; image.src = URL.createObjectURL(await response.blob()); $('qrWrap').replaceChildren(image); } catch (error) { $('qrWrap').innerHTML = `<div class="qr-empty">${esc(error.message)}<br>请先启动会话后重试。</div>`; } finally { $('qrButton').disabled = false; } }
     async function pairing() { const button = $('pairingButton'); button.disabled = true; $('pairingCode').hidden = true; try { const response = await mutateFetch(apiSession('/pairing-code'), {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({phone_number:$('phoneNumber').value})}); const data = await response.json(); if (!response.ok) throw new Error(data.message || '配对码获取失败'); $('pairingCode').innerHTML = `<span>请在手机 WhatsApp 中输入</span><strong>${esc(data.code)}</strong>`; $('pairingCode').hidden = false; } catch (error) { $('controlNotice').className = 'notice'; $('controlNotice').textContent = error.message; } finally { button.disabled = false; } }
     function openNew() { $('newNotice').textContent = ''; $('newForm').reset(); $('newDialog').showModal(); $('newName').focus(); }
@@ -2138,7 +2166,7 @@ def multi_session_html_page():
     async function saveAdmin(row) { const id = row.dataset.adminId; const button = row.querySelector('.admin-save'); const password = row.querySelector('.admin-password').value; button.disabled = true; $('adminNotice').textContent = ''; try { const response = await mutateFetch('/api/admin/users/' + encodeURIComponent(id), {method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({is_active:row.querySelector('.admin-active').checked})}); const data = await response.json(); if (!response.ok) throw new Error(data.message || '管理员保存失败'); if (password) { const passwordResponse = await mutateFetch('/api/admin/users/' + encodeURIComponent(id) + '/password', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password})}); const passwordData = await passwordResponse.json(); if (!passwordResponse.ok) throw new Error(passwordData.message || '密码保存失败'); row.querySelector('.admin-password').value = ''; } $('adminNotice').className = 'notice success'; $('adminNotice').textContent = '管理员设置已保存'; await loadAdmins(); } catch (error) { $('adminNotice').className = 'notice'; $('adminNotice').textContent = error.message; } finally { button.disabled = false; } }
     async function createAdmin() { const button = $('createAdmin'); button.disabled = true; $('adminNotice').textContent = ''; try { const response = await mutateFetch('/api/admin/users', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:$('newAdminName').value.trim(),password:$('newAdminPassword').value})}); const data = await response.json(); if (!response.ok) throw new Error(data.message || '管理员创建失败'); $('newAdminName').value = ''; $('newAdminPassword').value = ''; $('adminNotice').className = 'notice success'; $('adminNotice').textContent = '管理员已创建'; await loadAdmins(); } catch (error) { $('adminNotice').className = 'notice'; $('adminNotice').textContent = error.message; } finally { button.disabled = false; } }
     function openAdmin() { $('adminNotice').textContent = ''; $('adminDialog').showModal(); loadAdmins(); }
-    $('themeSelect').addEventListener('change', event => saveTheme(event.target.value)); $('refreshButton').addEventListener('click', refresh); $('refreshLogsButton').addEventListener('click', refreshLogs); $('newSessionButton').addEventListener('click', openNew); $('newCancel').addEventListener('click', () => $('newDialog').close()); $('newForm').addEventListener('submit', createNew); $('renameButton').addEventListener('click', openRename); $('renameCancel').addEventListener('click', () => $('renameDialog').close()); $('renameForm').addEventListener('submit', rename); $('startButton').addEventListener('click', () => operation('start')); $('stopButton').addEventListener('click', () => operation('stop')); $('restartButton').addEventListener('click', () => operation('restart')); $('ensureButton').addEventListener('click', () => operation('ensure')); $('qrButton').addEventListener('click', loadQr); $('pairingButton').addEventListener('click', pairing); $('updateButton').addEventListener('click', checkUpdates); $('updateRun').addEventListener('click', checkUpdates); $('updateClose').addEventListener('click', () => $('updateDialog').close()); $('adminButton').addEventListener('click', openAdmin); $('adminClose').addEventListener('click', () => $('adminDialog').close()); $('createAdmin').addEventListener('click', createAdmin);
+     $('themeSelect').addEventListener('change', event => saveTheme(event.target.value)); $('refreshButton').addEventListener('click', refresh); $('deleteButton').addEventListener('click', deleteSelected); $('refreshLogsButton').addEventListener('click', refreshLogs); $('newSessionButton').addEventListener('click', openNew); $('newCancel').addEventListener('click', () => $('newDialog').close()); $('newForm').addEventListener('submit', createNew); $('renameButton').addEventListener('click', openRename); $('renameCancel').addEventListener('click', () => $('renameDialog').close()); $('renameForm').addEventListener('submit', rename); $('startButton').addEventListener('click', () => operation('start')); $('stopButton').addEventListener('click', () => operation('stop')); $('restartButton').addEventListener('click', () => operation('restart')); $('ensureButton').addEventListener('click', () => operation('ensure')); $('qrButton').addEventListener('click', loadQr); $('pairingButton').addEventListener('click', pairing); $('updateButton').addEventListener('click', checkUpdates); $('updateRun').addEventListener('click', checkUpdates); $('updateClose').addEventListener('click', () => $('updateDialog').close()); $('adminButton').addEventListener('click', openAdmin); $('adminClose').addEventListener('click', () => $('adminDialog').close()); $('createAdmin').addEventListener('click', createAdmin);
     <!-- SPONSOR_SCRIPT -->
     const storedTheme = localStorage.getItem('waha-panel-theme'); if (storedTheme) applyTheme(storedTheme); refresh(); setInterval(refresh, 10000);
   </script>
@@ -2441,7 +2469,7 @@ class PanelHandler(BaseHTTPRequestHandler):
         action = parts[1]
         allowed = {
             "overview", "messages", "media", "events",
-            "send-text", "send-image", "takeover", "resume-ai",
+            "send-text", "send-image", "takeover", "resume-ai", "note",
         }
         if action not in allowed:
             raise ValueError("不支持的聊天操作")
@@ -2537,6 +2565,12 @@ class PanelHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.write_event_stream_body(body)
             return
+        if action == "note":
+            chat_ref = query.get("chat_ref", [""])[0]
+            if not chat_ref:
+                raise ValueError("缺少聊天引用")
+            self.send_json(chat.note(name, chat_ref))
+            return
         raise ValueError("不支持的聊天查询操作")
 
     def send_chat_post(self, route):
@@ -2562,6 +2596,8 @@ class PanelHandler(BaseHTTPRequestHandler):
                 result = chat.takeover(name, chat_ref)
             elif action == "resume-ai":
                 result = chat.resume_ai(name, chat_ref)
+            elif action == "note":
+                result = chat.save_note(name, chat_ref, payload.get("note"))
             else:
                 raise ValueError("不支持的聊天写入操作")
         chat.broker.publish(name, {"type": "refresh", "reason": action})
@@ -2932,6 +2968,12 @@ class PanelHandler(BaseHTTPRequestHandler):
         payload = self.read_json()
         self.send_json(self.state.update_session_display_name(name, payload.get("display_name")))
 
+    def send_session_delete(self, route):
+        name, action = self.session_route(route)
+        if name is None or action is not None:
+            raise ValueError("会话删除路径不正确")
+        self.send_json(self.state.delete_session(name))
+
     def do_GET(self):
         route = urlparse(self.path).path
         try:
@@ -3154,6 +3196,20 @@ class PanelHandler(BaseHTTPRequestHandler):
             except Exception:
                 self.state.log("ERROR", "translation.cache", "翻译缓存清理失败")
                 self.send_json({"message": "清理翻译缓存失败"}, HTTPStatus.INTERNAL_SERVER_ERROR)
+            return
+        if route == "/api/sessions" or route.startswith("/api/sessions/"):
+            try:
+                self.send_session_delete(route)
+            except (ChatServiceError, TranslationError, RequestTooLarge, UnsupportedRequestMedia) as error:
+                self.send_service_error(error)
+            except WahaApiError as error:
+                self.state.log("ERROR", "session.delete", str(error))
+                self.send_json({"message": redact_error(error, self.state.api_key)}, HTTPStatus.BAD_GATEWAY)
+            except (ValueError, KeyError) as error:
+                self.send_json({"message": str(error)}, HTTPStatus.BAD_REQUEST)
+            except Exception as error:
+                self.state.log("ERROR", "session.delete", str(error))
+                self.send_json({"message": "删除会话失败，请查看系统记录"}, HTTPStatus.INTERNAL_SERVER_ERROR)
             return
         if route.startswith("/api/admin/ai-business"):
             try:

@@ -36,7 +36,7 @@ def _safe_error(error):
 class UpdateService:
     """Query public metadata, cache it briefly, and never mutate Docker state."""
 
-    def __init__(self, current_panel="1.0.1", current_waha="latest-2026.8.2",
+    def __init__(self, current_panel="1.0.2", current_waha="latest-2026.8.2",
                  panel_repository="cangnan88/waha-panel", waha_repository="devlikeapro/waha",
                  opener=None, clock=None, cache_ttl=900):
         self.current = {"panel": str(current_panel or ""), "waha": str(current_waha or "")}
