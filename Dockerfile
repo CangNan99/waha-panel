@@ -1,3 +1,10 @@
+FROM node:24-alpine AS frontend-check
+
+WORKDIR /src
+COPY panel/app.py panel/app.py
+COPY scripts/check_frontend_syntax.mjs scripts/check_frontend_syntax.mjs
+RUN node scripts/check_frontend_syntax.mjs
+
 FROM python:3.12-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \

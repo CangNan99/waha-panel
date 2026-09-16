@@ -34,8 +34,8 @@ if [[ ! -f "$ROOT/.env" ]]; then
     "WAHA_DASHBOARD_PASSWORD=$waha_dashboard_password" \
     "WAHA_WEBHOOK_SECRET=$webhook_secret" \
     "PANEL_DATA_ENCRYPTION_KEY=$panel_data_key" \
-    'PANEL_IMAGE=docker.io/cangnan88/waha-panel:1.0.0' \
-    'PANEL_VERSION=1.0.0' \
+    'PANEL_IMAGE=docker.io/cangnan88/waha-panel:1.0.1' \
+    'PANEL_VERSION=1.0.1' \
     'PANEL_PORT=3003' 'PANEL_BIND_ADDRESS=127.0.0.1' \
     'WAHA_PORT=3002' 'WAHA_BIND_ADDRESS=127.0.0.1' \
     'PORTABLE_VOLUME_PREFIX=waha-release' \
