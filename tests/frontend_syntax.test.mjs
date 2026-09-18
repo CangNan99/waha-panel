@@ -22,3 +22,13 @@ test('administrator save handlers close their forEach and addEventListener calls
 test('chat management inline JavaScript has valid syntax', () => {
   assert.doesNotThrow(() => checkInlineScripts(chatSource, 'panel/chat_page.py'));
 });
+
+test('chat management exposes engagement handlers without replacing dialogs during message refresh', () => {
+  for (const name of ['loadLabels', 'saveManualLabel', 'loadSummary', 'generateSummary', 'loadFollowUps', 'createFollowUp', 'cancelFollowUp']) {
+    assert.match(chatSource, new RegExp(`function ${name}\\(`));
+  }
+  assert.match(chatSource, /id="followUpDialog"/);
+  assert.match(chatSource, /id="labelDialog"/);
+  assert.match(chatSource, /id="summaryDialog"/);
+  assert.match(chatSource, /messageStack.*replaceChildren/);
+});

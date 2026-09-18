@@ -146,6 +146,26 @@ class ChatPageRegressionTests(unittest.TestCase):
         self.assertIn("客户备注", page)
         self.assertIn("sessionSelect", page)
 
+    def test_page_contains_chat_engagement_controls(self):
+        page = chat_management_page("default")
+        for control_id in ("followUpButton", "labelButton", "summaryButton", "followUpDialog", "labelDialog", "summaryDialog"):
+            self.assertIn(f'id="{control_id}"', page)
+        self.assertIn("手动", page)
+        self.assertIn("AI", page)
+        for delay in ("24h", "3d", "7d", "15d"):
+            self.assertIn(f'value="{delay}"', page)
+        for mode in ("AI", "FIXED"):
+            self.assertIn(f'value="{mode}"', page)
+        self.assertIn("当前总结", page)
+
+    def test_chat_engagement_script_has_state_aware_handlers(self):
+        page = chat_management_page("default")
+        for function_name in ("loadLabels", "saveManualLabel", "loadSummary", "generateSummary", "loadFollowUps", "createFollowUp", "cancelFollowUp"):
+            self.assertIn(f"function {function_name}", page)
+        self.assertIn("state.selected.chat_ref", page)
+        self.assertIn("$('messageStack').replaceChildren", page)
+        self.assertNotIn("$('messageStack').replaceChildren($('labelDialog'))", page)
+
 
 if __name__ == "__main__":
     unittest.main()
