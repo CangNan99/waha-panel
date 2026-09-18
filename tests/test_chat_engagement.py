@@ -765,7 +765,9 @@ class PanelEngagementRouteTests(unittest.TestCase):
         self.assertEqual(PanelHandler.chat_route("/api/chat/sessions/default/follow-ups"), ("default", "follow-ups"))
         self.assertEqual(PanelHandler.chat_route("/api/chat/sessions/default/follow-ups/7/cancel"), ("default", "follow-ups/7/cancel"))
         self.assertEqual(PanelHandler.chat_route("/api/chat/sessions/default/labels"), ("default", "labels"))
-        self.assertEqual(PanelHandler.chat_route("/api/chat/sessions/default/labels/VIP"), ("default", "labels/VIP"))
+        self.assertEqual(PanelHandler.chat_route("/api/chat/sessions/default/labels/7"), ("default", "labels/7"))
+        with self.assertRaises(ValueError):
+            PanelHandler.chat_route("/api/chat/sessions/default/labels/VIP")
         self.assertEqual(PanelHandler.chat_route("/api/chat/sessions/default/summary"), ("default", "summary"))
 
     def test_enable_and_background_lifecycle_are_idempotent(self):
@@ -801,8 +803,13 @@ class PanelEngagementRouteTests(unittest.TestCase):
 
         responses.append(self.request("POST", "/api/chat/sessions/default/labels", {"chat_ref": self.chat_ref, "label": "VIP"}, csrf=True))
         responses.append(self.request("GET", f"/api/chat/sessions/default/labels?chat_ref={ref}"))
-        responses.append(self.request("PUT", f"/api/chat/sessions/default/labels/{quote('VIP', safe='')}", {"chat_ref": self.chat_ref, "label": "Priority"}, csrf=True))
-        responses.append(self.request("DELETE", f"/api/chat/sessions/default/labels/{quote('Priority', safe='')}?chat_ref={ref}", csrf=True))
+        labels_payload = responses[-1][1]
+        self.assertEqual(labels_payload["manual"][0]["label"], "VIP")
+        label_id = labels_payload["manual"][0]["id"]
+        self.assertIsInstance(label_id, int)
+        responses.append(self.request("PUT", f"/api/chat/sessions/default/labels/{label_id}", {"chat_ref": self.chat_ref, "label": "Priority"}, csrf=True))
+        responses.append(self.request("DELETE", f"/api/chat/sessions/default/labels/{label_id}?chat_ref={ref}", csrf=True))
+        self.assertEqual(self.request("PUT", "/api/chat/sessions/default/labels/VIP", {"chat_ref": self.chat_ref, "label": "Nope"}, csrf=True)[0], 400)
 
         responses.append(self.request("GET", f"/api/chat/sessions/default/summary?chat_ref={ref}"))
         responses.append(self.request("POST", "/api/chat/sessions/default/summary", {"chat_ref": self.chat_ref}, csrf=True))

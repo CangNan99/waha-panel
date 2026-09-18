@@ -2503,7 +2503,9 @@ class PanelHandler(BaseHTTPRequestHandler):
         }
         if action not in allowed and not (
             len(parts) == 4 and parts[1] == "follow-ups" and parts[2] and parts[3] == "cancel"
-        ) and not (len(parts) == 3 and parts[1] == "labels" and parts[2]):
+        ) and not (
+            len(parts) == 3 and parts[1] == "labels" and parts[2].isascii() and parts[2].isdigit()
+        ):
             raise ValueError("不支持的聊天操作")
         return name, action
 
@@ -2554,7 +2556,7 @@ class PanelHandler(BaseHTTPRequestHandler):
         if action == "labels":
             if not chat_ref:
                 raise ValueError("缺少聊天引用")
-            self.send_json(chat.customer_labels(name, chat_ref))
+            self.send_json(chat.customer_label_records(name, chat_ref))
             return
         if action == "summary":
             if not chat_ref:
@@ -2706,21 +2708,24 @@ class PanelHandler(BaseHTTPRequestHandler):
             raise ValueError("不支持的标签操作")
         query = parse_qs(urlparse(self.path).query)
         chat_ref = query.get("chat_ref", [""])[0]
-        payload = self.read_api_json() if method != "DELETE" else {}
+        payload = {}
+        if method != "DELETE" or int(self.headers.get("Content-Length", "0") or 0) > 0:
+            payload = self.read_api_json()
         if not chat_ref:
             chat_ref = payload.get("chat_ref")
         if not chat_ref:
             raise ValueError("缺少聊天引用")
         if method == "POST" and action == "labels":
-            self.send_json(chat.add_manual_label(name, chat_ref, payload.get("label"), payload.get("source", "MANUAL")), HTTPStatus.CREATED)
+            chat.add_manual_label(name, chat_ref, payload.get("label"), payload.get("source", "MANUAL"))
+            self.send_json(chat.customer_label_records(name, chat_ref), HTTPStatus.CREATED)
             return
         if method == "PUT" and action.startswith("labels/"):
-            old_label = unquote(action[len("labels/"):])
-            self.send_json(chat.update_manual_label(name, chat_ref, old_label, payload.get("label", payload.get("new_label")), payload.get("source", "MANUAL")))
+            label_id = unquote(action[len("labels/"):])
+            self.send_json(chat.update_manual_label_by_id(name, chat_ref, label_id, payload.get("label", payload.get("new_label")), payload.get("source", "MANUAL")))
             return
         if method == "DELETE" and action.startswith("labels/"):
-            label = unquote(action[len("labels/"):])
-            self.send_json(chat.delete_manual_label(name, chat_ref, label, payload.get("source", "MANUAL")))
+            label_id = unquote(action[len("labels/"):])
+            self.send_json(chat.delete_manual_label_by_id(name, chat_ref, label_id, payload.get("source", "MANUAL")))
             return
         raise ValueError("不支持的标签操作")
 
@@ -3414,8 +3419,8 @@ def main():
     port = int(os.environ.get("PORT", "3001"))
     server = ThreadingHTTPServer(("0.0.0.0", port), PanelHandler)
     print(f"WAHA local panel listening on {port}", flush=True)
-    state.start_background_services()
     try:
+        state.start_background_services()
         server.serve_forever()
     finally:
         server.shutdown()

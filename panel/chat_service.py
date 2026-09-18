@@ -680,6 +680,25 @@ class ChatService:
         for source, label in rows: result["manual" if source == "MANUAL" else "ai"].append(label)
         return result
 
+    def customer_label_records(self, session, chat_ref):
+        """Return labels with stable numeric IDs for HTTP resource identity."""
+        name = _session_name(session); chat_id = self._decode_chat(name, chat_ref); key = self._chat_key(name, chat_id)
+        connection = sqlite3.connect(self.database_path)
+        try:
+            rows = connection.execute(
+                "SELECT id,source,label FROM customer_labels "
+                "WHERE session_name=? AND chat_key_hmac=? ORDER BY id",
+                (name, key),
+            ).fetchall()
+        finally:
+            connection.close()
+        result = {"manual": [], "ai": []}
+        for label_id, source, label in rows:
+            result["manual" if source == "MANUAL" else "ai"].append(
+                {"id": int(label_id), "label": label}
+            )
+        return result
+
     def add_manual_label(self, session, chat_ref, label, source="MANUAL"):
         if str(source or "").upper() != "MANUAL":
             raise ChatServiceError("只能修改人工标签", "INVALID_LABEL_SOURCE")
@@ -694,6 +713,55 @@ class ChatService:
         if str(source or "").upper() != "MANUAL":
             raise ChatServiceError("只能修改人工标签", "INVALID_LABEL_SOURCE")
         return self._label_mutation(session, chat_ref, label, "delete")
+
+    @staticmethod
+    def _label_id(value):
+        try:
+            label_id = int(str(value).strip())
+        except (TypeError, ValueError) as error:
+            raise ChatServiceError("标签编号无效", "INVALID_LABEL_ID") from error
+        if label_id <= 0:
+            raise ChatServiceError("标签编号无效", "INVALID_LABEL_ID")
+        return label_id
+
+    def update_manual_label_by_id(self, session, chat_ref, label_id, new_label, source="MANUAL"):
+        if str(source or "").upper() != "MANUAL":
+            raise ChatServiceError("只能修改人工标签", "INVALID_LABEL_SOURCE")
+        name = _session_name(session); chat_id = self._decode_chat(name, chat_ref); key = self._chat_key(name, chat_id)
+        value = self._label_value(new_label)
+        label_id = self._label_id(label_id)
+        connection = sqlite3.connect(self.database_path); now = int(self.clock())
+        try:
+            changed = connection.execute(
+                "UPDATE customer_labels SET label=?,updated_at=? WHERE id=? AND session_name=? "
+                "AND chat_key_hmac=? AND source='MANUAL'",
+                (value, now, label_id, name, key),
+            ).rowcount
+            if not changed:
+                raise ChatServiceError("标签不存在", "LABEL_NOT_FOUND")
+            connection.commit()
+        finally:
+            connection.close()
+        return self.customer_label_records(name, chat_ref)
+
+    def delete_manual_label_by_id(self, session, chat_ref, label_id, source="MANUAL"):
+        if str(source or "").upper() != "MANUAL":
+            raise ChatServiceError("只能修改人工标签", "INVALID_LABEL_SOURCE")
+        name = _session_name(session); chat_id = self._decode_chat(name, chat_ref); key = self._chat_key(name, chat_id)
+        label_id = self._label_id(label_id)
+        connection = sqlite3.connect(self.database_path)
+        try:
+            changed = connection.execute(
+                "DELETE FROM customer_labels WHERE id=? AND session_name=? AND chat_key_hmac=? "
+                "AND source='MANUAL'",
+                (label_id, name, key),
+            ).rowcount
+            if not changed:
+                raise ChatServiceError("标签不存在", "LABEL_NOT_FOUND")
+            connection.commit()
+        finally:
+            connection.close()
+        return self.customer_label_records(name, chat_ref)
 
     def _label_mutation(self, session, chat_ref, label, action, old_label=None):
         name = _session_name(session); chat_id = self._decode_chat(name, chat_ref); key = self._chat_key(name, chat_id)
