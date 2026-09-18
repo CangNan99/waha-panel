@@ -8,6 +8,7 @@ from urllib.parse import urlparse
 from panel.app import PanelState, WahaClient, init_db, multi_session_html_page
 from panel.chat_page import chat_management_page
 from panel.chat_service import ChatService
+from panel.update_service import UpdateService
 
 
 class ReferenceCodec:
@@ -162,6 +163,12 @@ class QrAndReleaseTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[1]
         release = json.loads((root / "panel-release.json").read_text(encoding="utf-8"))
         compose = (root / "docker-compose.yml").read_text(encoding="utf-8")
+        env_example = (root / ".env.example").read_text(encoding="utf-8")
+        install_sh = (root / "install.sh").read_text(encoding="utf-8")
+        install_ps1 = (root / "install.ps1").read_text(encoding="utf-8")
+        install_docs = (root / "INSTALL.zh-CN.md").read_text(encoding="utf-8")
+        release_plan = (root / "docs" / "superpowers" / "plans" / "2026-09-18-chat-engagement.md").read_text(encoding="utf-8")
+        release_design = (root / "docs" / "superpowers" / "specs" / "2026-09-18-chat-engagement-design.md").read_text(encoding="utf-8")
         readme = (root / "README.md").read_text(encoding="utf-8")
         readme_zh = (root / "README.zh-CN.md").read_text(encoding="utf-8")
 
@@ -170,6 +177,14 @@ class QrAndReleaseTests(unittest.TestCase):
         self.assertIn("${PANEL_IMAGE:-docker.io/cangnan88/waha-panel:1.0.3}", compose)
         self.assertIn("${PANEL_VERSION:-1.0.3}", compose)
         self.assertIn('os.environ.get("PANEL_VERSION", "1.0.3")', (root / "panel" / "app.py").read_text(encoding="utf-8"))
+        for installer in (env_example, install_sh, install_ps1):
+            self.assertIn("PANEL_IMAGE=docker.io/cangnan88/waha-panel:1.0.3", installer)
+            self.assertIn("PANEL_VERSION=1.0.3", installer)
+            self.assertNotIn("PANEL_IMAGE=docker.io/cangnan88/waha-panel:1.0.2", installer)
+            self.assertNotIn("PANEL_VERSION=1.0.2", installer)
+        self.assertIn("docker.io/cangnan88/waha-panel:1.0.3", install_docs)
+        self.assertIn("1.0.2", release_plan)
+        self.assertIn("1.0.2", release_design)
         self.assertIn("docker.io/cangnan88/waha-panel:1.0.3", readme)
         self.assertIn("docker.io/cangnan88/waha-panel:1.0.3", readme_zh)
         self.assertIn("${WAHA_IMAGE:-devlikeapro/waha:latest-2026.8.2}", compose)
@@ -178,6 +193,9 @@ class QrAndReleaseTests(unittest.TestCase):
         self.assertIn("- internal", compose)
         self.assertIn("[INSTALL.zh-CN.md](INSTALL.zh-CN.md)", readme)
         self.assertIn("[INSTALL.zh-CN.md](INSTALL.zh-CN.md)", readme_zh)
+
+    def test_update_service_defaults_to_panel_1_0_3(self):
+        self.assertEqual(UpdateService().current["panel"], "1.0.3")
 
 
 class ChatPageRegressionTests(unittest.TestCase):
