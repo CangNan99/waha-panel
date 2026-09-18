@@ -1,11 +1,13 @@
 import sqlite3
 import json
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
 from panel.app import init_db
-from panel.chat_service import ChatService
+from panel.chat_automation import AutomationError, ChatAutomationService
+from panel.chat_service import ChatSendError, ChatService
 from panel.translation_service import TranslationError, TranslationService
 
 
@@ -320,3 +322,311 @@ class TranslationServiceEngagementTests(unittest.TestCase):
             service.summarize_conversation([{"from_me": False, "body": "hello"}])
         self.assertEqual(caught.exception.code, "SUMMARY_RESULT_INVALID")
         self.assertEqual(len(opener.requests), 2)
+
+
+class _AutomationChat:
+    def __init__(self, database):
+        self.database = database
+        self.codec = _Codec()
+        self.last_inbound_at = None
+        self.human_takeover = False
+        self.history_calls = []
+        self.send_calls = []
+        self.send_state = "SENT"
+        self.sent_event = threading.Event()
+        self._lock = threading.Lock()
+
+    def chat_identity(self, session, chat_ref):
+        if session != "default" or chat_ref != "chat-ref":
+            raise ValueError("invalid chat reference")
+        return {"chat_id": "chat-1@c.us", "chat_key_hmac": "chat-key"}
+
+    def has_inbound_since(self, session, chat_id, since_timestamp):
+        return self.last_inbound_at is not None and self.last_inbound_at > since_timestamp
+
+    def is_human_takeover(self, session, chat_id):
+        return self.human_takeover
+
+    def history_for_id(self, session, chat_id, limit=20):
+        self.history_calls.append((session, chat_id, limit))
+        return [{"timestamp": 1000, "from_me": False, "body": "Hello", "message_id": "m1"}]
+
+    def send_automated_text(self, session, chat_id, text, client_request_id):
+        with self._lock:
+            self.send_calls.append((session, chat_id, text, client_request_id))
+            self.sent_event.set()
+        state = self.send_state
+        message_id = "wamid.automation" if state == "SENT" else None
+        connection = sqlite3.connect(self.database)
+        try:
+            connection.execute(
+                "INSERT OR REPLACE INTO automated_send_requests"
+                "(client_request_id,session_name,chat_id,payload_hash,state,waha_message_id,error_code,updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                (client_request_id, session, chat_id, "fake", state, message_id,
+                 "WAHA_SEND_UNKNOWN" if state == "UNKNOWN" else None, 0),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        if state == "UNKNOWN":
+            raise ChatSendError("uncertain", "UNKNOWN", "WAHA_SEND_UNKNOWN")
+        if state == "FAILED":
+            raise ChatSendError("failed", "FAILED", "WAHA_SEND_FAILED")
+        return {"request_id": client_request_id, "state": "SENT", "kind": "text"}
+
+
+class _AutomationTranslation:
+    def __init__(self):
+        self.generated = []
+        self.translated = []
+        self.fail = None
+
+    def generate_follow_up(self, messages):
+        self.generated.append(messages)
+        if self.fail:
+            raise self.fail
+        return {"target_language_code": "en", "target_language_name_zh": "英语", "message": "Generated follow-up"}
+
+    def translate_follow_up(self, text, messages):
+        self.translated.append((text, messages))
+        if self.fail:
+            raise self.fail
+        return {"target_language_code": "en", "target_language_name_zh": "英语", "message": "Translated follow-up"}
+
+
+class AutomationSchedulerTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.database = Path(self.temp.name) / "panel.sqlite3"
+        init_db(self.database, seed_business=False)
+        self.clock = _Clock(10_000)
+        self.fake_chat = _AutomationChat(self.database)
+        self.fake_translation = _AutomationTranslation()
+        self.automation = ChatAutomationService(
+            self.database, self.fake_chat, self.fake_translation, clock=self.clock,
+        )
+        self.chat_ref = "chat-ref"
+
+    def tearDown(self):
+        self.automation.stop()
+        self.temp.cleanup()
+
+    def _task_row(self, task_id):
+        connection = sqlite3.connect(self.database)
+        connection.row_factory = sqlite3.Row
+        try:
+            return dict(connection.execute("SELECT * FROM follow_up_tasks WHERE id=?", (task_id,)).fetchone())
+        finally:
+            connection.close()
+
+    def test_due_times_are_calculated_from_creation_for_every_delay(self):
+        delays = {"24h": 86_400, "3d": 259_200, "7d": 604_800, "15d": 1_296_000}
+        for code, seconds in delays.items():
+            task = self.automation.create_task("default", self.chat_ref, code, "AI")
+            self.assertEqual(task["created_at"], 10_000)
+            self.assertEqual(task["due_at"], 10_000 + seconds)
+
+    def test_creation_validates_inputs_and_encrypts_sensitive_values(self):
+        with self.assertRaises(AutomationError):
+            self.automation.create_task("default", self.chat_ref, "1h", "AI")
+        with self.assertRaises(AutomationError):
+            self.automation.create_task("default", self.chat_ref, "24h", "OTHER")
+        with self.assertRaises(AutomationError):
+            self.automation.create_task("default", self.chat_ref, "24h", "FIXED", "  ")
+        task = self.automation.create_task("default", self.chat_ref, "24h", "FIXED", "Sensitive copy")
+        row = self._task_row(task["id"])
+        self.assertNotIn("chat-1@c.us", row["chat_id_ciphertext"])
+        self.assertNotIn("Sensitive copy", row["fixed_copy_ciphertext"])
+        listed = self.automation.list_tasks("default", self.chat_ref)["items"][0]
+        self.assertNotIn("fixed_copy", listed)
+        self.assertNotIn("chat_id", listed)
+
+    def test_due_task_skips_after_new_inbound_message(self):
+        task = self.automation.create_task("default", self.chat_ref, "24h", "AI")
+        self.clock.value = task["due_at"]
+        self.fake_chat.last_inbound_at = task["created_at"] + 1
+        self.assertEqual(self.automation.run_once(), 1)
+        listed = self.automation.list_tasks("default", self.chat_ref)["items"][0]
+        self.assertEqual(listed["state"], "SKIPPED")
+        self.assertEqual(listed["skip_reason"], "创建后客户已发新消息")
+        self.assertEqual(self.fake_translation.generated, [])
+        self.assertEqual(self.fake_chat.send_calls, [])
+
+    def test_due_task_skips_during_human_takeover(self):
+        task = self.automation.create_task("default", self.chat_ref, "24h", "AI")
+        self.clock.value = task["due_at"]
+        self.fake_chat.human_takeover = True
+        self.assertEqual(self.automation.run_once(), 1)
+        listed = self.automation.list_tasks("default", self.chat_ref)["items"][0]
+        self.assertEqual((listed["state"], listed["skip_reason"]), ("SKIPPED", "人工接管中"))
+        self.assertEqual(self.fake_chat.send_calls, [])
+
+    def test_ai_mode_uses_recent_history_and_persistent_send_request(self):
+        task = self.automation.create_task("default", self.chat_ref, "24h", "AI")
+        self.clock.value = task["due_at"]
+        self.assertEqual(self.automation.run_once(), 1)
+        row = self._task_row(task["id"])
+        self.assertEqual(row["state"], "SENT")
+        self.assertEqual(row["waha_message_id"], "wamid.automation")
+        self.assertEqual(self.fake_chat.history_calls, [("default", "chat-1@c.us", 20)])
+        self.assertEqual(self.fake_chat.send_calls[0][2], "Generated follow-up")
+        self.assertEqual(self.fake_chat.send_calls[0][3], row["client_request_id"])
+
+    def test_fixed_mode_translates_copy_and_never_sends_source(self):
+        task = self.automation.create_task("default", self.chat_ref, "24h", "FIXED", "Original copy")
+        self.clock.value = task["due_at"]
+        self.assertEqual(self.automation.run_once(), 1)
+        self.assertEqual(self.fake_translation.translated[0][0], "Original copy")
+        self.assertEqual(self.fake_chat.send_calls[0][2], "Translated follow-up")
+
+    def test_ai_failure_is_terminal_and_does_not_send(self):
+        task = self.automation.create_task("default", self.chat_ref, "24h", "FIXED", "Original copy")
+        self.fake_translation.fail = TranslationError("EMPTY_CONTEXT", "No usable context")
+        self.clock.value = task["due_at"]
+        self.assertEqual(self.automation.run_once(), 1)
+        row = self._task_row(task["id"])
+        self.assertEqual((row["state"], row["error_code"]), ("FAILED", "EMPTY_CONTEXT"))
+        self.assertEqual(self.fake_chat.send_calls, [])
+
+    def test_unexpected_errors_and_task_content_are_not_logged(self):
+        logs = []
+        automation = ChatAutomationService(
+            self.database, self.fake_chat, self.fake_translation,
+            logger=lambda level, message: logs.append((level, message)), clock=self.clock,
+        )
+        try:
+            task = automation.create_task(
+                "default", self.chat_ref, "24h", "FIXED", "private fixed copy",
+            )
+            self.fake_translation.fail = RuntimeError("private upstream response")
+            self.clock.value = task["due_at"]
+            self.assertEqual(automation.run_once(), 1)
+            self.assertEqual(self._task_row(task["id"])["error_message"], "跟进任务执行失败")
+            logged = " ".join(message for _level, message in logs)
+            self.assertNotIn("private fixed copy", logged)
+            self.assertNotIn("private upstream response", logged)
+        finally:
+            automation.stop()
+
+    def test_unknown_send_is_not_selected_again(self):
+        task = self.automation.create_task("default", self.chat_ref, "24h", "AI")
+        self.clock.value = task["due_at"]
+        self.fake_chat.send_state = "UNKNOWN"
+        self.assertEqual(self.automation.run_once(), 1)
+        self.assertEqual(self._task_row(task["id"])["state"], "UNKNOWN")
+        self.assertEqual(self.automation.run_once(), 0)
+        self.assertEqual(len(self.fake_chat.send_calls), 1)
+
+    def test_failed_send_is_terminal(self):
+        task = self.automation.create_task("default", self.chat_ref, "24h", "AI")
+        self.clock.value = task["due_at"]
+        self.fake_chat.send_state = "FAILED"
+        self.assertEqual(self.automation.run_once(), 1)
+        row = self._task_row(task["id"])
+        self.assertEqual((row["state"], row["error_code"]), ("FAILED", "WAHA_SEND_FAILED"))
+        self.assertEqual(self.automation.run_once(), 0)
+        self.assertEqual(len(self.fake_chat.send_calls), 1)
+
+    def test_cancellation_prevents_execution_and_is_idempotent(self):
+        task = self.automation.create_task("default", self.chat_ref, "24h", "AI")
+        cancelled = self.automation.cancel_task("default", task["id"])
+        self.assertEqual(cancelled["state"], "CANCELLED")
+        self.assertEqual(self.automation.cancel_task("default", task["id"])["state"], "CANCELLED")
+        self.clock.value = task["due_at"]
+        self.assertEqual(self.automation.run_once(), 0)
+        self.assertEqual(self.fake_chat.send_calls, [])
+
+    def test_concurrent_claim_sends_once(self):
+        task = self.automation.create_task("default", self.chat_ref, "24h", "AI")
+        self.clock.value = task["due_at"]
+        gate = threading.Barrier(3)
+        results = []
+        errors = []
+
+        def run():
+            try:
+                gate.wait()
+                results.append(self.automation.run_once())
+            except Exception as error:
+                errors.append(error)
+
+        threads = [threading.Thread(target=run) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        gate.wait()
+        for thread in threads:
+            thread.join(5)
+        self.assertEqual(errors, [])
+        self.assertEqual(sorted(results), [0, 1])
+        self.assertEqual(len(self.fake_chat.send_calls), 1)
+
+    def test_restart_marks_unresolved_running_unknown_without_resend(self):
+        task = self.automation.create_task("default", self.chat_ref, "24h", "AI")
+        connection = sqlite3.connect(self.database)
+        connection.execute("UPDATE follow_up_tasks SET state='RUNNING',claimed_at=? WHERE id=?", (10_001, task["id"]))
+        connection.commit()
+        connection.close()
+        restarted = ChatAutomationService(self.database, self.fake_chat, self.fake_translation, clock=self.clock)
+        try:
+            self.assertEqual(self._task_row(task["id"])["state"], "UNKNOWN")
+            self.clock.value = task["due_at"]
+            self.assertEqual(restarted.run_once(), 0)
+            self.assertEqual(self.fake_chat.send_calls, [])
+        finally:
+            restarted.stop()
+
+    def test_restart_recovers_sent_task_from_idempotency_ledger(self):
+        task = self.automation.create_task("default", self.chat_ref, "24h", "AI")
+        row = self._task_row(task["id"])
+        connection = sqlite3.connect(self.database)
+        connection.execute("UPDATE follow_up_tasks SET state='RUNNING',claimed_at=? WHERE id=?", (10_001, task["id"]))
+        connection.execute(
+            "INSERT INTO automated_send_requests"
+            "(client_request_id,session_name,chat_id,payload_hash,state,waha_message_id,error_code,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            (row["client_request_id"], "default", "chat-1@c.us", "fake", "SENT", "wamid.recovered", None, 10_002),
+        )
+        connection.commit()
+        connection.close()
+        restarted = ChatAutomationService(self.database, self.fake_chat, self.fake_translation, clock=self.clock)
+        try:
+            recovered = self._task_row(task["id"])
+            self.assertEqual((recovered["state"], recovered["waha_message_id"]), ("SENT", "wamid.recovered"))
+        finally:
+            restarted.stop()
+
+    def test_resume_expired_takeovers_only_updates_due_human_rows(self):
+        connection = sqlite3.connect(self.database)
+        connection.executemany(
+            "INSERT INTO chat_takeovers"
+            "(session_name,chat_key_hmac,state,paused_at,resumed_at,updated_at,last_manual_sent_at,auto_resume_at) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            [
+                ("default", "due", "HUMAN_TAKEOVER", 1, None, 1, None, 10_000),
+                ("default", "future", "HUMAN_TAKEOVER", 1, None, 1, None, 10_001),
+                ("default", "manual", "AI_ELIGIBLE", 1, 9_000, 9_000, None, 9_500),
+            ],
+        )
+        connection.commit()
+        connection.close()
+        self.assertEqual(self.automation.resume_expired_takeovers(), 1)
+        connection = sqlite3.connect(self.database)
+        rows = dict(connection.execute("SELECT chat_key_hmac,state FROM chat_takeovers"))
+        due = connection.execute(
+            "SELECT resumed_at,auto_resume_at FROM chat_takeovers WHERE chat_key_hmac='due'"
+        ).fetchone()
+        connection.close()
+        self.assertEqual(rows, {"due": "AI_ELIGIBLE", "future": "HUMAN_TAKEOVER", "manual": "AI_ELIGIBLE"})
+        self.assertEqual(due, (10_000, None))
+
+    def test_background_lifecycle_is_idempotent_and_stops_cleanly(self):
+        task = self.automation.create_task("default", self.chat_ref, "24h", "AI")
+        self.clock.value = task["due_at"]
+        self.automation.start()
+        self.automation.start()
+        self.assertTrue(self.fake_chat.sent_event.wait(2))
+        self.automation.stop()
+        self.automation.stop()
+        self.assertIsNone(self.automation._thread)
+        self.assertEqual(len(self.fake_chat.send_calls), 1)
