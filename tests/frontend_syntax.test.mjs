@@ -40,3 +40,12 @@ test('chat management guards engagement responses across chat switches', () => {
   assert.match(chatSource, /updated_at/);
   assert.doesNotMatch(chatSource, /Math\.floor\(Date\.now\(\)\/1000\)/);
 });
+
+test('chat engagement cleanup releases only the request-owned pending control', () => {
+  assert.match(chatSource, /pendingActions/);
+  assert.match(chatSource, /engagementRequestId/);
+  assert.match(chatSource, /pendingActions\.label===requestToken/);
+  assert.match(chatSource, /pendingActions\.followUpCreate===requestToken/);
+  assert.match(chatSource, /pendingActions\.summary===requestToken/);
+  assert.match(chatSource, /resetEngagementPending/);
+});
