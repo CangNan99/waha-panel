@@ -1,3 +1,4 @@
+import json
 import sqlite3
 import tempfile
 import unittest
@@ -134,6 +135,49 @@ class SessionRegressionTests(unittest.TestCase):
         self.assertEqual(result, {"deleted": True, "session": "sales"})
         self.assertEqual(self.client.deleted, ["sales"])
         self.assertEqual([item["session_name"] for item in self.state.managed_session_rows()], ["default"])
+
+
+class QrAndReleaseTests(unittest.TestCase):
+    def test_qr_placeholder_is_frosted_non_scannable_and_stateful(self):
+        page = multi_session_html_page()
+        self.assertIn(".qr-frosted", page)
+        self.assertRegex(page, r"(?:backdrop-)?filter:\s*blur\(")
+        self.assertIn("@supports not", page)
+        self.assertIn("prefers-reduced-transparency", page)
+        self.assertIn("刷新二维码", page)
+        self.assertIn("正在获取二维码", page)
+        self.assertIn("二维码获取失败", page)
+        for state in ("idle", "loading", "error"):
+            self.assertIn(f"qrPlaceholder('{state}'", page)
+        self.assertNotIn("data:image/", page)
+
+    def test_qr_image_replaces_placeholder_only_after_image_response(self):
+        page = multi_session_html_page()
+        content_type_guard = "if (!response.ok || !type.startsWith('image/'))"
+        self.assertIn(content_type_guard, page)
+        self.assertIn("$('qrWrap').replaceChildren(image)", page)
+        self.assertLess(page.index(content_type_guard), page.index("$('qrWrap').replaceChildren(image)"))
+
+    def test_release_metadata_uses_panel_1_0_3_without_changing_waha_or_network(self):
+        root = Path(__file__).resolve().parents[1]
+        release = json.loads((root / "panel-release.json").read_text(encoding="utf-8"))
+        compose = (root / "docker-compose.yml").read_text(encoding="utf-8")
+        readme = (root / "README.md").read_text(encoding="utf-8")
+        readme_zh = (root / "README.zh-CN.md").read_text(encoding="utf-8")
+
+        self.assertEqual(release["tag"], "1.0.3")
+        self.assertEqual(release["version"], "1.0.3")
+        self.assertIn("${PANEL_IMAGE:-docker.io/cangnan88/waha-panel:1.0.3}", compose)
+        self.assertIn("${PANEL_VERSION:-1.0.3}", compose)
+        self.assertIn('os.environ.get("PANEL_VERSION", "1.0.3")', (root / "panel" / "app.py").read_text(encoding="utf-8"))
+        self.assertIn("docker.io/cangnan88/waha-panel:1.0.3", readme)
+        self.assertIn("docker.io/cangnan88/waha-panel:1.0.3", readme_zh)
+        self.assertIn("${WAHA_IMAGE:-devlikeapro/waha:latest-2026.8.2}", compose)
+        self.assertIn("${WAHA_BIND_ADDRESS:-127.0.0.1}:${WAHA_PORT:-3002}:3000", compose)
+        self.assertIn("${PANEL_BIND_ADDRESS:-127.0.0.1}:${PANEL_PORT:-3003}:3001", compose)
+        self.assertIn("- internal", compose)
+        self.assertIn("[INSTALL.zh-CN.md](INSTALL.zh-CN.md)", readme)
+        self.assertIn("[INSTALL.zh-CN.md](INSTALL.zh-CN.md)", readme_zh)
 
 
 class ChatPageRegressionTests(unittest.TestCase):
