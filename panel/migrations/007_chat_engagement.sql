@@ -34,6 +34,21 @@ CREATE TABLE IF NOT EXISTS customer_labels (
 CREATE INDEX IF NOT EXISTS idx_customer_labels_chat
     ON customer_labels(session_name, chat_key_hmac, source, updated_at);
 
+-- Task-generated sends have their own idempotency ledger.  They must never
+-- share the human takeover/manual-send state machine.
+CREATE TABLE IF NOT EXISTS automated_send_requests (
+    client_request_id TEXT PRIMARY KEY,
+    session_name TEXT NOT NULL,
+    chat_id TEXT NOT NULL,
+    payload_hash TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('PENDING', 'SENT', 'FAILED', 'UNKNOWN')),
+    waha_message_id TEXT,
+    error_code TEXT,
+    updated_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_automated_send_session_chat
+    ON automated_send_requests(session_name, chat_id, updated_at);
+
 CREATE TABLE IF NOT EXISTS conversation_summaries (
     session_name TEXT NOT NULL,
     chat_key_hmac TEXT NOT NULL,

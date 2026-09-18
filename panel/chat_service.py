@@ -607,6 +607,9 @@ class ChatService:
 
     def send_automated_text(self, session, chat_id, text, client_request_id):
         name = _session_name(session)
+        chat_id = str(chat_id or "").strip()
+        if not chat_id:
+            raise ChatAccessError("聊天编号无效")
         message = str(text or "").strip()
         if not message:
             raise ChatSendError("请输入要发送的文字", "FAILED", "EMPTY_TEXT")
@@ -615,24 +618,41 @@ class ChatService:
         request_id = self._request_id(client_request_id)
         payload_hash = self._payload_hash("automated_text", message)
         connection = sqlite3.connect(self.database_path)
+        connection.row_factory = sqlite3.Row
         try:
-            connection.execute("CREATE TABLE IF NOT EXISTS automated_send_requests (client_request_id TEXT PRIMARY KEY, session_name TEXT NOT NULL, chat_id TEXT NOT NULL, payload_hash TEXT NOT NULL, state TEXT NOT NULL, waha_message_id TEXT, error_code TEXT, updated_at INTEGER NOT NULL)")
-            row = connection.execute("SELECT state,waha_message_id,error_code FROM automated_send_requests WHERE client_request_id=? AND session_name=? AND chat_id=? AND payload_hash=?", (request_id,name,str(chat_id),payload_hash)).fetchone()
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM automated_send_requests WHERE client_request_id=?", (request_id,)
+            ).fetchone()
             if row:
-                if row[1]: return {"request_id": request_id, "state": row[0], "kind": "text", "message_ref": self._encode_message(name, str(chat_id), row[1])}
-                raise ChatSendError("文字消息发送失败，请先刷新聊天记录确认状态", row[0], row[2])
-            connection.execute("INSERT INTO automated_send_requests VALUES (?,?,?,?,?,?,?,?)", (request_id,name,str(chat_id),payload_hash,"PENDING",None,None,int(self.clock())))
+                if (row["session_name"], row["chat_id"], row["payload_hash"]) != (name, chat_id, payload_hash):
+                    raise SendConflictError("发送请求编号已用于其他内容")
+                connection.commit()
+                if row["state"] == "SENT":
+                    result = {"request_id": request_id, "state": "SENT", "kind": "text"}
+                    if row["waha_message_id"]:
+                        result["message_ref"] = self._encode_message(name, chat_id, row["waha_message_id"])
+                    return result
+                state = "UNKNOWN" if row["state"] == "PENDING" else row["state"]
+                raise ChatSendError("文字消息发送失败，请先刷新聊天记录确认状态", state, row["error_code"] or "WAHA_SEND_UNKNOWN")
+            connection.execute(
+                "INSERT INTO automated_send_requests(client_request_id,session_name,chat_id,payload_hash,state,waha_message_id,error_code,updated_at) VALUES (?,?,?,?,?,?,?,?)",
+                (request_id, name, chat_id, payload_hash, "PENDING", None, None, int(self.clock())),
+            )
             connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
         finally: connection.close()
         try:
-            response = self.client.send_text(name, str(chat_id), message)
+            response = self.client.send_text(name, chat_id, message)
             message_id = _value_id(response.get("id") if isinstance(response, dict) else response)
             result = {"request_id": request_id, "state": "SENT", "kind": "text"}
             if message_id:
-                result["message_ref"] = self._encode_message(name, str(chat_id), message_id)
+                result["message_ref"] = self._encode_message(name, chat_id, message_id)
             connection = sqlite3.connect(self.database_path)
             try:
-                connection.execute("UPDATE automated_send_requests SET state='SENT',waha_message_id=?,updated_at=? WHERE client_request_id=?", (message_id,int(self.clock()),request_id)); connection.commit()
+                connection.execute("UPDATE automated_send_requests SET state='SENT',waha_message_id=?,updated_at=? WHERE client_request_id=?", (message_id or None,int(self.clock()),request_id)); connection.commit()
             finally: connection.close()
             return result
         except Exception as error:
@@ -660,13 +680,19 @@ class ChatService:
         for source, label in rows: result["manual" if source == "MANUAL" else "ai"].append(label)
         return result
 
-    def add_manual_label(self, session, chat_ref, label):
+    def add_manual_label(self, session, chat_ref, label, source="MANUAL"):
+        if str(source or "").upper() != "MANUAL":
+            raise ChatServiceError("只能修改人工标签", "INVALID_LABEL_SOURCE")
         return self._label_mutation(session, chat_ref, label, "add")
 
-    def update_manual_label(self, session, chat_ref, old_label, new_label=None):
+    def update_manual_label(self, session, chat_ref, old_label, new_label=None, source="MANUAL"):
+        if str(source or "").upper() != "MANUAL":
+            raise ChatServiceError("只能修改人工标签", "INVALID_LABEL_SOURCE")
         return self._label_mutation(session, chat_ref, new_label, "update", old_label)
 
-    def delete_manual_label(self, session, chat_ref, label):
+    def delete_manual_label(self, session, chat_ref, label, source="MANUAL"):
+        if str(source or "").upper() != "MANUAL":
+            raise ChatServiceError("只能修改人工标签", "INVALID_LABEL_SOURCE")
         return self._label_mutation(session, chat_ref, label, "delete")
 
     def _label_mutation(self, session, chat_ref, label, action, old_label=None):
