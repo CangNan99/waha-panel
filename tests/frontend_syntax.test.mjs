@@ -32,3 +32,11 @@ test('chat management exposes engagement handlers without replacing dialogs duri
   assert.match(chatSource, /id="summaryDialog"/);
   assert.match(chatSource, /messageStack.*replaceChildren/);
 });
+
+test('chat management guards engagement responses across chat switches', () => {
+  assert.match(chatSource, /requestedChatRef/);
+  assert.match(chatSource, /requestGeneration/);
+  assert.match(chatSource, /data-task-id/);
+  assert.match(chatSource, /updated_at/);
+  assert.doesNotMatch(chatSource, /Math\.floor\(Date\.now\(\)\/1000\)/);
+});

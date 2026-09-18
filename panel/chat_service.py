@@ -794,9 +794,16 @@ class ChatService:
     def current_summary(self, session, chat_ref):
         name = _session_name(session); chat_id = self._decode_chat(name, chat_ref); key = self._chat_key(name, chat_id)
         connection = sqlite3.connect(self.database_path)
-        try: row = connection.execute("SELECT summary_ciphertext FROM conversation_summaries WHERE session_name=? AND chat_key_hmac=?", (name,key)).fetchone()
+        try: row = connection.execute("SELECT summary_ciphertext,updated_at FROM conversation_summaries WHERE session_name=? AND chat_key_hmac=?", (name,key)).fetchone()
         finally: connection.close()
-        return self._summary_plaintext(row[0]) if row else None
+        if not row:
+            return None
+        summary = self._summary_plaintext(row[0])
+        if not isinstance(summary, dict):
+            raise ChatServiceError("摘要格式无效", "INVALID_SUMMARY")
+        result = dict(summary)
+        result["updated_at"] = int(row[1])
+        return result
 
     def save_summary_and_ai_labels(self, session, chat_ref, summary, ai_labels):
         if not isinstance(summary, dict): raise ChatServiceError("摘要格式无效", "INVALID_SUMMARY")

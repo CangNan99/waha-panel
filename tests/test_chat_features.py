@@ -166,6 +166,18 @@ class ChatPageRegressionTests(unittest.TestCase):
         self.assertIn("$('messageStack').replaceChildren", page)
         self.assertNotIn("$('messageStack').replaceChildren($('labelDialog'))", page)
 
+    def test_chat_engagement_state_and_accessibility_guards(self):
+        page = chat_management_page("default")
+        for dialog_id in ("labelDialog", "summaryDialog", "followUpDialog"):
+            self.assertIn(f'aria-labelledby="{dialog_id}Title"', page)
+            self.assertIn(f'aria-describedby="{dialog_id}Description"', page)
+        self.assertIn('role="radiogroup"', page)
+        self.assertIn('data-task-id', page)
+        self.assertIn("requestedChatRef", page)
+        self.assertIn("requestGeneration", page)
+        self.assertIn("updated_at", page)
+        self.assertNotIn("Math.floor(Date.now()/1000)", page)
+
 
 if __name__ == "__main__":
     unittest.main()
