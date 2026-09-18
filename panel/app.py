@@ -419,6 +419,10 @@ def init_db(path, seed_business=True):
         connection.executescript(chat_ai_migration.read_text(encoding="utf-8"))
         chat_metadata_migration = Path(__file__).with_name("migrations") / "006_chat_metadata.sql"
         connection.executescript(chat_metadata_migration.read_text(encoding="utf-8"))
+        engagement_migration = Path(__file__).with_name("migrations") / "007_chat_engagement.sql"
+        connection.executescript(engagement_migration.read_text(encoding="utf-8"))
+        _add_column_if_missing(connection, "chat_takeovers", "last_manual_sent_at INTEGER")
+        _add_column_if_missing(connection, "chat_takeovers", "auto_resume_at INTEGER")
         admin_migration_path = Path(__file__).with_name("migrations") / "005_admin_users.sql"
         connection.executescript(admin_migration_path.read_text(encoding="utf-8"))
         apply_admin_migration(connection)
