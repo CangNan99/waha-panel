@@ -381,12 +381,27 @@ class _AutomationTranslation:
         self.generated = []
         self.translated = []
         self.fail = None
+        self.block_generate = None
+        self.generate_started = threading.Event()
+        self._active_lock = threading.Lock()
+        self.active_generations = 0
+        self.max_active_generations = 0
 
     def generate_follow_up(self, messages):
         self.generated.append(messages)
-        if self.fail:
-            raise self.fail
-        return {"target_language_code": "en", "target_language_name_zh": "英语", "message": "Generated follow-up"}
+        with self._active_lock:
+            self.active_generations += 1
+            self.max_active_generations = max(self.max_active_generations, self.active_generations)
+        self.generate_started.set()
+        try:
+            if self.block_generate is not None:
+                self.block_generate.wait()
+            if self.fail:
+                raise self.fail
+            return {"target_language_code": "en", "target_language_name_zh": "英语", "message": "Generated follow-up"}
+        finally:
+            with self._active_lock:
+                self.active_generations -= 1
 
     def translate_follow_up(self, text, messages):
         self.translated.append((text, messages))
@@ -630,3 +645,55 @@ class AutomationSchedulerTests(unittest.TestCase):
         self.automation.stop()
         self.assertIsNone(self.automation._thread)
         self.assertEqual(len(self.fake_chat.send_calls), 1)
+
+    def test_stop_waits_for_active_worker_before_restart(self):
+        automation = ChatAutomationService(
+            self.database, self.fake_chat, self.fake_translation,
+            clock=self.clock, scan_interval=0.01,
+        )
+        release = threading.Event()
+        stop_returned = threading.Event()
+        stopper = None
+        self.fake_translation.block_generate = release
+        try:
+            first = automation.create_task("default", self.chat_ref, "24h", "AI")
+            self.clock.value = first["due_at"]
+            automation.start()
+            worker = automation._thread
+            self.assertTrue(self.fake_translation.generate_started.wait(2))
+
+            def stop_automation():
+                try:
+                    automation.stop()
+                finally:
+                    stop_returned.set()
+
+            stopper = threading.Thread(target=stop_automation)
+            stopper.start()
+            self.assertIs(automation._thread, worker)
+            self.assertFalse(stop_returned.wait(1.2))
+
+            release.set()
+            self.assertTrue(stop_returned.wait(2))
+            stopper.join(2)
+            self.assertFalse(worker.is_alive())
+            self.assertIsNone(automation._thread)
+
+            self.fake_translation.block_generate = None
+            self.fake_translation.generate_started.clear()
+            self.fake_chat.sent_event.clear()
+            second = automation.create_task("default", self.chat_ref, "24h", "AI")
+            self.clock.value = second["due_at"]
+            automation.start()
+            restarted_worker = automation._thread
+            automation.start()
+            self.assertIs(automation._thread, restarted_worker)
+            self.assertIsNot(restarted_worker, worker)
+            self.assertTrue(self.fake_chat.sent_event.wait(2))
+            self.assertEqual(self.fake_translation.max_active_generations, 1)
+            self.assertEqual(len(self.fake_chat.send_calls), 2)
+        finally:
+            release.set()
+            if stopper is not None:
+                stopper.join(2)
+            automation.stop()

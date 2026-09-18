@@ -402,8 +402,9 @@ class ChatAutomationService:
             if thread is None:
                 return
             self._stop_event.set()
-        if thread is not threading.current_thread():
-            thread.join(timeout=max(1.0, self.scan_interval + 1.0))
-        with self._lifecycle_lock:
-            if self._thread is thread and not thread.is_alive():
+            if thread is threading.current_thread():
+                return
+            # Keep start() serialized until the active external call and worker fully exit.
+            thread.join()
+            if self._thread is thread:
                 self._thread = None

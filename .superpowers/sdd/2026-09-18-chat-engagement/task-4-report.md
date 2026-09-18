@@ -35,3 +35,19 @@ Implemented `ChatAutomationService` in `panel/chat_automation.py` with:
 ## Concerns
 
 No open Task 4 concerns. Application construction, HTTP routes, and lifecycle ownership remain intentionally deferred to Task 5.
+
+## Review Fix: Blocking Shutdown
+
+Addressed the Task 4 P2 lifecycle finding:
+
+- `stop()` now holds lifecycle ownership and waits without a timeout for the active worker to finish.
+- `start()` is serialized by the same lock and cannot create a replacement worker before the prior join and cleanup complete.
+- Added a blocking fake-AI regression that proves shutdown does not return before release, the old worker is dead afterward, and restart creates one worker without overlapping AI execution or duplicate sends.
+- The intentional tradeoff is that an upstream call which violates its configured timeout can delay application shutdown; clean shutdown and duplicate-send prevention take precedence.
+
+Review-fix verification:
+
+- Focused scheduler suite - 17 passed.
+- Combined Python suites - 50 passed.
+- Frontend syntax gate - passed; 4 inline scripts validated.
+- Python compile check and `git diff --check` - passed.
