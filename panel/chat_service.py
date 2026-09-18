@@ -613,15 +613,34 @@ class ChatService:
         if len(message) > 65535:
             raise ChatSendError("文字消息过长", "FAILED", "TEXT_TOO_LONG")
         request_id = self._request_id(client_request_id)
+        payload_hash = self._payload_hash("automated_text", message)
+        connection = sqlite3.connect(self.database_path)
+        try:
+            connection.execute("CREATE TABLE IF NOT EXISTS automated_send_requests (client_request_id TEXT PRIMARY KEY, session_name TEXT NOT NULL, chat_id TEXT NOT NULL, payload_hash TEXT NOT NULL, state TEXT NOT NULL, waha_message_id TEXT, error_code TEXT, updated_at INTEGER NOT NULL)")
+            row = connection.execute("SELECT state,waha_message_id,error_code FROM automated_send_requests WHERE client_request_id=? AND session_name=? AND chat_id=? AND payload_hash=?", (request_id,name,str(chat_id),payload_hash)).fetchone()
+            if row:
+                if row[1]: return {"request_id": request_id, "state": row[0], "kind": "text", "message_ref": self._encode_message(name, str(chat_id), row[1])}
+                raise ChatSendError("文字消息发送失败，请先刷新聊天记录确认状态", row[0], row[2])
+            connection.execute("INSERT INTO automated_send_requests VALUES (?,?,?,?,?,?,?,?)", (request_id,name,str(chat_id),payload_hash,"PENDING",None,None,int(self.clock())))
+            connection.commit()
+        finally: connection.close()
         try:
             response = self.client.send_text(name, str(chat_id), message)
             message_id = _value_id(response.get("id") if isinstance(response, dict) else response)
             result = {"request_id": request_id, "state": "SENT", "kind": "text"}
             if message_id:
                 result["message_ref"] = self._encode_message(name, str(chat_id), message_id)
+            connection = sqlite3.connect(self.database_path)
+            try:
+                connection.execute("UPDATE automated_send_requests SET state='SENT',waha_message_id=?,updated_at=? WHERE client_request_id=?", (message_id,int(self.clock()),request_id)); connection.commit()
+            finally: connection.close()
             return result
         except Exception as error:
             state, code = self._error_state(error)
+            connection = sqlite3.connect(self.database_path)
+            try:
+                connection.execute("UPDATE automated_send_requests SET state=?,error_code=?,updated_at=? WHERE client_request_id=?", (state,code,int(self.clock()),request_id)); connection.commit()
+            finally: connection.close()
             raise ChatSendError("文字消息发送失败，请先刷新聊天记录确认状态", state, code) from error
 
     @staticmethod
@@ -668,15 +687,15 @@ class ChatService:
 
     def _summary_ciphertext(self, summary):
         cipher = getattr(self.codec, "cipher", None)
-        if cipher is not None and hasattr(cipher, "encrypt_json"):
-            return cipher.encrypt_json(summary)
-        return base64.b64encode(json.dumps(summary, ensure_ascii=False).encode()).decode()
+        if cipher is None or not hasattr(cipher, "encrypt_json"):
+            raise ChatServiceError("摘要加密服务不可用", "SUMMARY_ENCRYPTION_UNAVAILABLE")
+        return cipher.encrypt_json(summary)
 
     def _summary_plaintext(self, value):
         cipher = getattr(self.codec, "cipher", None)
-        if cipher is not None and hasattr(cipher, "decrypt_json"):
-            return cipher.decrypt_json(value)
-        return json.loads(base64.b64decode(value).decode())
+        if cipher is None or not hasattr(cipher, "decrypt_json"):
+            raise ChatServiceError("摘要加密服务不可用", "SUMMARY_ENCRYPTION_UNAVAILABLE")
+        return cipher.decrypt_json(value)
 
     def current_summary(self, session, chat_ref):
         name = _session_name(session); chat_id = self._decode_chat(name, chat_ref); key = self._chat_key(name, chat_id)
