@@ -42,6 +42,7 @@ try:
         ImageValidationError,
         SendConflictError,
     )
+    from .chat_automation import ChatAutomationService
     from .chat_page import chat_management_page
     from .commerce import (
         CommerceConfig,
@@ -75,6 +76,7 @@ except ImportError:  # Supports the existing `python app.py` container entrypoin
         ImageValidationError,
         SendConflictError,
     )
+    from chat_automation import ChatAutomationService
     from chat_page import chat_management_page
     from commerce import (
         CommerceConfig,
@@ -685,8 +687,10 @@ class PanelState:
         )
         self.sleep_fn = sleep_fn or time.sleep
         self.uniform_fn = uniform_fn or random.uniform
+        self.clock = time.time
         self.chat = None
         self.translation = None
+        self.automation = None
         self.data_cipher = None
         self.csrf_token = None
         self.chat_capability_error = "面板数据加密密钥未配置"
@@ -766,6 +770,7 @@ class PanelState:
             logger=lambda level, message: self.log(
                 str(level or "INFO").upper(), "chat.service", message, DEFAULT_SESSION_NAME
             ),
+            clock=self.clock,
         )
         self.translation = TranslationService(
             self.database_path,
@@ -773,12 +778,32 @@ class PanelState:
             logger=lambda level, message: self.log(
                 str(level or "INFO").upper(), "translation.service", message, DEFAULT_SESSION_NAME
             ),
+            clock=self.clock,
+        )
+        self.automation = ChatAutomationService(
+            self.database_path,
+            self.chat,
+            self.translation,
+            logger=lambda level, message: self.log(
+                str(level or "INFO").upper(), "chat.automation", message, DEFAULT_SESSION_NAME
+            ),
+            clock=self.clock,
         )
         self.chat_capability_error = ""
         return self.chat
 
+    def start_background_services(self):
+        automation = self.automation
+        if automation is not None:
+            automation.start()
+
+    def stop_background_services(self):
+        automation = self.automation
+        if automation is not None:
+            automation.stop()
+
     def begin_translation_request(self):
-        now = time.time()
+        now = self.clock()
         with self._translation_limit_lock:
             self._translation_request_times = [
                 item for item in self._translation_request_times if now - item < 60
@@ -2464,18 +2489,21 @@ class PanelHandler(BaseHTTPRequestHandler):
         if not route.startswith(prefix):
             return None, None
         parts = route[len(prefix):].split("/")
-        if len(parts) != 2 or not parts[0] or not parts[1]:
+        if len(parts) < 2 or not parts[0] or not parts[1]:
             raise ValueError("聊天接口路径不正确")
         decoded = unquote(parts[0])
         if "%" in decoded:
             raise ValueError("会话名称编码无效")
         name = normalize_session_name(decoded)
-        action = parts[1]
+        action = "/".join(parts[1:])
         allowed = {
             "overview", "messages", "media", "events",
             "send-text", "send-image", "takeover", "resume-ai", "note",
+            "follow-ups", "labels", "summary",
         }
-        if action not in allowed:
+        if action not in allowed and not (
+            len(parts) == 4 and parts[1] == "follow-ups" and parts[2] and parts[3] == "cancel"
+        ) and not (len(parts) == 3 and parts[1] == "labels" and parts[2]):
             raise ValueError("不支持的聊天操作")
         return name, action
 
@@ -2515,6 +2543,24 @@ class PanelHandler(BaseHTTPRequestHandler):
         name, action = self.chat_route(route)
         query = parse_qs(urlparse(self.path).query)
         self.require_waha_session(name)
+        chat_ref = query.get("chat_ref", [""])[0]
+        if action == "follow-ups":
+            if not chat_ref:
+                raise ValueError("缺少聊天引用")
+            if self.state.automation is None:
+                raise ChatServiceError("跟进功能暂不可用", "AUTOMATION_UNAVAILABLE")
+            self.send_json(self.state.automation.list_tasks(name, chat_ref))
+            return
+        if action == "labels":
+            if not chat_ref:
+                raise ValueError("缺少聊天引用")
+            self.send_json(chat.customer_labels(name, chat_ref))
+            return
+        if action == "summary":
+            if not chat_ref:
+                raise ValueError("缺少聊天引用")
+            self.send_json(chat.current_summary(name, chat_ref))
+            return
         if action == "overview":
             self.send_json(chat.overview(
                 name,
@@ -2582,6 +2628,49 @@ class PanelHandler(BaseHTTPRequestHandler):
         chat = self.require_chat_service()
         name, action = self.chat_route(route)
         self.require_waha_session(name, connected=action in {"send-text", "send-image"})
+        if action == "labels":
+            self.send_chat_labels_write(route, "POST")
+            return
+        if action == "follow-ups":
+            if self.state.automation is None:
+                raise ChatServiceError("跟进功能暂不可用", "AUTOMATION_UNAVAILABLE")
+            payload = self.read_api_json()
+            result = self.state.automation.create_task(
+                name,
+                payload.get("chat_ref"),
+                payload.get("delay_code"),
+                payload.get("mode"),
+                payload.get("fixed_copy"),
+            )
+            self.send_json(result, HTTPStatus.CREATED)
+            return
+        if action.startswith("follow-ups/") and action.endswith("/cancel"):
+            if self.state.automation is None:
+                raise ChatServiceError("跟进功能暂不可用", "AUTOMATION_UNAVAILABLE")
+            task_id = action[len("follow-ups/"):-len("/cancel")]
+            if not task_id:
+                raise ValueError("跟进任务编号无效")
+            self.send_json(self.state.automation.cancel_task(name, task_id))
+            return
+        if action == "summary":
+            payload = self.read_api_json()
+            chat_ref = payload.get("chat_ref")
+            if not chat_ref:
+                raise ValueError("缺少聊天引用")
+            translation = self.require_translation_service()
+            history = chat.messages(name, chat_ref, limit=20).get("items", [])
+            self.state.begin_translation_request()
+            try:
+                generated = translation.summarize_conversation(history)
+            finally:
+                self.state.end_translation_request()
+            if not isinstance(generated, dict):
+                raise TranslationError("SUMMARY_RESULT_INVALID", "对话总结格式无效")
+            ai_labels = generated.get("ai_labels", [])
+            summary = dict(generated)
+            summary.pop("ai_labels", None)
+            self.send_json(chat.save_summary_and_ai_labels(name, chat_ref, summary, ai_labels))
+            return
         if action == "send-image":
             form = self.read_image_form()
             image = form["image"]
@@ -2607,6 +2696,33 @@ class PanelHandler(BaseHTTPRequestHandler):
         chat.broker.publish(name, {"type": "refresh", "reason": action})
         self.state.log("INFO", "chat." + action, "聊天管理操作已完成", name)
         self.send_json(result)
+
+    def send_chat_labels_write(self, route, method):
+        self.require_csrf()
+        chat = self.require_chat_service()
+        name, action = self.chat_route(route)
+        self.require_waha_session(name)
+        if not action.startswith("labels"):
+            raise ValueError("不支持的标签操作")
+        query = parse_qs(urlparse(self.path).query)
+        chat_ref = query.get("chat_ref", [""])[0]
+        payload = self.read_api_json() if method != "DELETE" else {}
+        if not chat_ref:
+            chat_ref = payload.get("chat_ref")
+        if not chat_ref:
+            raise ValueError("缺少聊天引用")
+        if method == "POST" and action == "labels":
+            self.send_json(chat.add_manual_label(name, chat_ref, payload.get("label"), payload.get("source", "MANUAL")), HTTPStatus.CREATED)
+            return
+        if method == "PUT" and action.startswith("labels/"):
+            old_label = unquote(action[len("labels/"):])
+            self.send_json(chat.update_manual_label(name, chat_ref, old_label, payload.get("label", payload.get("new_label")), payload.get("source", "MANUAL")))
+            return
+        if method == "DELETE" and action.startswith("labels/"):
+            label = unquote(action[len("labels/"):])
+            self.send_json(chat.delete_manual_label(name, chat_ref, label, payload.get("source", "MANUAL")))
+            return
+        raise ValueError("不支持的标签操作")
 
     def send_translation_get(self, route):
         self.require_admin_auth()
@@ -3148,7 +3264,9 @@ class PanelHandler(BaseHTTPRequestHandler):
         method = self.command.upper()
         try:
             self.require_mutation_auth()
-            if route.startswith("/api/translation/"):
+            if route.startswith("/api/chat/sessions/"):
+                self.send_chat_labels_write(route, "PUT")
+            elif route.startswith("/api/translation/"):
                 self.send_translation_write(route, "PUT")
             elif route == "/api/sessions" or route.startswith("/api/sessions/"):
                 self.send_session_patch(route)
@@ -3184,6 +3302,22 @@ class PanelHandler(BaseHTTPRequestHandler):
             return
         except PermissionError as error:
             self.send_json({"message": str(error)}, HTTPStatus.FORBIDDEN)
+            return
+        if route.startswith("/api/chat/sessions/"):
+            try:
+                self.send_chat_labels_write(route, "DELETE")
+            except (ChatServiceError, TranslationError, RequestTooLarge, UnsupportedRequestMedia) as error:
+                self.send_service_error(error)
+            except AdminAuthError as error:
+                self.send_admin_auth_required(error)
+            except PermissionError as error:
+                self.state.log("WARN", "request.reject", str(error))
+                self.send_json({"message": str(error)}, HTTPStatus.FORBIDDEN)
+            except (ValueError, KeyError) as error:
+                self.send_json({"message": str(error)}, HTTPStatus.BAD_REQUEST)
+            except Exception as error:
+                self.state.log("ERROR", "chat.labels", str(error))
+                self.send_json({"message": "标签操作失败，请查看系统记录"}, HTTPStatus.INTERNAL_SERVER_ERROR)
             return
         if route == "/api/translation/cache":
             try:
@@ -3280,7 +3414,13 @@ def main():
     port = int(os.environ.get("PORT", "3001"))
     server = ThreadingHTTPServer(("0.0.0.0", port), PanelHandler)
     print(f"WAHA local panel listening on {port}", flush=True)
-    server.serve_forever()
+    state.start_background_services()
+    try:
+        server.serve_forever()
+    finally:
+        server.shutdown()
+        server.server_close()
+        state.stop_background_services()
 
 
 if __name__ == "__main__":

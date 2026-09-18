@@ -1,11 +1,17 @@
 import sqlite3
 import json
+import base64
 import tempfile
 import threading
 import unittest
+from cryptography.fernet import Fernet
+from http.server import ThreadingHTTPServer
 from pathlib import Path
+from urllib.error import HTTPError
+from urllib.parse import quote
+from urllib.request import Request, urlopen
 
-from panel.app import init_db
+from panel.app import PanelHandler, PanelState, init_db
 from panel.chat_automation import AutomationError, ChatAutomationService
 from panel.chat_service import ChatSendError, ChatService
 from panel.translation_service import TranslationError, TranslationService
@@ -37,6 +43,8 @@ class _Client:
         self.messages = [{"id": "m1", "timestamp": 1000, "fromMe": False, "body": "hello"}]
     def get_chats(self, *_args):
         return [{"id": "chat-1@c.us", "name": "客户"}]
+    def get_sessions(self):
+        return [{"name": "default", "status": "WORKING"}]
     def get_messages(self, _session, _chat_id, _limit, _offset, _before=None, download_media=False):
         offset = int(_offset or 0)
         return self.messages[offset:offset + int(_limit)]
@@ -524,6 +532,7 @@ class AutomationSchedulerTests(unittest.TestCase):
         finally:
             automation.stop()
 
+
     def test_unknown_send_is_not_selected_again(self):
         task = self.automation.create_task("default", self.chat_ref, "24h", "AI")
         self.clock.value = task["due_at"]
@@ -697,3 +706,110 @@ class AutomationSchedulerTests(unittest.TestCase):
             if stopper is not None:
                 stopper.join(2)
             automation.stop()
+
+
+class PanelEngagementRouteTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.database = Path(self.temp.name) / "panel.sqlite3"
+        init_db(self.database, seed_business=False)
+        self.client = _Client()
+        self.state = PanelState(
+            self.database, self.client, "redacted",
+            admin_username="admin", admin_password="secret",
+            data_encryption_key=Fernet.generate_key().decode("ascii"),
+        )
+        self.summary_message_counts = []
+
+        def summarize(messages):
+            self.summary_message_counts.append(len(messages))
+            return {
+                "summary": "current summary", "customer_need": "quote", "intent": "buy",
+                "confirmed_items": "model", "unresolved_items": "price",
+                "next_action": "reply", "ai_labels": ["warm"],
+            }
+
+        self.state.translation.summarize_conversation = summarize
+        self.chat_ref = self.state.chat.overview("default")["items"][0]["chat_ref"]
+        PanelHandler.state = self.state
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), PanelHandler)
+        self.server_thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.server_thread.start()
+        self.base_url = f"http://127.0.0.1:{self.server.server_address[1]}"
+        credential = base64.b64encode(b"admin:secret").decode("ascii")
+        self.auth_headers = {"Authorization": "Basic " + credential}
+
+    def tearDown(self):
+        self.server.shutdown()
+        self.server.server_close()
+        self.server_thread.join(2)
+        self.state.stop_background_services()
+        self.temp.cleanup()
+
+    def request(self, method, path, payload=None, csrf=False, authenticated=True):
+        headers = dict(self.auth_headers if authenticated else {})
+        data = None
+        if payload is not None:
+            data = json.dumps(payload).encode("utf-8")
+            headers["Content-Type"] = "application/json"
+        if csrf:
+            headers["X-CSRF-Token"] = self.state.csrf_token
+        request = Request(self.base_url + path, data=data, headers=headers, method=method)
+        try:
+            with urlopen(request, timeout=3) as response:
+                return response.status, json.loads(response.read().decode("utf-8"))
+        except HTTPError as error:
+            return error.code, json.loads(error.read().decode("utf-8"))
+
+    def test_chat_route_accepts_engagement_paths(self):
+        self.assertEqual(PanelHandler.chat_route("/api/chat/sessions/default/follow-ups"), ("default", "follow-ups"))
+        self.assertEqual(PanelHandler.chat_route("/api/chat/sessions/default/follow-ups/7/cancel"), ("default", "follow-ups/7/cancel"))
+        self.assertEqual(PanelHandler.chat_route("/api/chat/sessions/default/labels"), ("default", "labels"))
+        self.assertEqual(PanelHandler.chat_route("/api/chat/sessions/default/labels/VIP"), ("default", "labels/VIP"))
+        self.assertEqual(PanelHandler.chat_route("/api/chat/sessions/default/summary"), ("default", "summary"))
+
+    def test_enable_and_background_lifecycle_are_idempotent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "panel.sqlite3"
+            init_db(database, seed_business=False)
+            state = PanelState(database, _Client(), "redacted", admin_username="admin", admin_password="secret")
+            state.enable_chat_services(Fernet.generate_key().decode("ascii"))
+            self.assertIsNotNone(state.automation)
+            state.start_background_services()
+            worker = state.automation._thread
+            state.start_background_services()
+            self.assertIs(state.automation._thread, worker)
+            state.stop_background_services()
+            state.stop_background_services()
+            self.assertIsNone(state.automation._thread)
+
+    def test_engagement_routes_enforce_checks_and_redact_internal_fields(self):
+        ref = quote(self.chat_ref, safe="")
+        self.assertEqual(self.request("GET", f"/api/chat/sessions/default/labels?chat_ref={ref}", authenticated=False)[0], 401)
+        self.assertEqual(self.request("POST", "/api/chat/sessions/default/labels", {"chat_ref": self.chat_ref, "label": "VIP"})[0], 403)
+        self.assertEqual(self.request("GET", f"/api/chat/sessions/missing/labels?chat_ref={ref}")[0], 403)
+
+        responses = []
+        responses.append(self.request("GET", f"/api/chat/sessions/default/follow-ups?chat_ref={ref}"))
+        created = self.request("POST", "/api/chat/sessions/default/follow-ups", {
+            "chat_ref": self.chat_ref, "delay_code": "24h", "mode": "FIXED",
+            "fixed_copy": "private fixed copy",
+        }, csrf=True)
+        responses.append(created)
+        task_id = created[1]["id"]
+        responses.append(self.request("POST", f"/api/chat/sessions/default/follow-ups/{task_id}/cancel", {}, csrf=True))
+
+        responses.append(self.request("POST", "/api/chat/sessions/default/labels", {"chat_ref": self.chat_ref, "label": "VIP"}, csrf=True))
+        responses.append(self.request("GET", f"/api/chat/sessions/default/labels?chat_ref={ref}"))
+        responses.append(self.request("PUT", f"/api/chat/sessions/default/labels/{quote('VIP', safe='')}", {"chat_ref": self.chat_ref, "label": "Priority"}, csrf=True))
+        responses.append(self.request("DELETE", f"/api/chat/sessions/default/labels/{quote('Priority', safe='')}?chat_ref={ref}", csrf=True))
+
+        responses.append(self.request("GET", f"/api/chat/sessions/default/summary?chat_ref={ref}"))
+        responses.append(self.request("POST", "/api/chat/sessions/default/summary", {"chat_ref": self.chat_ref}, csrf=True))
+        responses.append(self.request("GET", f"/api/chat/sessions/default/summary?chat_ref={ref}"))
+
+        self.assertTrue(all(status in {200, 201} for status, _payload in responses))
+        self.assertEqual(self.summary_message_counts, [1])
+        serialized = json.dumps([payload for _status, payload in responses], ensure_ascii=False)
+        for secret in ("private fixed copy", "chat-1@c.us", "fixed_copy", "client_request_id", "chat_id_ciphertext"):
+            self.assertNotIn(secret, serialized)
