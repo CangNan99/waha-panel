@@ -205,20 +205,75 @@ class ChatService:
         connection = sqlite3.connect(self.database_path)
         try:
             row = connection.execute(
-                "SELECT state, paused_at, resumed_at, updated_at FROM chat_takeovers "
+                "SELECT state, paused_at, resumed_at, updated_at, last_manual_sent_at, auto_resume_at FROM chat_takeovers "
                 "WHERE session_name = ? AND chat_key_hmac = ?",
                 (_session_name(session), key),
             ).fetchone()
         finally:
             connection.close()
         if not row:
-            return {"state": "AI_ELIGIBLE", "paused_at": None, "resumed_at": None}
+            return {"state": "AI_ELIGIBLE", "paused_at": None, "resumed_at": None,
+                    "last_manual_sent_at": None, "auto_resume_at": None}
         return {
             "state": row[0],
             "paused_at": row[1],
             "resumed_at": row[2],
             "updated_at": row[3],
+            "last_manual_sent_at": row[4],
+            "auto_resume_at": row[5],
         }
+
+    def chat_identity(self, session, chat_ref):
+        name = _session_name(session)
+        chat_id = self._decode_chat(name, chat_ref)
+        return {"chat_id": chat_id, "chat_key_hmac": self._chat_key(name, chat_id)}
+
+    def history_for_id(self, session, chat_id, limit=20):
+        name = _session_name(session)
+        value = str(chat_id or "").strip()
+        if not value:
+            raise ChatAccessError("聊天编号无效")
+        page_limit = max(1, min(int(limit), 20))
+        raw_items = self.client.get_messages(name, value, page_limit, 0, None, download_media=False)
+        items = []
+        for raw in raw_items:
+            message_id = _value_id(raw.get("id") or raw.get("messageId"))
+            if not message_id:
+                continue
+            body = _limited_text(raw.get("body") or raw.get("text"), 100000)
+            items.append({"timestamp": int(raw.get("timestamp") or 0),
+                          "from_me": bool(raw.get("fromMe")), "body": body,
+                          "caption": _limited_text(raw.get("caption") or (body if raw.get("hasMedia") else ""), 100000),
+                          "message_id": message_id})
+        items.sort(key=lambda item: (item["timestamp"], item["message_id"]))
+        return items[-page_limit:]
+
+    def has_inbound_since(self, session, chat_id, since_timestamp):
+        name = _session_name(session); chat_id = str(chat_id)
+        cutoff = int(since_timestamp or 0)
+        connection = sqlite3.connect(self.database_path)
+        try:
+            row = connection.execute("SELECT last_incoming_at FROM conversation_activity WHERE session_name=? AND chat_id=?", (name, chat_id)).fetchone()
+        finally:
+            connection.close()
+        if row and int(row[0]) > cutoff:
+            return True
+        offset = 0
+        for _ in range(10):
+            raw_items = self.client.get_messages(name, chat_id, 20, offset, None, download_media=False)
+            if not raw_items:
+                break
+            found_older = False
+            for raw in raw_items:
+                timestamp = int(raw.get("timestamp") or 0)
+                if timestamp <= cutoff:
+                    found_older = True
+                if timestamp > cutoff and not bool(raw.get("fromMe")):
+                    return True
+            if found_older or len(raw_items) < 20:
+                break
+            offset += len(raw_items)
+        return False
 
     def _note_for_id(self, session, chat_id):
         name = _session_name(session)
@@ -269,14 +324,18 @@ class ChatService:
         name = _session_name(session)
         now = int(self.clock())
         key = self._chat_key(name, chat_id)
+        prior = self._takeover_state_by_id(name, chat_id)
+        clear_manual = prior["state"] != "HUMAN_TAKEOVER"
         connection = sqlite3.connect(self.database_path)
         try:
             connection.execute(
-                "INSERT INTO chat_takeovers(session_name, chat_key_hmac, state, paused_at, resumed_at, updated_at) "
-                "VALUES (?, ?, 'HUMAN_TAKEOVER', ?, NULL, ?) "
+                "INSERT INTO chat_takeovers(session_name, chat_key_hmac, state, paused_at, resumed_at, updated_at, last_manual_sent_at, auto_resume_at) "
+                "VALUES (?, ?, 'HUMAN_TAKEOVER', ?, NULL, ?, NULL, ?) "
                 "ON CONFLICT(session_name, chat_key_hmac) DO UPDATE SET "
-                "state='HUMAN_TAKEOVER', paused_at=excluded.paused_at, resumed_at=NULL, updated_at=excluded.updated_at",
-                (name, key, now, now),
+                "state='HUMAN_TAKEOVER', paused_at=excluded.paused_at, resumed_at=NULL, updated_at=excluded.updated_at, "
+                "auto_resume_at=excluded.auto_resume_at, last_manual_sent_at="
+                + ("NULL" if clear_manual else "chat_takeovers.last_manual_sent_at"),
+                (name, key, now, now, now + 18000),
             )
             connection.commit()
         finally:
@@ -300,10 +359,10 @@ class ChatService:
         connection = sqlite3.connect(self.database_path)
         try:
             connection.execute(
-                "INSERT INTO chat_takeovers(session_name, chat_key_hmac, state, paused_at, resumed_at, updated_at) "
-                "VALUES (?, ?, 'AI_ELIGIBLE', NULL, ?, ?) "
+                "INSERT INTO chat_takeovers(session_name, chat_key_hmac, state, paused_at, resumed_at, updated_at, last_manual_sent_at, auto_resume_at) "
+                "VALUES (?, ?, 'AI_ELIGIBLE', NULL, ?, ?, NULL, NULL) "
                 "ON CONFLICT(session_name, chat_key_hmac) DO UPDATE SET "
-                "state='AI_ELIGIBLE', resumed_at=excluded.resumed_at, updated_at=excluded.updated_at",
+                "state='AI_ELIGIBLE', resumed_at=excluded.resumed_at, updated_at=excluded.updated_at, auto_resume_at=NULL",
                 (name, key, now, now),
             )
             connection.commit()
@@ -482,7 +541,7 @@ class ChatService:
         finally:
             connection.close()
 
-    def _finish_send(self, request_id, state, message_id=None, error_code=None):
+    def _finish_send(self, request_id, state, message_id=None, error_code=None, session=None, chat_id=None):
         now = int(self.clock())
         connection = sqlite3.connect(self.database_path)
         try:
@@ -491,6 +550,13 @@ class ChatService:
                 "WHERE client_request_id = ?",
                 (state, message_id, error_code, now, request_id),
             )
+            if state == "SENT" and session is not None and chat_id is not None:
+                key = self._chat_key(session, chat_id)
+                connection.execute(
+                    "UPDATE chat_takeovers SET last_manual_sent_at=?, auto_resume_at=?, updated_at=? "
+                    "WHERE session_name=? AND chat_key_hmac=?",
+                    (now, now + 18000, now, _session_name(session), key),
+                )
             connection.commit()
         finally:
             connection.close()
@@ -529,7 +595,7 @@ class ChatService:
         try:
             response = self.client.send_text(name, chat_id, message)
             message_id = _value_id(response.get("id") if isinstance(response, dict) else response)
-            self._finish_send(request_id, "SENT", message_id or None)
+            self._finish_send(request_id, "SENT", message_id or None, session=name, chat_id=chat_id)
             result = {"request_id": request_id, "state": "SENT", "kind": "text"}
             if message_id:
                 result["message_ref"] = self._encode_message(name, chat_id, message_id)
@@ -538,6 +604,104 @@ class ChatService:
             state, code = self._error_state(error)
             self._finish_send(request_id, state, error_code=code)
             raise ChatSendError("文字消息发送失败，请先刷新聊天记录确认状态", state, code) from error
+
+    def send_automated_text(self, session, chat_id, text, client_request_id):
+        name = _session_name(session)
+        message = str(text or "").strip()
+        if not message:
+            raise ChatSendError("请输入要发送的文字", "FAILED", "EMPTY_TEXT")
+        if len(message) > 65535:
+            raise ChatSendError("文字消息过长", "FAILED", "TEXT_TOO_LONG")
+        request_id = self._request_id(client_request_id)
+        try:
+            response = self.client.send_text(name, str(chat_id), message)
+            message_id = _value_id(response.get("id") if isinstance(response, dict) else response)
+            result = {"request_id": request_id, "state": "SENT", "kind": "text"}
+            if message_id:
+                result["message_ref"] = self._encode_message(name, str(chat_id), message_id)
+            return result
+        except Exception as error:
+            state, code = self._error_state(error)
+            raise ChatSendError("文字消息发送失败，请先刷新聊天记录确认状态", state, code) from error
+
+    @staticmethod
+    def _label_value(value):
+        value = re.sub(r"[\x00-\x1f\x7f]", "", str(value or "")).strip()
+        if not value or len(value) > 100:
+            raise ChatServiceError("标签长度必须为 1-100 个字符", "INVALID_LABEL")
+        return value
+
+    def customer_labels(self, session, chat_ref):
+        name = _session_name(session); chat_id = self._decode_chat(name, chat_ref); key = self._chat_key(name, chat_id)
+        connection = sqlite3.connect(self.database_path)
+        try:
+            rows = connection.execute("SELECT source,label FROM customer_labels WHERE session_name=? AND chat_key_hmac=? ORDER BY id", (name, key)).fetchall()
+        finally: connection.close()
+        result = {"manual": [], "ai": []}
+        for source, label in rows: result["manual" if source == "MANUAL" else "ai"].append(label)
+        return result
+
+    def add_manual_label(self, session, chat_ref, label):
+        return self._label_mutation(session, chat_ref, label, "add")
+
+    def update_manual_label(self, session, chat_ref, old_label, new_label=None):
+        return self._label_mutation(session, chat_ref, new_label, "update", old_label)
+
+    def delete_manual_label(self, session, chat_ref, label):
+        return self._label_mutation(session, chat_ref, label, "delete")
+
+    def _label_mutation(self, session, chat_ref, label, action, old_label=None):
+        name = _session_name(session); chat_id = self._decode_chat(name, chat_ref); key = self._chat_key(name, chat_id)
+        value = self._label_value(label)
+        connection = sqlite3.connect(self.database_path); now = int(self.clock())
+        try:
+            if action == "add":
+                connection.execute("INSERT OR IGNORE INTO customer_labels(session_name,chat_key_hmac,source,label,created_at,updated_at) VALUES (?,?, 'MANUAL',?,?,?)", (name,key,value,now,now))
+            elif action == "delete":
+                connection.execute("DELETE FROM customer_labels WHERE session_name=? AND chat_key_hmac=? AND source='MANUAL' AND label=?", (name,key,value))
+            else:
+                old = self._label_value(old_label)
+                connection.execute("UPDATE customer_labels SET label=?,updated_at=? WHERE session_name=? AND chat_key_hmac=? AND source='MANUAL' AND label=?", (value,now,name,key,old))
+            connection.commit()
+        finally: connection.close()
+        return self.customer_labels(name, chat_ref)
+
+    def _summary_ciphertext(self, summary):
+        cipher = getattr(self.codec, "cipher", None)
+        if cipher is not None and hasattr(cipher, "encrypt_json"):
+            return cipher.encrypt_json(summary)
+        return base64.b64encode(json.dumps(summary, ensure_ascii=False).encode()).decode()
+
+    def _summary_plaintext(self, value):
+        cipher = getattr(self.codec, "cipher", None)
+        if cipher is not None and hasattr(cipher, "decrypt_json"):
+            return cipher.decrypt_json(value)
+        return json.loads(base64.b64decode(value).decode())
+
+    def current_summary(self, session, chat_ref):
+        name = _session_name(session); chat_id = self._decode_chat(name, chat_ref); key = self._chat_key(name, chat_id)
+        connection = sqlite3.connect(self.database_path)
+        try: row = connection.execute("SELECT summary_ciphertext FROM conversation_summaries WHERE session_name=? AND chat_key_hmac=?", (name,key)).fetchone()
+        finally: connection.close()
+        return self._summary_plaintext(row[0]) if row else None
+
+    def save_summary_and_ai_labels(self, session, chat_ref, summary, ai_labels):
+        if not isinstance(summary, dict): raise ChatServiceError("摘要格式无效", "INVALID_SUMMARY")
+        name = _session_name(session); chat_id = self._decode_chat(name, chat_ref); key = self._chat_key(name, chat_id); now = int(self.clock())
+        labels = [self._label_value(item) for item in (ai_labels or [])]
+        encrypted = self._summary_ciphertext(summary)
+        fingerprint = hashlib.sha256(json.dumps(summary, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+        connection = sqlite3.connect(self.database_path)
+        try:
+            connection.execute("BEGIN")
+            connection.execute("INSERT INTO conversation_summaries(session_name,chat_key_hmac,summary_ciphertext,message_fingerprint,model_fingerprint,created_at,updated_at) VALUES (?,?,?,?,?,?,?) ON CONFLICT(session_name,chat_key_hmac) DO UPDATE SET summary_ciphertext=excluded.summary_ciphertext,message_fingerprint=excluded.message_fingerprint,updated_at=excluded.updated_at", (name,key,encrypted,fingerprint,"",now,now))
+            connection.execute("DELETE FROM customer_labels WHERE session_name=? AND chat_key_hmac=? AND source='AI'", (name,key))
+            connection.executemany("INSERT OR IGNORE INTO customer_labels(session_name,chat_key_hmac,source,label,created_at,updated_at) VALUES (?,?, 'AI',?,?,?)", [(name,key,label,now,now) for label in labels])
+            connection.commit()
+        except Exception:
+            connection.rollback(); raise
+        finally: connection.close()
+        return self.current_summary(name, chat_ref)
 
     @staticmethod
     def _validated_image(filename, declared_type, data):
@@ -589,7 +753,7 @@ class ChatService:
                 name, chat_id, safe_name, mimetype, encoded, safe_caption
             )
             message_id = _value_id(response.get("id") if isinstance(response, dict) else response)
-            self._finish_send(request_id, "SENT", message_id or None)
+            self._finish_send(request_id, "SENT", message_id or None, session=name, chat_id=chat_id)
             result = {"request_id": request_id, "state": "SENT", "kind": "image"}
             if message_id:
                 result["message_ref"] = self._encode_message(name, chat_id, message_id)
