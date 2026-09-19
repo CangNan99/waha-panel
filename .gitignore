@@ -3,6 +3,7 @@
 !.env.example
 secrets/
 backups/
+.worktrees/
 *.db
 *.sqlite
 *.sqlite3

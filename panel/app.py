@@ -42,6 +42,7 @@ try:
         ImageValidationError,
         SendConflictError,
     )
+    from .chat_automation import ChatAutomationService
     from .chat_page import chat_management_page
     from .commerce import (
         CommerceConfig,
@@ -75,6 +76,7 @@ except ImportError:  # Supports the existing `python app.py` container entrypoin
         ImageValidationError,
         SendConflictError,
     )
+    from chat_automation import ChatAutomationService
     from chat_page import chat_management_page
     from commerce import (
         CommerceConfig,
@@ -419,6 +421,10 @@ def init_db(path, seed_business=True):
         connection.executescript(chat_ai_migration.read_text(encoding="utf-8"))
         chat_metadata_migration = Path(__file__).with_name("migrations") / "006_chat_metadata.sql"
         connection.executescript(chat_metadata_migration.read_text(encoding="utf-8"))
+        engagement_migration = Path(__file__).with_name("migrations") / "007_chat_engagement.sql"
+        connection.executescript(engagement_migration.read_text(encoding="utf-8"))
+        _add_column_if_missing(connection, "chat_takeovers", "last_manual_sent_at INTEGER")
+        _add_column_if_missing(connection, "chat_takeovers", "auto_resume_at INTEGER")
         admin_migration_path = Path(__file__).with_name("migrations") / "005_admin_users.sql"
         connection.executescript(admin_migration_path.read_text(encoding="utf-8"))
         apply_admin_migration(connection)
@@ -676,13 +682,15 @@ class PanelState:
         self.admin_service = AdminService(self.database_path)
         self._admin_db_auth = as_bool(os.environ.get("PANEL_ADMIN_DB_AUTH", "0"))
         self._update_service = UpdateService(
-            current_panel=os.environ.get("PANEL_VERSION", "1.0.2"),
+            current_panel=os.environ.get("PANEL_VERSION", "1.0.3"),
             current_waha=os.environ.get("WAHA_IMAGE_TAG", "latest-2026.8.2"),
         )
         self.sleep_fn = sleep_fn or time.sleep
         self.uniform_fn = uniform_fn or random.uniform
+        self.clock = time.time
         self.chat = None
         self.translation = None
+        self.automation = None
         self.data_cipher = None
         self.csrf_token = None
         self.chat_capability_error = "面板数据加密密钥未配置"
@@ -762,6 +770,7 @@ class PanelState:
             logger=lambda level, message: self.log(
                 str(level or "INFO").upper(), "chat.service", message, DEFAULT_SESSION_NAME
             ),
+            clock=self.clock,
         )
         self.translation = TranslationService(
             self.database_path,
@@ -769,12 +778,32 @@ class PanelState:
             logger=lambda level, message: self.log(
                 str(level or "INFO").upper(), "translation.service", message, DEFAULT_SESSION_NAME
             ),
+            clock=self.clock,
+        )
+        self.automation = ChatAutomationService(
+            self.database_path,
+            self.chat,
+            self.translation,
+            logger=lambda level, message: self.log(
+                str(level or "INFO").upper(), "chat.automation", message, DEFAULT_SESSION_NAME
+            ),
+            clock=self.clock,
         )
         self.chat_capability_error = ""
         return self.chat
 
+    def start_background_services(self):
+        automation = self.automation
+        if automation is not None:
+            automation.start()
+
+    def stop_background_services(self):
+        automation = self.automation
+        if automation is not None:
+            automation.stop()
+
     def begin_translation_request(self):
-        now = time.time()
+        now = self.clock()
         with self._translation_limit_lock:
             self._translation_request_times = [
                 item for item in self._translation_request_times if now - item < 60
@@ -2085,7 +2114,9 @@ def multi_session_html_page():
     .detail-grid { display:grid; grid-template-columns:minmax(0,1.15fr) minmax(300px,.85fr); gap:14px; } .card { padding:20px; } .card + .card { margin-top:14px; } .card-head { display:flex; align-items:flex-start; justify-content:space-between; gap:14px; margin-bottom:17px; } .card-title { font-size:17px; font-weight:760; letter-spacing:-.015em; } .card-note { color:var(--muted); font-size:12px; margin-top:3px; }
     .identity { display:flex; align-items:center; gap:13px; padding:14px; border-radius:14px; background:var(--surface-soft); border:1px solid var(--line); } .identity-icon { width:42px; height:42px; display:grid; place-items:center; border-radius:13px; background:var(--accent-soft); color:var(--accent); font-weight:800; } .identity-main { min-width:0; flex:1; } .identity-name { font-size:18px; font-weight:760; overflow-wrap:anywhere; } .identity-tech { color:var(--muted); font:12px ui-monospace,SFMono-Regular,Consolas,monospace; margin-top:2px; } .identity-actions { display:flex; gap:7px; flex-wrap:wrap; justify-content:flex-end; }
     .action-row { display:flex; flex-wrap:wrap; gap:8px; margin-top:14px; } .action-row button { flex:0 0 auto; } .summary-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:9px; margin-top:14px; } .summary { padding:12px; border:1px solid var(--line); border-radius:12px; background:var(--surface-soft); } .summary-label { color:var(--muted); font-size:12px; } .summary-value { margin-top:4px; font-weight:730; overflow-wrap:anywhere; }
-    .qr-wrap { display:grid; place-items:center; min-height:320px; border:1px dashed var(--line); border-radius:15px; background:var(--surface-soft); overflow:hidden; } .qr-wrap img { display:block; width:min(100%,330px); aspect-ratio:1; object-fit:contain; padding:18px; } .qr-empty { max-width:230px; padding:25px; color:var(--muted); text-align:center; } .qr-caption { color:var(--muted); font-size:12px; margin-top:10px; }
+    .qr-wrap { display:grid; place-items:center; min-height:320px; border:1px dashed var(--line); border-radius:15px; background:var(--surface-soft); overflow:hidden; } .qr-wrap img { display:block; width:min(100%,330px); aspect-ratio:1; object-fit:contain; padding:18px; } .qr-frosted { position:relative; isolation:isolate; display:grid; place-items:center; width:min(76%,240px); aspect-ratio:1; overflow:hidden; border:1px solid var(--line); border-radius:14px; background:var(--surface); } .qr-frosted::before { content:""; position:absolute; inset:-18px; z-index:-2; background:repeating-conic-gradient(from 45deg,var(--ink) 0 12.5%,transparent 0 25%) 0 0/34px 34px,repeating-linear-gradient(90deg,transparent 0 15px,var(--ink) 15px 25px,transparent 25px 38px); filter:blur(9px); opacity:.3; transform:scale(1.08); } .qr-frosted::after { content:""; position:absolute; inset:0; z-index:-1; background:color-mix(in srgb,var(--surface) 70%,transparent); -webkit-backdrop-filter:blur(12px); backdrop-filter:blur(12px); } .qr-frosted-copy { width:calc(100% - 34px); padding:16px; border:1px solid color-mix(in srgb,var(--line) 78%,transparent); border-radius:11px; background:color-mix(in srgb,var(--surface) 88%,transparent); text-align:center; box-shadow:0 8px 24px rgba(31,35,41,.08); } .qr-frosted-title { display:block; font-weight:750; color:var(--ink); } .qr-frosted-detail { display:block; margin-top:5px; color:var(--muted); font-size:12px; } .qr-caption { color:var(--muted); font-size:12px; margin-top:10px; }
+    @supports not ((backdrop-filter:blur(1px)) or (-webkit-backdrop-filter:blur(1px))) { .qr-frosted::after, .qr-frosted-copy { background:var(--surface); } }
+    @media (prefers-reduced-transparency:reduce) { .qr-frosted::after { background:var(--surface); -webkit-backdrop-filter:none; backdrop-filter:none; } .qr-frosted-copy { background:var(--surface); } }
     .pairing { margin-top:18px; padding-top:17px; border-top:1px solid var(--line); } .pairing-title { font-weight:730; } .pairing-note { color:var(--muted); font-size:12px; margin-top:3px; } .pairing-form { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:8px; margin-top:10px; } input[type=text],input[type=tel],input[type=url],input[type=password],input[type=time],select,textarea { width:100%; min-height:42px; border:1px solid var(--line); border-radius:10px; padding:9px 11px; background:var(--surface); color:var(--ink); } .pairing-code { margin-top:10px; padding:12px; border-radius:11px; text-align:center; background:var(--accent-soft); color:var(--accent); } .pairing-code strong { display:block; font:750 23px ui-monospace,SFMono-Regular,Consolas,monospace; letter-spacing:.08em; margin-top:3px; }
     .logs { max-height:410px; overflow:auto; } .log { padding:12px 0; border-top:1px solid var(--line); } .log:first-child { border-top:0; padding-top:0; } .log-meta { display:flex; justify-content:space-between; gap:10px; color:var(--muted); font:11px ui-monospace,SFMono-Regular,Consolas,monospace; } .log-message { margin-top:4px; overflow-wrap:anywhere; } .log.error .log-message { color:var(--bad); } .empty { color:var(--muted); padding:9px 0; }
     .notice { min-height:23px; margin-top:10px; color:var(--bad); font-size:13px; } .notice.success { color:var(--good); } .sr-only { position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; border:0; }
@@ -2113,7 +2144,7 @@ def multi_session_html_page():
             <article class="card"><div class="card-head"><div><div class="card-title">系统记录</div><div class="card-note">仅显示当前会话的处理记录与错误。</div></div><button id="refreshLogsButton" type="button">刷新记录</button></div><div class="logs" id="logs"><div class="empty">正在读取记录...</div></div></article>
           </section>
           <section>
-            <article class="card"><div class="card-head"><div><div class="card-title">扫码连接</div><div class="card-note">二维码属于当前会话，不会把 WAHA 密钥交给浏览器。</div></div><button id="qrButton" type="button">刷新二维码</button></div><div class="qr-wrap" id="qrWrap"><div class="qr-empty">点击“刷新二维码”获取当前会话的登录二维码。</div></div><div class="qr-caption">如果会话已连接，二维码可能暂不可用。</div><div class="pairing"><div class="pairing-title">手机号配对码</div><div class="pairing-note">填写包含国家/地区码的手机号，例如 8613812345678。</div><div class="pairing-form"><label class="sr-only" for="phoneNumber">手机号</label><input id="phoneNumber" type="tel" inputmode="numeric" autocomplete="tel" placeholder="8613812345678"><button class="primary" id="pairingButton" type="button">获取配对码</button></div><div id="pairingCode" class="pairing-code" hidden role="status" aria-live="polite"></div></div></article>
+            <article class="card"><div class="card-head"><div><div class="card-title">扫码连接</div><div class="card-note">二维码属于当前会话，不会把 WAHA 密钥交给浏览器。</div></div><button id="qrButton" type="button">刷新二维码</button></div><div class="qr-wrap" id="qrWrap"><div class="qr-frosted" data-state="idle" role="status" aria-live="polite"><div class="qr-frosted-copy"><strong class="qr-frosted-title">二维码待刷新</strong><span class="qr-frosted-detail">点击“刷新二维码”获取当前会话的登录二维码。</span></div></div></div><div class="qr-caption">如果会话已连接，二维码可能暂不可用。</div><div class="pairing"><div class="pairing-title">手机号配对码</div><div class="pairing-note">填写包含国家/地区码的手机号，例如 8613812345678。</div><div class="pairing-form"><label class="sr-only" for="phoneNumber">手机号</label><input id="phoneNumber" type="tel" inputmode="numeric" autocomplete="tel" placeholder="8613812345678"><button class="primary" id="pairingButton" type="button">获取配对码</button></div><div id="pairingCode" class="pairing-code" hidden role="status" aria-live="polite"></div></div></article>
             <article class="card"><div class="card-head"><div><div class="card-title">服务概况</div><div class="card-note">面板每 10 秒自动刷新。</div></div></div><div class="summary-grid"><div class="summary"><div class="summary-label">WAHA 服务</div><div class="summary-value" id="wahaSummary">检查中</div></div><div class="summary"><div class="summary-label">数据库</div><div class="summary-value" id="dbSummary">检查中</div></div></div><div class="notice" id="globalNotice" role="status" aria-live="polite"></div></article>
           </section>
         </div>
@@ -2133,6 +2164,7 @@ def multi_session_html_page():
     let selected = new URLSearchParams(location.search).get('session') || 'default';
     let statusData = null;
     let csrfToken = '';
+    let qrRequestGeneration = 0;
     const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
     const apiSession = (path) => '/api/sessions/' + encodeURIComponent(selected) + path;
     async function ensureCsrf() { if (csrfToken) return csrfToken; const response = await fetch('/api/security/csrf', {cache:'no-store'}); const data = await response.json(); if (!response.ok) throw new Error(data.message || '安全校验不可用'); csrfToken = data.csrf_token || ''; return csrfToken; }
@@ -2147,15 +2179,18 @@ def multi_session_html_page():
     function renderGlobal() { const waha = statusData?.waha || {}; $('wahaSummary').textContent = waha.running ? (waha.version ? '运行中 · ' + waha.version : '运行中') : '不可用'; $('dbSummary').textContent = statusData?.database?.ok ? '数据库正常' : '数据库异常'; $('servicePill').className = 'service-pill ' + (waha.running ? 'good' : ''); $('servicePill').innerHTML = `<span class="service-dot" aria-hidden="true"></span><span>${waha.running ? 'WAHA 运行中' : 'WAHA 不可用'}</span>`; $('globalNotice').textContent = statusData?.errors?.length ? statusData.errors.join('；') : ''; }
     function renderLogs(logs, errors) { const all = [...(errors || []).map(message => ({level:'ERROR',event:'当前检查',message,created_at:Date.now()/1000})), ...(logs || [])]; $('logs').innerHTML = all.length ? all.map(log => `<div class="log ${log.level === 'ERROR' ? 'error' : ''}"><div class="log-meta"><span>${esc(log.level)} / ${esc(log.event)}</span><span>${esc(formatTime(log.created_at))}</span></div><div class="log-message">${esc(log.message)}</div></div>`).join('') : '<div class="empty">暂无当前会话记录</div>'; }
     async function refreshLogs() { if (!selected) return; try { const response = await fetch(apiSession('/logs'), {cache:'no-store'}); const data = await response.json(); if (!response.ok) throw new Error(data.message || '读取记录失败'); renderLogs(data.logs, []); } catch (error) { $('logs').innerHTML = `<div class="empty">${esc(error.message)}</div>`; } }
-    function render(data) { statusData = data; const names = (data.sessions || []).map(item => item.name); if (!names.includes(selected)) selected = data.selected_session || names[0] || 'default'; renderSessions(); renderDetail(); renderGlobal(); const item = currentItem(); renderLogs(data.logs, data.errors); if (item && data.auto_reply?.theme) applyTheme(data.auto_reply.theme); const url = new URL(location.href); url.searchParams.set('session', selected); history.replaceState(null,'',url); }
+    function render(data) { statusData = data; const names = (data.sessions || []).map(item => item.name); if (!names.includes(selected)) setSelectedSession(data.selected_session || names[0] || 'default'); renderSessions(); renderDetail(); renderGlobal(); const item = currentItem(); renderLogs(data.logs, data.errors); if (item && data.auto_reply?.theme) applyTheme(data.auto_reply.theme); const url = new URL(location.href); url.searchParams.set('session', selected); history.replaceState(null,'',url); }
     async function refresh() { try { const response = await fetch('/api/status?session=' + encodeURIComponent(selected), {cache:'no-store'}); const data = await response.json(); if (!response.ok) throw new Error(data.message || '读取状态失败'); render(data); } catch (error) { $('globalNotice').textContent = error.message; } }
-    async function selectSession(name) { selected = name; $('globalNotice').textContent = ''; $('logs').innerHTML = '<div class="empty">正在读取记录...</div>'; await refresh(); }
+    function qrPlaceholder(state, title, detail) { return `<div class="qr-frosted" data-state="${esc(state)}" role="status" aria-live="polite"><div class="qr-frosted-copy"><strong class="qr-frosted-title">${esc(title)}</strong><span class="qr-frosted-detail">${esc(detail)}</span></div></div>`; }
+    function resetQrState() { qrRequestGeneration += 1; $('qrButton').disabled = false; $('qrWrap').innerHTML = qrPlaceholder('idle', '二维码待刷新', '点击“刷新二维码”获取当前会话的登录二维码。'); }
+    function setSelectedSession(name) { const next = name || 'default'; if (selected === next) return false; selected = next; resetQrState(); return true; }
+    async function selectSession(name) { setSelectedSession(name); $('globalNotice').textContent = ''; $('logs').innerHTML = '<div class="empty">正在读取记录...</div>'; await refresh(); }
      async function operation(action) { const button = $(action + 'Button'); if (button) { button.disabled = true; } $('controlNotice').textContent = ''; try { const response = await mutateFetch(apiSession('/' + action), {method:'POST'}); const data = await response.json(); if (!response.ok) throw new Error(data.message || '会话操作失败'); $('controlNotice').className = 'notice success'; $('controlNotice').textContent = '操作已提交，状态正在更新。'; await refresh(); } catch (error) { $('controlNotice').className = 'notice'; $('controlNotice').textContent = error.message; } finally { renderDetail(); } }
-     async function deleteSelected() { const item = currentItem(); if (!item || (statusData?.sessions || []).length <= 1) return; if (!window.confirm('确认删除会话“' + (item.display_name || item.name) + '”？这会同时删除 WAHA 会话和面板中的关联数据。')) return; const button = $('deleteButton'); button.disabled = true; $('controlNotice').textContent = ''; try { const response = await mutateFetch('/api/sessions/' + encodeURIComponent(item.name), {method:'DELETE'}); const data = await response.json(); if (!response.ok) throw new Error(data.message || '删除会话失败'); const remaining = (statusData?.sessions || []).filter(entry => entry.name !== item.name); selected = remaining[0]?.name || 'default'; $('controlNotice').className = 'notice success'; $('controlNotice').textContent = '会话已删除。'; await refresh(); } catch (error) { $('controlNotice').className = 'notice'; $('controlNotice').textContent = error.message; } finally { renderDetail(); } }
-    async function loadQr() { $('qrWrap').innerHTML = '<div class="qr-empty">正在获取二维码...</div>'; $('qrButton').disabled = true; try { const response = await fetch(apiSession('/qr?ts=' + Date.now()), {cache:'no-store'}); const type = response.headers.get('content-type') || ''; if (!response.ok || !type.startsWith('image/')) { const data = await response.json(); throw new Error(data.message || '二维码暂不可用'); } const image = document.createElement('img'); image.alt = '当前 WhatsApp 会话二维码'; image.src = URL.createObjectURL(await response.blob()); $('qrWrap').replaceChildren(image); } catch (error) { $('qrWrap').innerHTML = `<div class="qr-empty">${esc(error.message)}<br>请先启动会话后重试。</div>`; } finally { $('qrButton').disabled = false; } }
+     async function deleteSelected() { const item = currentItem(); if (!item || (statusData?.sessions || []).length <= 1) return; if (!window.confirm('确认删除会话“' + (item.display_name || item.name) + '”？这会同时删除 WAHA 会话和面板中的关联数据。')) return; const button = $('deleteButton'); button.disabled = true; $('controlNotice').textContent = ''; try { const response = await mutateFetch('/api/sessions/' + encodeURIComponent(item.name), {method:'DELETE'}); const data = await response.json(); if (!response.ok) throw new Error(data.message || '删除会话失败'); const remaining = (statusData?.sessions || []).filter(entry => entry.name !== item.name); setSelectedSession(remaining[0]?.name || 'default'); $('controlNotice').className = 'notice success'; $('controlNotice').textContent = '会话已删除。'; await refresh(); } catch (error) { $('controlNotice').className = 'notice'; $('controlNotice').textContent = error.message; } finally { renderDetail(); } }
+    async function loadQr() { const requestedSession = selected; const requestGeneration = ++qrRequestGeneration; const ownsRequest = () => selected === requestedSession && qrRequestGeneration === requestGeneration; $('qrWrap').innerHTML = qrPlaceholder('loading', '正在获取二维码', '请稍候，获取完成后会自动显示。'); $('qrButton').disabled = true; try { const response = await fetch('/api/sessions/' + encodeURIComponent(requestedSession) + '/qr?ts=' + Date.now(), {cache:'no-store'}); const type = response.headers.get('content-type') || ''; if (!response.ok || !type.startsWith('image/')) { const data = await response.json(); throw new Error(data.message || '二维码暂不可用'); } const blob = await response.blob(); if (!ownsRequest()) return; const image = document.createElement('img'); image.alt = '当前 WhatsApp 会话二维码'; image.src = URL.createObjectURL(blob); $('qrWrap').replaceChildren(image); } catch (error) { if (!ownsRequest()) return; $('qrWrap').innerHTML = qrPlaceholder('error', '二维码获取失败', `${error.message || '二维码暂不可用'} 请先启动会话，然后点击“刷新二维码”重试。`); } finally { if (ownsRequest()) $('qrButton').disabled = false; } }
     async function pairing() { const button = $('pairingButton'); button.disabled = true; $('pairingCode').hidden = true; try { const response = await mutateFetch(apiSession('/pairing-code'), {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({phone_number:$('phoneNumber').value})}); const data = await response.json(); if (!response.ok) throw new Error(data.message || '配对码获取失败'); $('pairingCode').innerHTML = `<span>请在手机 WhatsApp 中输入</span><strong>${esc(data.code)}</strong>`; $('pairingCode').hidden = false; } catch (error) { $('controlNotice').className = 'notice'; $('controlNotice').textContent = error.message; } finally { button.disabled = false; } }
     function openNew() { $('newNotice').textContent = ''; $('newForm').reset(); $('newDialog').showModal(); $('newName').focus(); }
-    async function createNew(event) { event.preventDefault(); const button = $('newSubmit'); button.disabled = true; $('newNotice').textContent = ''; try { const response = await mutateFetch('/api/sessions', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:$('newName').value.trim(),display_name:$('newDisplayName').value.trim(),start:$('newStart').checked})}); const data = await response.json(); if (!response.ok) throw new Error(data.message || '创建会话失败'); $('newDialog').close(); selected = data.name || data.session_name || $('newName').value.trim(); await refresh(); } catch (error) { $('newNotice').textContent = error.message; } finally { button.disabled = false; } }
+    async function createNew(event) { event.preventDefault(); const button = $('newSubmit'); button.disabled = true; $('newNotice').textContent = ''; try { const response = await mutateFetch('/api/sessions', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:$('newName').value.trim(),display_name:$('newDisplayName').value.trim(),start:$('newStart').checked})}); const data = await response.json(); if (!response.ok) throw new Error(data.message || '创建会话失败'); $('newDialog').close(); setSelectedSession(data.name || data.session_name || $('newName').value.trim()); await refresh(); } catch (error) { $('newNotice').textContent = error.message; } finally { button.disabled = false; } }
     function openRename() { const item = currentItem(); if (!item) return; $('renameInput').value = item.display_name || item.name; $('renameNotice').textContent = ''; $('renameDialog').showModal(); $('renameInput').focus(); $('renameInput').select(); }
     async function rename(event) { event.preventDefault(); const button = $('renameSubmit'); button.disabled = true; $('renameNotice').textContent = ''; try { const response = await mutateFetch(apiSession(''), {method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({display_name:$('renameInput').value.trim()})}); const data = await response.json(); if (!response.ok) throw new Error(data.message || '名称保存失败'); $('renameDialog').close(); await refresh(); } catch (error) { $('renameNotice').textContent = error.message; } finally { button.disabled = false; } }
     function updateStatusText(value) { return ({current:'当前',update_available:'有新版本',error:'检查失败',unknown:'未检查'}[value] || value || '未检查'); }
@@ -2460,18 +2495,23 @@ class PanelHandler(BaseHTTPRequestHandler):
         if not route.startswith(prefix):
             return None, None
         parts = route[len(prefix):].split("/")
-        if len(parts) != 2 or not parts[0] or not parts[1]:
+        if len(parts) < 2 or not parts[0] or not parts[1]:
             raise ValueError("聊天接口路径不正确")
         decoded = unquote(parts[0])
         if "%" in decoded:
             raise ValueError("会话名称编码无效")
         name = normalize_session_name(decoded)
-        action = parts[1]
+        action = "/".join(parts[1:])
         allowed = {
             "overview", "messages", "media", "events",
             "send-text", "send-image", "takeover", "resume-ai", "note",
+            "follow-ups", "labels", "summary",
         }
-        if action not in allowed:
+        if action not in allowed and not (
+            len(parts) == 4 and parts[1] == "follow-ups" and parts[2] and parts[3] == "cancel"
+        ) and not (
+            len(parts) == 3 and parts[1] == "labels" and parts[2].isascii() and parts[2].isdigit()
+        ):
             raise ValueError("不支持的聊天操作")
         return name, action
 
@@ -2511,6 +2551,24 @@ class PanelHandler(BaseHTTPRequestHandler):
         name, action = self.chat_route(route)
         query = parse_qs(urlparse(self.path).query)
         self.require_waha_session(name)
+        chat_ref = query.get("chat_ref", [""])[0]
+        if action == "follow-ups":
+            if not chat_ref:
+                raise ValueError("缺少聊天引用")
+            if self.state.automation is None:
+                raise ChatServiceError("跟进功能暂不可用", "AUTOMATION_UNAVAILABLE")
+            self.send_json(self.state.automation.list_tasks(name, chat_ref))
+            return
+        if action == "labels":
+            if not chat_ref:
+                raise ValueError("缺少聊天引用")
+            self.send_json(chat.customer_label_records(name, chat_ref))
+            return
+        if action == "summary":
+            if not chat_ref:
+                raise ValueError("缺少聊天引用")
+            self.send_json(chat.current_summary(name, chat_ref))
+            return
         if action == "overview":
             self.send_json(chat.overview(
                 name,
@@ -2578,6 +2636,49 @@ class PanelHandler(BaseHTTPRequestHandler):
         chat = self.require_chat_service()
         name, action = self.chat_route(route)
         self.require_waha_session(name, connected=action in {"send-text", "send-image"})
+        if action == "labels":
+            self.send_chat_labels_write(route, "POST")
+            return
+        if action == "follow-ups":
+            if self.state.automation is None:
+                raise ChatServiceError("跟进功能暂不可用", "AUTOMATION_UNAVAILABLE")
+            payload = self.read_api_json()
+            result = self.state.automation.create_task(
+                name,
+                payload.get("chat_ref"),
+                payload.get("delay_code"),
+                payload.get("mode"),
+                payload.get("fixed_copy"),
+            )
+            self.send_json(result, HTTPStatus.CREATED)
+            return
+        if action.startswith("follow-ups/") and action.endswith("/cancel"):
+            if self.state.automation is None:
+                raise ChatServiceError("跟进功能暂不可用", "AUTOMATION_UNAVAILABLE")
+            task_id = action[len("follow-ups/"):-len("/cancel")]
+            if not task_id:
+                raise ValueError("跟进任务编号无效")
+            self.send_json(self.state.automation.cancel_task(name, task_id))
+            return
+        if action == "summary":
+            payload = self.read_api_json()
+            chat_ref = payload.get("chat_ref")
+            if not chat_ref:
+                raise ValueError("缺少聊天引用")
+            translation = self.require_translation_service()
+            history = chat.messages(name, chat_ref, limit=20).get("items", [])
+            self.state.begin_translation_request()
+            try:
+                generated = translation.summarize_conversation(history)
+            finally:
+                self.state.end_translation_request()
+            if not isinstance(generated, dict):
+                raise TranslationError("SUMMARY_RESULT_INVALID", "对话总结格式无效")
+            ai_labels = generated.get("ai_labels", [])
+            summary = dict(generated)
+            summary.pop("ai_labels", None)
+            self.send_json(chat.save_summary_and_ai_labels(name, chat_ref, summary, ai_labels))
+            return
         if action == "send-image":
             form = self.read_image_form()
             image = form["image"]
@@ -2603,6 +2704,36 @@ class PanelHandler(BaseHTTPRequestHandler):
         chat.broker.publish(name, {"type": "refresh", "reason": action})
         self.state.log("INFO", "chat." + action, "聊天管理操作已完成", name)
         self.send_json(result)
+
+    def send_chat_labels_write(self, route, method):
+        self.require_csrf()
+        chat = self.require_chat_service()
+        name, action = self.chat_route(route)
+        self.require_waha_session(name)
+        if not action.startswith("labels"):
+            raise ValueError("不支持的标签操作")
+        query = parse_qs(urlparse(self.path).query)
+        chat_ref = query.get("chat_ref", [""])[0]
+        payload = {}
+        if method != "DELETE" or int(self.headers.get("Content-Length", "0") or 0) > 0:
+            payload = self.read_api_json()
+        if not chat_ref:
+            chat_ref = payload.get("chat_ref")
+        if not chat_ref:
+            raise ValueError("缺少聊天引用")
+        if method == "POST" and action == "labels":
+            chat.add_manual_label(name, chat_ref, payload.get("label"), payload.get("source", "MANUAL"))
+            self.send_json(chat.customer_label_records(name, chat_ref), HTTPStatus.CREATED)
+            return
+        if method == "PUT" and action.startswith("labels/"):
+            label_id = unquote(action[len("labels/"):])
+            self.send_json(chat.update_manual_label_by_id(name, chat_ref, label_id, payload.get("label", payload.get("new_label")), payload.get("source", "MANUAL")))
+            return
+        if method == "DELETE" and action.startswith("labels/"):
+            label_id = unquote(action[len("labels/"):])
+            self.send_json(chat.delete_manual_label_by_id(name, chat_ref, label_id, payload.get("source", "MANUAL")))
+            return
+        raise ValueError("不支持的标签操作")
 
     def send_translation_get(self, route):
         self.require_admin_auth()
@@ -3144,7 +3275,9 @@ class PanelHandler(BaseHTTPRequestHandler):
         method = self.command.upper()
         try:
             self.require_mutation_auth()
-            if route.startswith("/api/translation/"):
+            if route.startswith("/api/chat/sessions/"):
+                self.send_chat_labels_write(route, "PUT")
+            elif route.startswith("/api/translation/"):
                 self.send_translation_write(route, "PUT")
             elif route == "/api/sessions" or route.startswith("/api/sessions/"):
                 self.send_session_patch(route)
@@ -3180,6 +3313,22 @@ class PanelHandler(BaseHTTPRequestHandler):
             return
         except PermissionError as error:
             self.send_json({"message": str(error)}, HTTPStatus.FORBIDDEN)
+            return
+        if route.startswith("/api/chat/sessions/"):
+            try:
+                self.send_chat_labels_write(route, "DELETE")
+            except (ChatServiceError, TranslationError, RequestTooLarge, UnsupportedRequestMedia) as error:
+                self.send_service_error(error)
+            except AdminAuthError as error:
+                self.send_admin_auth_required(error)
+            except PermissionError as error:
+                self.state.log("WARN", "request.reject", str(error))
+                self.send_json({"message": str(error)}, HTTPStatus.FORBIDDEN)
+            except (ValueError, KeyError) as error:
+                self.send_json({"message": str(error)}, HTTPStatus.BAD_REQUEST)
+            except Exception as error:
+                self.state.log("ERROR", "chat.labels", str(error))
+                self.send_json({"message": "标签操作失败，请查看系统记录"}, HTTPStatus.INTERNAL_SERVER_ERROR)
             return
         if route == "/api/translation/cache":
             try:
@@ -3276,7 +3425,13 @@ def main():
     port = int(os.environ.get("PORT", "3001"))
     server = ThreadingHTTPServer(("0.0.0.0", port), PanelHandler)
     print(f"WAHA local panel listening on {port}", flush=True)
-    server.serve_forever()
+    try:
+        state.start_background_services()
+        server.serve_forever()
+    finally:
+        server.shutdown()
+        server.server_close()
+        state.stop_background_services()
 
 
 if __name__ == "__main__":
