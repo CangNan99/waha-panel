@@ -5,7 +5,7 @@
 本发布包包含两个可独立更新的服务：
 
 - `devlikeapro/waha:latest-2026.8.2`
-- `docker.io/cangnan88/waha-panel:1.0.5`
+- `docker.io/cangnan88/waha-panel:1.0.6`
 
 面板和 WAHA 通过 Docker 内部网络连接。默认只绑定本机端口：面板为 `127.0.0.1:3003`，WAHA 为 `127.0.0.1:3002`。数据保存在命名 Docker 卷中，分别为会话、媒体和 SQLite 面板数据。没有额外数据库服务。
 

@@ -120,6 +120,107 @@ class AdminArgon2Tests(unittest.TestCase):
         self.assertEqual(responses[0][1], HTTPStatus.SERVICE_UNAVAILABLE)
         self.assertEqual(responses[0][0]["code"], "ADMIN_AUTH_UNAVAILABLE")
 
+    def test_password_verification_does_not_hold_the_sqlite_write_lock(self):
+        active = 0
+        maximum = 0
+        lock = threading.Lock()
+        release = threading.Event()
+        two_entered = threading.Event()
+
+        def slow_invalid_verification(_password, _encoded):
+            nonlocal active, maximum
+            with lock:
+                active += 1
+                maximum = max(maximum, active)
+                if active == 2:
+                    two_entered.set()
+            try:
+                release.wait(1)
+                return False
+            finally:
+                with lock:
+                    active -= 1
+
+        with patch.object(admin_service, "_verify_password", slow_invalid_verification):
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                futures = [
+                    executor.submit(
+                        self.service.authenticate,
+                        "missing",
+                        f"different-password-{index}",
+                        f"client-{index}",
+                    )
+                    for index in range(2)
+                ]
+                entered_concurrently = two_entered.wait(0.3)
+                release.set()
+                results = [future.result(timeout=2) for future in futures]
+
+        self.assertTrue(entered_concurrently)
+        self.assertEqual(maximum, 2)
+        self.assertEqual(results, [False, False])
+
+    def test_concurrent_identical_credentials_share_one_password_verification(self):
+        password = "a" * 12
+        self.service.create_user("admin", password)
+        calls = 0
+        calls_lock = threading.Lock()
+
+        def slow_valid_verification(_password, _encoded):
+            nonlocal calls
+            with calls_lock:
+                calls += 1
+            time.sleep(0.05)
+            return True
+
+        with patch.object(admin_service, "_verify_password", slow_valid_verification):
+            with ThreadPoolExecutor(max_workers=8) as executor:
+                results = list(executor.map(
+                    lambda index: self.service.authenticate("admin", password, f"client-{index}"),
+                    range(8),
+                ))
+
+        self.assertEqual(results, [True] * 8)
+        self.assertEqual(calls, 1)
+
+    def test_cached_authentication_is_invalidated_when_password_hash_changes(self):
+        first_password = "a" * 12
+        second_password = "b" * 12
+        user = self.service.create_user("admin", first_password)
+        self.assertTrue(self.service.authenticate("admin", first_password, "client"))
+
+        self.service.change_password(user["id"], second_password)
+
+        self.assertFalse(self.service.authenticate("admin", first_password, "client"))
+        self.assertTrue(self.service.authenticate("admin", second_password, "client"))
+
+    def test_authentication_retries_when_same_password_is_rehashed_concurrently(self):
+        password = "a" * 12
+        user = self.service.create_user("admin", password)
+        verification_started = threading.Event()
+        continue_verification = threading.Event()
+        original_verify = admin_service._verify_password
+
+        def paused_verification(candidate, encoded):
+            verification_started.set()
+            continue_verification.wait(1)
+            return original_verify(candidate, encoded)
+
+        with patch.object(admin_service, "_verify_password", paused_verification):
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(
+                    self.service.authenticate,
+                    "admin",
+                    password,
+                    "client",
+                )
+                self.assertTrue(verification_started.wait(1))
+                self.service.change_password(user["id"], password)
+                continue_verification.set()
+                result = future.result(timeout=2)
+
+        self.assertTrue(result)
+
 
 if __name__ == "__main__":
     unittest.main()

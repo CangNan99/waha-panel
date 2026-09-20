@@ -25,6 +25,8 @@ ARGON2_ITERATIONS = 2
 ARGON2_LANES = 2
 ARGON2_LENGTH = 32
 ARGON2_GATE_LIMIT = 2
+AUTH_CACHE_TTL = 30.0
+AUTH_CACHE_MAX_ENTRIES = 128
 MAX_FAILED_ATTEMPTS = 5
 FAILED_ATTEMPT_WINDOW = 300
 LOCKOUT_SECONDS = 60
@@ -155,6 +157,10 @@ class AdminService:
         self.database_path = Path(database_path)
         self.clock = clock or time.time
         self._dummy_hash = _password_hash("invalid-password-for-timing-only")
+        self._auth_cache_key = os.urandom(32)
+        self._auth_cache = {}
+        self._auth_inflight = {}
+        self._auth_cache_lock = threading.Lock()
 
     def _connect(self):
         connection = sqlite3.connect(self.database_path)
@@ -325,9 +331,42 @@ class AdminService:
             return False
         if row["locked_until"] > now:
             return True
-        if now - row["first_failed_at"] > FAILED_ATTEMPT_WINDOW:
-            connection.execute("DELETE FROM admin_login_attempts WHERE identity_hash = ?", (identity_hash,))
         return False
+
+    def _verify_cached(self, password, encoded):
+        material = encoded.encode("utf-8") + b"\x00" + password.encode("utf-8")
+        token = hmac.new(self._auth_cache_key, material, hashlib.sha256).digest()
+        while True:
+            with self._auth_cache_lock:
+                now = time.monotonic()
+                expired = [key for key, value in self._auth_cache.items() if value[0] <= now]
+                for key in expired:
+                    self._auth_cache.pop(key, None)
+                cached = self._auth_cache.get(token)
+                if cached is not None:
+                    return cached[1], False
+                waiter = self._auth_inflight.get(token)
+                if waiter is None:
+                    waiter = threading.Event()
+                    self._auth_inflight[token] = waiter
+                    owner = True
+                else:
+                    owner = False
+            if owner:
+                break
+            waiter.wait()
+        try:
+            valid = _verify_password(password, encoded)
+            with self._auth_cache_lock:
+                if len(self._auth_cache) >= AUTH_CACHE_MAX_ENTRIES:
+                    self._auth_cache.pop(next(iter(self._auth_cache)), None)
+                self._auth_cache[token] = (time.monotonic() + AUTH_CACHE_TTL, valid)
+            return valid, True
+        finally:
+            with self._auth_cache_lock:
+                waiter = self._auth_inflight.pop(token, None)
+                if waiter is not None:
+                    waiter.set()
 
     def _record_failure(self, connection, identity_hash, now):
         row = connection.execute(
@@ -351,32 +390,55 @@ class AdminService:
 
     def authenticate(self, username, password, client_key=""):
         """Return True only for an active account with a valid password."""
+        return self._authenticate(username, password, client_key, allow_hash_retry=True)
+
+    def _authenticate(self, username, password, client_key, allow_hash_retry):
         name = str(username or "").strip()
         secret = str(password or "")
         now = int(self.clock())
         identity_hash = self._identity_hash(name, client_key)
         connection = self._connect()
         try:
-            connection.execute("BEGIN IMMEDIATE")
             if self._is_locked(connection, identity_hash, now):
-                connection.commit()
-                _verify_password(secret, self._dummy_hash)
+                self._verify_cached(secret, self._dummy_hash)
                 return False
             row = connection.execute(
                 "SELECT * FROM admin_users WHERE username = ? AND is_active = 1", (name,)
             ).fetchone()
-            valid = _verify_password(secret, row["password_hash"] if row else self._dummy_hash)
-            if not valid:
-                self._record_failure(connection, identity_hash, now)
-                connection.commit()
-                return False
-            password_hash = row["password_hash"]
+            password_hash = row["password_hash"] if row else self._dummy_hash
+            valid, verified_now = self._verify_cached(secret, password_hash)
             replacement_hash = password_hash
-            if _needs_rehash(password_hash):
+            if valid and row and verified_now and _needs_rehash(password_hash):
                 try:
                     replacement_hash = _password_hash(secret)
                 except AdminAuthUnavailableError:
                     replacement_hash = password_hash
+            connection.execute("BEGIN IMMEDIATE")
+            if self._is_locked(connection, identity_hash, now):
+                connection.commit()
+                return False
+            current = None
+            if row is not None:
+                current = connection.execute(
+                    "SELECT id, password_hash FROM admin_users WHERE id = ? AND is_active = 1",
+                    (row["id"],),
+                ).fetchone()
+            if (
+                current is not None
+                and not hmac.compare_digest(current["password_hash"], password_hash)
+            ):
+                connection.commit()
+                if allow_hash_retry:
+                    return self._authenticate(name, secret, client_key, allow_hash_retry=False)
+                return False
+            valid = bool(
+                valid
+                and current is not None
+            )
+            if not valid:
+                self._record_failure(connection, identity_hash, now)
+                connection.commit()
+                return False
             connection.execute(
                 "DELETE FROM admin_login_attempts WHERE identity_hash = ?", (identity_hash,)
             )
