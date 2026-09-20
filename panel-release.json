@@ -1,8 +1,8 @@
 {
   "component": "waha-panel",
   "repository": "docker.io/cangnan88/waha-panel",
-  "tag": "1.0.4",
-  "version": "1.0.4",
+  "tag": "1.0.5",
+  "version": "1.0.5",
   "update_mode": "independent",
   "data": "SQLite in the panel_data Docker volume"
 }

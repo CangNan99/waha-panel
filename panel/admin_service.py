@@ -10,6 +10,7 @@ import hmac
 import os
 import re
 import sqlite3
+import threading
 import time
 from pathlib import Path
 
@@ -19,17 +20,23 @@ from cryptography.exceptions import InvalidKey
 
 USERNAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 MIN_PASSWORD_LENGTH = 12
-ARGON2_MEMORY_COST = 64 * 1024
-ARGON2_ITERATIONS = 3
-ARGON2_LANES = 4
+ARGON2_MEMORY_COST = 32 * 1024
+ARGON2_ITERATIONS = 2
+ARGON2_LANES = 2
 ARGON2_LENGTH = 32
+ARGON2_GATE_LIMIT = 2
 MAX_FAILED_ATTEMPTS = 5
 FAILED_ATTEMPT_WINDOW = 300
 LOCKOUT_SECONDS = 60
+_ARGON2_GATE = threading.BoundedSemaphore(ARGON2_GATE_LIMIT)
 
 
 class AdminServiceError(ValueError):
     code = "ADMIN_ERROR"
+
+
+class AdminAuthUnavailableError(AdminServiceError):
+    code = "ADMIN_AUTH_UNAVAILABLE"
 
 
 class AdminValidationError(AdminServiceError):
@@ -94,23 +101,51 @@ def validate_password(value):
 
 
 def _password_hash(password):
-    salt = os.urandom(16)
-    kdf = Argon2id(
-        salt,
-        ARGON2_LENGTH,
-        ARGON2_ITERATIONS,
-        ARGON2_LANES,
-        ARGON2_MEMORY_COST,
-    )
-    return kdf.derive_phc_encoded(password.encode("utf-8"))
+    try:
+        with _ARGON2_GATE:
+            salt = os.urandom(16)
+            kdf = Argon2id(
+                salt,
+                ARGON2_LENGTH,
+                ARGON2_ITERATIONS,
+                ARGON2_LANES,
+                ARGON2_MEMORY_COST,
+            )
+            return kdf.derive_phc_encoded(password.encode("utf-8"))
+    except MemoryError as error:
+        raise AdminAuthUnavailableError("管理员认证资源暂时不足，请稍后重试") from error
 
 
 def _verify_password(password, encoded):
     try:
-        Argon2id.verify_phc_encoded(password.encode("utf-8"), encoded)
-        return True
+        with _ARGON2_GATE:
+            Argon2id.verify_phc_encoded(password.encode("utf-8"), encoded)
+            return True
+    except MemoryError as error:
+        raise AdminAuthUnavailableError("管理员认证资源暂时不足，请稍后重试") from error
     except (InvalidKey, TypeError, ValueError):
         return False
+
+
+def _argon2_parameters(encoded):
+    match = re.match(
+        r"^\$argon2id\$v=(?P<version>\d+)\$m=(?P<memory>\d+),t=(?P<iterations>\d+),p=(?P<lanes>\d+)\$",
+        str(encoded or ""),
+    )
+    if not match:
+        return None
+    return tuple(
+        int(match.group(name))
+        for name in ("version", "memory", "iterations", "lanes")
+    )
+
+
+def _needs_rehash(encoded):
+    parameters = _argon2_parameters(encoded)
+    if parameters is None:
+        return False
+    version, memory, iterations, lanes = parameters
+    return (version, memory, iterations, lanes) != (19, ARGON2_MEMORY_COST, ARGON2_ITERATIONS, ARGON2_LANES)
 
 
 class AdminService:
@@ -335,11 +370,19 @@ class AdminService:
                 self._record_failure(connection, identity_hash, now)
                 connection.commit()
                 return False
+            password_hash = row["password_hash"]
+            replacement_hash = password_hash
+            if _needs_rehash(password_hash):
+                try:
+                    replacement_hash = _password_hash(secret)
+                except AdminAuthUnavailableError:
+                    replacement_hash = password_hash
             connection.execute(
                 "DELETE FROM admin_login_attempts WHERE identity_hash = ?", (identity_hash,)
             )
             connection.execute(
-                "UPDATE admin_users SET last_login_at = ? WHERE id = ?", (now, row["id"])
+                "UPDATE admin_users SET password_hash = ?, last_login_at = ? WHERE id = ?",
+                (replacement_hash, now, row["id"]),
             )
             connection.commit()
             return True

@@ -24,6 +24,7 @@ from zoneinfo import ZoneInfo
 
 try:
     from .admin_service import (
+        AdminAuthUnavailableError,
         AdminConflictError,
         AdminNotFoundError,
         AdminService,
@@ -58,6 +59,7 @@ try:
     from .update_service import UpdateService
 except ImportError:  # Supports the existing `python app.py` container entrypoint.
     from admin_service import (
+        AdminAuthUnavailableError,
         AdminConflictError,
         AdminNotFoundError,
         AdminService,
@@ -682,7 +684,7 @@ class PanelState:
         self.admin_service = AdminService(self.database_path)
         self._admin_db_auth = as_bool(os.environ.get("PANEL_ADMIN_DB_AUTH", "0"))
         self._update_service = UpdateService(
-            current_panel=os.environ.get("PANEL_VERSION", "1.0.4"),
+            current_panel=os.environ.get("PANEL_VERSION", "1.0.5"),
             current_waha=os.environ.get("WAHA_IMAGE_TAG", "latest-2026.8.2"),
         )
         self.sleep_fn = sleep_fn or time.sleep
@@ -2827,6 +2829,8 @@ class PanelHandler(BaseHTTPRequestHandler):
             status = HTTPStatus.FORBIDDEN
         elif isinstance(error, AdminNotFoundError):
             status = HTTPStatus.NOT_FOUND
+        elif isinstance(error, AdminAuthUnavailableError):
+            status = HTTPStatus.SERVICE_UNAVAILABLE
         elif isinstance(error, (AdminConflictError, LastActiveAdministratorError)):
             status = HTTPStatus.CONFLICT
         elif code in {"CHAT_CAPABILITY_UNAVAILABLE", "TRANSLATION_UNAVAILABLE"}:
