@@ -30,6 +30,27 @@ IMAGE_TYPES = {
     "PNG": ("image/png", {".png"}),
     "WEBP": ("image/webp", {".webp"}),
 }
+MEDIA_LABELS = {"image": "图片", "video": "视频", "audio": "音频", "file": "文件"}
+CONTEXT_FIELD_LIMIT = 512
+
+
+def sanitize_context_content(value, limit=65535):
+    return re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", str(value or "")).strip()[:limit]
+
+
+def format_media_context(direction, kind, filename="", mime="", caption="", size=None):
+    safe_kind = kind if kind in MEDIA_LABELS else "file"
+    actor = "客服" if direction == "outbound" else "客户"
+    parts = [f"[{actor}发送{MEDIA_LABELS[safe_kind]}]"]
+    if filename:
+        parts.append("文件名=" + sanitize_context_content(filename, CONTEXT_FIELD_LIMIT))
+    if mime:
+        parts.append("MIME=" + sanitize_context_content(mime, 120))
+    if isinstance(size, int) and 0 <= size <= 1024 * 1024 * 1024:
+        parts.append(f"大小={size}")
+    if caption:
+        parts.append("说明=" + sanitize_context_content(caption, 4096))
+    return " ".join(parts)
 
 
 class ChatServiceError(RuntimeError):
@@ -127,7 +148,7 @@ def _avatar_url(value):
 
 class ChatService:
     def __init__(self, database_path, client, codec, hmac_secret, logger=None,
-                 clock=None, broker=None):
+                 clock=None, broker=None, outbound_recorder=None):
         self.database_path = Path(database_path)
         self.client = client
         self.codec = codec
@@ -135,9 +156,26 @@ class ChatService:
         self.logger = logger
         self.clock = clock or time.time
         self.broker = broker or ChatEventBroker(clock=self.clock)
+        self.outbound_recorder = outbound_recorder
         self._reference_lock = threading.Lock()
         self._chat_reference_cache = {}
         self._message_reference_cache = {}
+
+    def _notify_outbound(self, session, chat_id, message_id, content, request_id):
+        if not self.outbound_recorder:
+            return
+        try:
+            self.outbound_recorder(
+                session,
+                chat_id,
+                message_id,
+                content,
+                created_at=int(self.clock()),
+                request_id=request_id,
+            )
+        except Exception as error:
+            if self.logger:
+                self.logger("ERROR", "出站消息归档失败：" + sanitize_context_content(error, 300))
 
     def _chat_key(self, session, chat_id):
         return chat_key_hmac(self.hmac_secret, _session_name(session), str(chat_id))
@@ -596,6 +634,7 @@ class ChatService:
             response = self.client.send_text(name, chat_id, message)
             message_id = _value_id(response.get("id") if isinstance(response, dict) else response)
             self._finish_send(request_id, "SENT", message_id or None, session=name, chat_id=chat_id)
+            self._notify_outbound(name, chat_id, message_id, message, request_id)
             result = {"request_id": request_id, "state": "SENT", "kind": "text"}
             if message_id:
                 result["message_ref"] = self._encode_message(name, chat_id, message_id)
@@ -654,6 +693,7 @@ class ChatService:
             try:
                 connection.execute("UPDATE automated_send_requests SET state='SENT',waha_message_id=?,updated_at=? WHERE client_request_id=?", (message_id or None,int(self.clock()),request_id)); connection.commit()
             finally: connection.close()
+            self._notify_outbound(name, chat_id, message_id, message, request_id)
             return result
         except Exception as error:
             state, code = self._error_state(error)
@@ -874,6 +914,19 @@ class ChatService:
             )
             message_id = _value_id(response.get("id") if isinstance(response, dict) else response)
             self._finish_send(request_id, "SENT", message_id or None, session=name, chat_id=chat_id)
+            self._notify_outbound(
+                name,
+                chat_id,
+                message_id,
+                format_media_context(
+                    "outbound",
+                    "image",
+                    filename=safe_name,
+                    mime=mimetype,
+                    caption=safe_caption,
+                ),
+                request_id,
+            )
             result = {"request_id": request_id, "state": "SENT", "kind": "image"}
             if message_id:
                 result["message_ref"] = self._encode_message(name, chat_id, message_id)

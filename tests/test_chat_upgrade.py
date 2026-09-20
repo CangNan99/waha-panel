@@ -55,7 +55,9 @@ class UpgradeTestCase(unittest.TestCase):
         self.state.last_ai_context = ""
 
         def fake_ai_reply(_settings, _incoming, **kwargs):
-            self.state.last_ai_context = kwargs.get("conversation_context", "")
+            self.state.last_ai_context = "\n".join(
+                item for item in (_incoming, kwargs.get("conversation_context", "")) if item
+            )
             return "测试回复", "ai"
 
         self.state._ai_reply = fake_ai_reply
@@ -228,3 +230,97 @@ class SettingsAndContextTests(UpgradeTestCase):
             self.state.save_settings({"auto_reply_media_types": {"sticker": True}}, "default")
         after = self.state.settings_payload("default")
         self.assertEqual(after, before)
+
+
+class WebhookArchiveTests(UpgradeTestCase):
+    def test_from_me_is_archived_but_never_triggers(self):
+        result = self.state.handle_webhook(
+            self.event(body="人工内容", from_me=True, message_id="out-1"),
+            dispatch=True,
+        )
+        self.assertEqual(result["action"], "ignored")
+        self.assertEqual(self.client.send_calls, 0)
+        self.assertEqual(self.messages_for("chat-1@c.us")[0]["direction"], "outbound")
+
+    def test_duplicate_inbound_is_not_archived_or_sent_twice(self):
+        event = self.event(body="客户问题", message_id="in-1")
+        self.state.handle_webhook(event, dispatch=True)
+        self.state.handle_webhook(event, dispatch=True)
+        self.assertEqual(self.client.send_calls, 1)
+        self.assertEqual(self.count_message_id("in-1"), 1)
+
+    def test_media_setting_controls_trigger_but_keeps_metadata(self):
+        self.state.save_settings({"auto_reply_media_types": {"image": True}})
+        result = self.state.handle_webhook(
+            self.event(message_type="image", has_media=True, message_id="img-1")
+        )
+        self.assertEqual(result["action"], "replied")
+        self.assertIn("图片", self.last_context_or_prompt())
+
+    def test_disabled_media_is_archived_without_triggering(self):
+        result = self.state.handle_webhook(
+            self.event(message_type="image", has_media=True, message_id="img-off"),
+            dispatch=True,
+        )
+        self.assertEqual(result["action"], "ignored")
+        self.assertEqual(self.client.send_calls, 0)
+        self.assertIn("图片", self.message_content("img-off"))
+
+    def test_ptt_and_document_follow_audio_and_file_switches(self):
+        self.state.save_settings(
+            {
+                "auto_reply_enabled": True,
+                "auto_reply_media_types": {"audio": True, "file": True},
+            }
+        )
+        self.assertEqual(self.dispatch_media("ptt", "ptt-1")["action"], "replied")
+        self.assertEqual(self.dispatch_media("document", "doc-1")["action"], "replied")
+
+    def test_group_status_and_missing_id_never_trigger(self):
+        for event in (
+            self.event(chat_id="group@g.us", message_id="g-1", is_group=True),
+            self.event(chat_id="status@broadcast", message_id="s-1", message_type="status"),
+            self.event(chat_id="chat-1@c.us", message_id=""),
+        ):
+            self.assertEqual(self.state.handle_webhook(event)["action"], "ignored")
+        self.assertEqual(self.client.send_calls, 0)
+
+    def test_panel_send_and_webhook_echo_store_one_outbound_row(self):
+        result = self.state.chat.send_text(
+            "default",
+            self.chat_ref,
+            "人工回复",
+            "00000000-0000-0000-0000-000000000011",
+        )
+        self.state.handle_webhook(
+            self.event(
+                body="人工回复",
+                from_me=True,
+                message_id=self.decode_message_ref(result["message_ref"]),
+            )
+        )
+        self.assertEqual(self.count_outbound_content("人工回复"), 1)
+
+    def test_missing_local_send_id_uses_request_id_but_webhook_without_id_is_ignored(self):
+        self.client.send_result = {}
+        self.state.chat.send_text(
+            "default",
+            self.chat_ref,
+            "本地出站",
+            "00000000-0000-0000-0000-000000000012",
+        )
+        self.assertEqual(self.count_message_id("local:00000000-0000-0000-0000-000000000012"), 1)
+        self.assertEqual(
+            self.state.handle_webhook(self.event(from_me=True, message_id=""))["action"],
+            "ignored",
+        )
+
+    def test_missing_local_history_backfills_both_directions_before_ai(self):
+        self.client.messages = self.history_fixture(inbound=5, outbound=5)
+        self.state.handle_webhook(
+            self.event(body="现在的问题", message_id="current-1"),
+            dispatch=False,
+        )
+        self.assertEqual(self.count_direction("inbound"), 6)
+        self.assertEqual(self.count_direction("outbound"), 5)
+        self.assertIn("客服：", self.state.last_ai_context)

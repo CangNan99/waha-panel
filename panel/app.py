@@ -9,6 +9,7 @@ import re
 import sqlite3
 import threading
 import time
+import uuid
 from dataclasses import replace
 from datetime import datetime
 from email.parser import BytesParser
@@ -42,6 +43,8 @@ try:
         ChatServiceError,
         ImageValidationError,
         SendConflictError,
+        format_media_context,
+        sanitize_context_content,
     )
     from .chat_automation import ChatAutomationService
     from .chat_page import chat_management_page
@@ -77,6 +80,8 @@ except ImportError:  # Supports the existing `python app.py` container entrypoin
         ChatServiceError,
         ImageValidationError,
         SendConflictError,
+        format_media_context,
+        sanitize_context_content,
     )
     from chat_automation import ChatAutomationService
     from chat_page import chat_management_page
@@ -813,6 +818,7 @@ class PanelState:
                 str(level or "INFO").upper(), "chat.service", message, DEFAULT_SESSION_NAME
             ),
             clock=self.clock,
+            outbound_recorder=self._record_outbound_message,
         )
         self.translation = TranslationService(
             self.database_path,
@@ -860,16 +866,38 @@ class PanelState:
     def end_translation_request(self):
         self._translation_slots.release()
 
-    def _send_text(self, session_name, chat_id, text):
-        """Call both the new and legacy client method shapes safely."""
+    def _send_text(self, session_name, chat_id, text, request_id=None):
+        """Call both client method shapes and archive the successful outbound message."""
         name = normalize_session_name(session_name or DEFAULT_SESSION_NAME)
+        local_request_id = str(request_id or uuid.uuid4())
         method = getattr(self.client, "send_text")
         try:
-            return method(name, chat_id, text)
+            response = method(name, chat_id, text)
         except TypeError:
             if name == DEFAULT_SESSION_NAME:
-                return method(chat_id, text)
-            raise
+                response = method(chat_id, text)
+            else:
+                raise
+        message_id = ""
+        if isinstance(response, dict):
+            raw_id = response.get("id") or response.get("messageId")
+            if isinstance(raw_id, dict):
+                raw_id = raw_id.get("_serialized") or raw_id.get("id")
+            message_id = str(raw_id or "").strip()
+        else:
+            message_id = str(response or "").strip()
+        try:
+            self._record_outbound_message(
+                name,
+                str(chat_id),
+                message_id,
+                text,
+                created_at=int(self.clock()),
+                request_id=local_request_id,
+            )
+        except Exception as error:
+            self.log("ERROR", "conversation.archive", "出站消息归档失败：" + redact_error(error), name)
+        return response
 
     def _client_session_call(self, method_name, session_name, *args):
         name = normalize_session_name(session_name or DEFAULT_SESSION_NAME)
@@ -1451,22 +1479,145 @@ class PanelState:
             lines[0] = lines[0][: max(0, character_limit - 1)] + "…"
         return "\n".join(lines)
 
-    def _record_conversation_message(self, chat_id, direction, message_id, content, created_at=None,
-                                     session_name=DEFAULT_SESSION_NAME):
+    def _archive_message(self, session_name, chat_id, direction, message_id, content, created_at=None):
         name = normalize_session_name(session_name)
-        text = str(content or "").strip()
-        if not text:
-            return
+        message_key = str(message_id or "").strip()
+        text = sanitize_context_content(content)
+        if not message_key or not text:
+            return False
+        timestamp = int(created_at or self.clock())
         connection = sqlite3.connect(self.database_path)
         try:
-            connection.execute(
-                "INSERT INTO conversation_messages(session_name, chat_id, direction, message_id, content, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (name, chat_id, direction, message_id, text, int(created_at or time.time())),
-            )
+            connection.execute("BEGIN IMMEDIATE")
+            inserted = connection.execute(
+                "INSERT OR IGNORE INTO message_dedupe(session_name,message_id,received_at) VALUES (?,?,?)",
+                (name, message_key, timestamp),
+            ).rowcount
+            if inserted:
+                connection.execute(
+                    "INSERT INTO conversation_messages(session_name, chat_id, direction, message_id, content, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (name, str(chat_id), direction, message_key, text, timestamp),
+                )
             connection.commit()
+            return bool(inserted)
+        except Exception:
+            connection.rollback()
+            raise
         finally:
             connection.close()
+
+    def _record_outbound_message(
+        self,
+        session_name,
+        chat_id,
+        message_id,
+        content,
+        created_at=None,
+        request_id=None,
+    ):
+        archive_id = str(message_id or "").strip()
+        if not archive_id and request_id:
+            archive_id = "local:" + str(request_id)
+        return self._archive_message(
+            normalize_session_name(session_name),
+            str(chat_id),
+            "outbound",
+            archive_id,
+            content,
+            created_at,
+        )
+
+    def _record_conversation_message(self, chat_id, direction, message_id, content, created_at=None,
+                                     session_name=DEFAULT_SESSION_NAME):
+        return self._archive_message(session_name, chat_id, direction, message_id, content, created_at)
+
+    @staticmethod
+    def _media_kind(message_type, message):
+        kind = {
+            "image": "image",
+            "video": "video",
+            "audio": "audio",
+            "ptt": "audio",
+            "document": "file",
+        }.get(str(message_type or "").lower())
+        if kind:
+            return kind
+        if isinstance(message.get("media"), dict) or as_bool(message.get("hasMedia")):
+            return "file"
+        return None
+
+    @classmethod
+    def _message_context_content(cls, message, direction, message_type=None):
+        message = message if isinstance(message, dict) else {}
+        media = message.get("media") if isinstance(message.get("media"), dict) else {}
+        kind = cls._media_kind(message_type or message.get("type"), message)
+        body = message.get("body") or message.get("text") or ""
+        if not kind:
+            return sanitize_context_content(body), None
+        raw_size = media.get("size") or media.get("fileSize") or message.get("size")
+        try:
+            size = int(raw_size) if raw_size is not None else None
+        except (TypeError, ValueError):
+            size = None
+        content = format_media_context(
+            direction,
+            kind,
+            filename=media.get("filename") or message.get("filename") or "",
+            mime=media.get("mimetype") or message.get("mimetype") or "",
+            caption=message.get("caption") or body,
+            size=size,
+        )
+        return content, kind
+
+    def _backfill_conversation_history(self, session_name, chat_id, per_side):
+        name = normalize_session_name(session_name)
+        connection = sqlite3.connect(self.database_path)
+        try:
+            counts = {
+                direction: connection.execute(
+                    "SELECT COUNT(*) FROM conversation_messages WHERE session_name=? AND chat_id=? AND direction=?",
+                    (name, chat_id, direction),
+                ).fetchone()[0]
+                for direction in ("inbound", "outbound")
+            }
+        finally:
+            connection.close()
+        if all(counts[direction] >= per_side for direction in counts):
+            return
+        # Keep this call positional for compatibility with older client adapters
+        # that expose the same WAHA parameters under a private ``_before`` name.
+        # The production WahaClient accepts the exact same positional shape.
+        raw_items = self.client.get_messages(
+            name,
+            chat_id,
+            min(per_side * 2, 100),
+            0,
+            None,
+            False,
+        )
+        normalized = []
+        for raw in raw_items if isinstance(raw_items, list) else []:
+            if not isinstance(raw, dict):
+                continue
+            raw_id = raw.get("id") or raw.get("messageId")
+            if isinstance(raw_id, dict):
+                raw_id = raw_id.get("_serialized") or raw_id.get("id")
+            message_id = str(raw_id or "").strip()
+            if not message_id:
+                continue
+            from_me = as_bool(raw.get("fromMe"))
+            direction = "outbound" if from_me else "inbound"
+            content, _kind = self._message_context_content(raw, direction)
+            if not content:
+                continue
+            try:
+                created_at = int(raw.get("timestamp") or raw.get("t") or self.clock())
+            except (TypeError, ValueError):
+                created_at = int(self.clock())
+            normalized.append((created_at, message_id, direction, content))
+        for created_at, message_id, direction, content in sorted(normalized):
+            self._archive_message(name, chat_id, direction, message_id, content, created_at)
 
     def _ai_reply(self, settings, incoming_text, customer_id=None, conversation_context="", include_tools=False,
                   session_name=DEFAULT_SESSION_NAME):
@@ -1688,28 +1839,44 @@ class PanelState:
         self._publish_chat_event(
             session_name, event_name, message, chat_id, message_id, from_me, is_media, message_type
         )
-        if not event_name.startswith("message") or from_me or is_group or is_status or is_media or not isinstance(body_text, str) or not body_text.strip() or not chat_id or not message_id:
-            return {"action": "ignored", "reason": "消息不符合自动回复范围", "session": session_name}
-        connection = sqlite3.connect(self.database_path)
-        try:
-            cursor = connection.execute(
-                "INSERT OR IGNORE INTO message_dedupe(session_name, message_id, received_at) VALUES (?, ?, ?)",
-                (session_name, message_id, int(time.time())),
-            )
-            connection.commit()
-        finally:
-            connection.close()
-        if cursor.rowcount == 0:
-            return {"action": "ignored", "reason": "重复消息", "session": session_name}
+        if not event_name.startswith("message"):
+            return {"action": "ignored", "reason": "非消息事件", "session": session_name}
+        if not chat_id or not message_id:
+            return {"action": "ignored", "reason": "消息缺少聊天编号或消息编号", "session": session_name}
         current = now.astimezone(SHANGHAI_TZ) if now else datetime.now(SHANGHAI_TZ)
         received_at = int(current.timestamp())
-        customer_text = body_text.strip()
+        direction = "outbound" if from_me else "inbound"
+        context_content, media_kind = self._message_context_content(message, direction, message_type)
+        try:
+            archived = self._archive_message(
+                session_name,
+                chat_id,
+                direction,
+                message_id,
+                context_content,
+                received_at,
+            )
+        except Exception as error:
+            self.log("ERROR", "conversation.archive", "消息归档失败：" + redact_error(error, self.api_key), session_name)
+            return {"action": "ignored", "reason": "消息无法安全归档", "session": session_name}
+        if not archived:
+            return {"action": "ignored", "reason": "重复或无法归档的消息", "session": session_name}
+        if from_me or is_group or is_status:
+            return {"action": "ignored", "reason": "消息不符合自动回复范围", "session": session_name}
+        settings = self._settings(session_name)
+        media_types = normalize_media_types(settings.get("auto_reply_media_types", DEFAULT_AUTO_REPLY_MEDIA_TYPES))
+        if media_kind and not media_types.get(media_kind, False):
+            return {"action": "ignored", "reason": "该媒体类型未启用", "session": session_name}
+        customer_text = sanitize_context_content(body_text)
+        if not media_kind and not customer_text:
+            return {"action": "ignored", "reason": "消息没有可处理的文字内容", "session": session_name}
+        # Media requests always use the bounded marker (including its caption)
+        # so the AI knows both the media kind and any accompanying text.
+        incoming_for_ai = context_content if media_kind else customer_text
         is_hot = self._record_incoming_activity(chat_id, received_at, session_name)
-        self._record_conversation_message(chat_id, "inbound", message_id, customer_text, received_at, session_name)
         if self.chat is not None and self.chat.is_human_takeover(session_name, chat_id):
             self.log("INFO", "auto_reply.ignored", "人工接管中", session_name)
             return {"action": "ignored", "reason": "人工接管中", "session": session_name}
-        settings = self._settings(session_name)
         all_day = as_bool(settings.get("auto_reply_all_day", "0"))
         if not all_day and not as_bool(settings.get("auto_reply_enabled", "0")):
             self.log("INFO", "auto_reply.ignored", "自动回复已关闭", session_name)
@@ -1717,10 +1884,23 @@ class PanelState:
         if not all_day and not self._within_schedule(normalize_windows(settings.get("weekly_reply_windows", "{}")), now):
             self.log("INFO", "auto_reply.ignored", "当前不在回复时间段", session_name)
             return {"action": "ignored", "reason": "当前不在回复时间段", "session": session_name}
-        context = self._conversation_context(chat_id, exclude_message_id=message_id, session_name=session_name)
+        per_side = normalize_context_per_side(
+            settings.get("auto_reply_context_per_side", CONTEXT_PER_SIDE_MIN)
+        )
+        try:
+            self._backfill_conversation_history(session_name, chat_id, per_side)
+        except Exception as error:
+            self.log("ERROR", "conversation.backfill", "历史消息读取失败：" + redact_error(error, self.api_key), session_name)
+            return {"action": "ignored", "reason": "历史上下文暂不可用", "session": session_name}
+        context = self._conversation_context(
+            chat_id,
+            exclude_message_id=message_id,
+            session_name=session_name,
+            per_side=per_side,
+        )
         reply, mode = self._ai_reply(
             settings,
-            customer_text,
+            incoming_for_ai,
             customer_id=chat_id,
             conversation_context=context,
             include_tools=True,
@@ -1754,7 +1934,6 @@ class PanelState:
         if dispatch:
             self._wait_before_reply(reply, is_hot)
             self._send_text(session_name, chat_id, reply)
-            self._record_conversation_message(chat_id, "outbound", None, reply, session_name=session_name)
         conversation_type = "热对话" if is_hot else "冷对话"
         self.log("INFO", "auto_reply.sent", f"已处理私聊文字消息（{mode}，{conversation_type}）", session_name)
         return {"action": "replied", "mode": mode, "chat_id": chat_id, "text": reply, "session": session_name}
