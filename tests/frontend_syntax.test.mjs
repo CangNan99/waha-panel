@@ -154,3 +154,26 @@ test('chat engagement cleanup releases only the request-owned pending control', 
   assert.match(chatSource, /pendingActions\.summary===requestToken/);
   assert.match(chatSource, /resetEngagementPending/);
 });
+
+test('chat list renders note first and caps labels at four', () => {
+  assert.match(chatSource, /item\.note \|\| item\.name \|\| item\.display_id/);
+  assert.match(chatSource, /slice\(0, 4\)/);
+  assert.match(chatSource, /label_overflow/);
+  assert.match(chatSource, /conversationMoreDialog/);
+});
+
+test('mobile primary takeover actions remain visible', () => {
+  assert.match(chatSource, /人工接管/);
+  assert.match(chatSource, /恢复 AI 回复/);
+  assert.doesNotMatch(chatSource, /takeover-actions \.state-pill\{display:none/);
+});
+
+test('chat motion uses restrained transitions with a reduced-motion fallback', () => {
+  assert.match(chatSource, /dialog\[data-motion="opening"\][^\n]*animation:dialog-in 200ms/);
+  assert.match(chatSource, /dialog\[data-motion="closing"\][^\n]*animation:dialog-out 200ms/);
+  assert.match(chatSource, /toast\.closing[^\n]*200ms/);
+  assert.match(chatSource, /mobile-view-layer[^\n]*180ms/);
+  assert.match(chatSource, /prefers-reduced-motion:reduce/);
+  assert.match(chatSource, /function closeWithMotion\(/);
+  assert.match(chatSource, /restoreTarget\?\.focus\(\)/);
+});
