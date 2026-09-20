@@ -13,7 +13,7 @@ from urllib.error import HTTPError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 
-from panel.app import PanelHandler, PanelState, WahaApiError, WahaClient, init_db
+from panel.app import PanelHandler, PanelState, WahaApiError, WahaClient, init_db, settings_page
 from panel.chat_service import ChatAccessError, ChatServiceError
 
 
@@ -270,6 +270,37 @@ class SettingsAndContextTests(UpgradeTestCase):
             self.state.save_settings({"auto_reply_media_types": {"sticker": True}}, "default")
         after = self.state.settings_payload("default")
         self.assertEqual(after, before)
+
+
+class SettingsApiTests(UpgradeTestCase):
+    def test_context_and_media_settings_round_trip_per_session(self):
+        saved = self.state.save_settings(
+            {
+                "auto_reply_context_per_side": 12,
+                "auto_reply_media_types": {
+                    "image": True,
+                    "video": False,
+                    "audio": True,
+                    "file": False,
+                },
+            },
+            "sales",
+        )
+        self.assertEqual(saved["auto_reply_context_per_side"], 12)
+        self.assertTrue(saved["auto_reply_media_types"]["image"])
+        self.assertTrue(saved["auto_reply_media_types"]["audio"])
+        self.assertEqual(self.state.settings_payload("default")["auto_reply_context_per_side"], 5)
+
+    def test_settings_page_exposes_context_and_media_controls_without_secret_echo(self):
+        page = settings_page()
+        self.assertIn('id="contextPerSide"', page)
+        self.assertIn('min="5"', page)
+        self.assertIn('max="50"', page)
+        for name in ("image", "video", "audio", "file"):
+            self.assertIn(f'autoReplyMedia_{name}', page)
+        self.assertIn("auto_reply_context_per_side", page)
+        self.assertIn("auto_reply_media_types", page)
+        self.assertIn("APIKey：已配置（隐藏）", page)
 
 
 class WebhookArchiveTests(UpgradeTestCase):

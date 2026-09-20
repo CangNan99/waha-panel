@@ -177,3 +177,12 @@ test('chat motion uses restrained transitions with a reduced-motion fallback', (
   assert.match(chatSource, /function closeWithMotion\(/);
   assert.match(chatSource, /restoreTarget\?\.focus\(\)/);
 });
+
+test('settings page exposes bounded context slider and four media switches', () => {
+  assert.match(appSource, /id="contextPerSide"[^>]*min="5"[^>]*max="50"/);
+  for (const name of ['image', 'video', 'audio', 'file']) {
+    assert.match(appSource, new RegExp('autoReplyMedia_' + name));
+  }
+  assert.match(appSource, /auto_reply_context_per_side/);
+  assert.match(appSource, /auto_reply_media_types/);
+});
