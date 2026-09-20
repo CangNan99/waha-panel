@@ -37,6 +37,46 @@ class UpgradeClient:
         return dict(self.send_result)
 
 
+PNG_1X1 = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+)
+
+
+class AvatarClient(UpgradeClient):
+    def __init__(self):
+        super().__init__()
+        self.picture_mode = "ok"
+        self.picture_response = (200, "image/png", PNG_1X1)
+        self.picture_calls = []
+        self.picture_call_count = 0
+        self.active_picture_calls = 0
+        self.max_active_picture_calls = 0
+        self.picture_lock = threading.Lock()
+
+    def get_chats(self, _session, _limit, _offset):
+        return [
+            {"id": "12345@lid", "name": "测试客户"},
+            {"id": "67890@c.us", "name": "第二客户"},
+        ]
+
+    def get_chat_picture(self, session, chat_id):
+        with self.picture_lock:
+            self.picture_calls.append((session, chat_id))
+            self.picture_call_count += 1
+            self.active_picture_calls += 1
+            self.max_active_picture_calls = max(
+                self.max_active_picture_calls, self.active_picture_calls
+            )
+        try:
+            time.sleep(0.02)
+            if self.picture_mode == "404":
+                raise WahaApiError(404, "picture unavailable")
+            return self.picture_response
+        finally:
+            with self.picture_lock:
+                self.active_picture_calls -= 1
+
+
 class UpgradeTestCase(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -324,3 +364,153 @@ class WebhookArchiveTests(UpgradeTestCase):
         self.assertEqual(self.count_direction("inbound"), 6)
         self.assertEqual(self.count_direction("outbound"), 5)
         self.assertIn("客服：", self.state.last_ai_context)
+
+
+class AvatarAndMetadataTests(UpgradeTestCase):
+    client_class = AvatarClient
+
+    def setUp(self):
+        super().setUp()
+        items = self.state.chat.overview("default")["items"]
+        self.item, self.other = items
+        self.other_ref = self.other["chat_ref"]
+        self.service = self.state.chat
+
+    def run_parallel_avatar_requests(self, count):
+        refs = [
+            self.service._encode_chat("default", f"parallel-{index}@c.us")
+            for index in range(count)
+        ]
+        threads = [
+            threading.Thread(target=self._ignore_avatar_error, args=(ref,))
+            for ref in refs
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(2)
+
+    def _ignore_avatar_error(self, chat_ref):
+        try:
+            self.service.avatar("default", chat_ref)
+        except ChatServiceError:
+            pass
+
+    def test_avatar_uses_full_chat_id_and_panel_proxy(self):
+        item = self.service.overview("default")["items"][0]
+        self.assertTrue(item["avatar_url"].startswith("/api/chat/sessions/default/avatar?"))
+        self.assertNotIn("waha.example", item["avatar_url"])
+        self.service.avatar("default", item["chat_ref"])
+        self.assertEqual(self.client.picture_calls[-1][1], "12345@lid")
+
+    def test_avatar_failure_returns_placeholder_without_breaking_overview(self):
+        self.client.picture_mode = "404"
+        with self.assertRaises(ChatServiceError):
+            self.service.avatar("default", self.item["chat_ref"])
+        self.assertTrue(self.service.overview("default")["items"])
+
+    def test_picture_json_url_must_stay_on_waha_origin(self):
+        class Headers:
+            @staticmethod
+            def get_content_type():
+                return "application/json"
+
+        class Response:
+            status = 200
+            headers = Headers()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self, _limit=-1):
+                return b'{"data":{"url":"https://attacker.invalid/a.png"}}'
+
+        client = WahaClient(
+            "http://waha:3000",
+            "redacted",
+            opener=lambda *_args, **_kwargs: Response(),
+        )
+        with self.assertRaisesRegex(ValueError, "不属于 WAHA"):
+            client.get_chat_picture("default", "12345@lid")
+
+    def test_avatar_rejects_oversized_or_non_image_body(self):
+        cases = (
+            (self.item["chat_ref"], "text/html", b"x"),
+            (self.other_ref, "image/png", b"x" * (2 * 1024 * 1024 + 1)),
+        )
+        for chat_ref, content_type, body in cases:
+            self.client.picture_response = (200, content_type, body)
+            with self.assertRaises(ChatServiceError):
+                self.service.avatar("default", chat_ref)
+
+    def test_avatar_cache_and_negative_cache_bound_remote_calls(self):
+        self.service.avatar("default", self.item["chat_ref"])
+        self.service.avatar("default", self.item["chat_ref"])
+        self.assertEqual(self.client.picture_call_count, 1)
+        self.client.picture_mode = "404"
+        with self.assertRaises(ChatServiceError):
+            self.service.avatar("default", self.other_ref)
+        with self.assertRaises(ChatServiceError):
+            self.service.avatar("default", self.other_ref)
+        self.assertEqual(self.client.picture_call_count, 2)
+
+    def test_avatar_rejects_cross_session_reference(self):
+        with self.assertRaises(ChatAccessError):
+            self.service.avatar("sales", self.item["chat_ref"])
+
+    def test_overview_orders_manual_labels_first_and_caps_visible_labels(self):
+        for label in ("手动一", "手动二", "手动三"):
+            self.service.add_manual_label("default", self.item["chat_ref"], label)
+        self.service.save_summary_and_ai_labels(
+            "default", self.item["chat_ref"], {"summary": "测试"}, ("AI一", "AI二", "AI三")
+        )
+        item = self.service.overview("default")["items"][0]
+        self.assertEqual(
+            [entry["source"] for entry in item["labels"]],
+            ["manual", "manual", "manual", "ai"],
+        )
+        self.assertEqual(item["label_overflow"], 2)
+
+    def test_avatar_concurrency_never_exceeds_four_remote_requests(self):
+        self.run_parallel_avatar_requests(8)
+        self.assertLessEqual(self.client.max_active_picture_calls, 4)
+
+
+class AvatarRouteTests(AvatarAndMetadataTests):
+    def setUp(self):
+        super().setUp()
+        self.state._admin_db_auth = False
+        self.state.admin_username = "admin"
+        self.state.admin_password = "test-password"
+        PanelHandler.state = self.state
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), PanelHandler)
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+        self.url = f"http://127.0.0.1:{self.server.server_address[1]}"
+
+    def tearDown(self):
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(2)
+        super().tearDown()
+
+    def test_avatar_route_requires_auth_and_returns_private_image(self):
+        path = "/api/chat/sessions/default/avatar?chat_ref=" + quote(
+            self.item["chat_ref"], safe=""
+        )
+        with self.assertRaises(HTTPError) as denied:
+            urlopen(self.url + path, timeout=3)
+        self.assertEqual(denied.exception.code, 401)
+        credential = base64.b64encode(b"admin:test-password").decode("ascii")
+        request = Request(
+            self.url + path,
+            headers={"Authorization": "Basic " + credential},
+        )
+        with urlopen(request, timeout=3) as response:
+            self.assertEqual(response.status, 200)
+            self.assertEqual(response.headers.get_content_type(), "image/png")
+            self.assertEqual(response.headers["Cache-Control"], "private, no-store")
+            self.assertEqual(response.headers["X-Content-Type-Options"], "nosniff")

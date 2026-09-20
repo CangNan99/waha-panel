@@ -139,6 +139,7 @@ DEFAULT_AUTO_REPLY_MEDIA_TYPES = {
     "file": False,
 }
 CONTEXT_CHARACTER_LIMIT = 12000
+MAX_AVATAR_BYTES = 2 * 1024 * 1024
 SENSITIVE_NAME = re.compile(
     r"(?i)(api[_-]?key|password|token|secret|authorization)\s*([:=])\s*([^\s,;}&]+)"
 )
@@ -523,14 +524,17 @@ class WahaClient:
         except (URLError, TimeoutError, OSError) as error:
             raise WahaApiError(0, redact_error(error, self.api_key)) from error
 
-    def request_bytes(self, path):
+    def request_bytes(self, path, max_bytes=None):
         request = Request(
             self.base_url + path,
             headers={"Accept": "image/png, image/jpeg, application/json", "X-Api-Key": self.api_key},
         )
         try:
             with self.opener(request, timeout=15) as response:
-                return response.status, response.headers.get_content_type(), response.read()
+                body = response.read(max_bytes + 1) if max_bytes is not None else response.read()
+                if max_bytes is not None and len(body) > max_bytes:
+                    raise ValueError("响应内容超过面板读取限制")
+                return response.status, response.headers.get_content_type(), body
         except HTTPError as error:
             raw = error.read().decode("utf-8", errors="replace")
             raise WahaApiError(error.code, redact_error(raw, self.api_key)) from error
@@ -589,6 +593,28 @@ class WahaClient:
     def get_qr(self, session_name=DEFAULT_SESSION_NAME):
         name = self._session_path(session_name)
         return self.request_bytes(f"/api/{name}/auth/qr?format=image")
+
+    def get_chat_picture(self, session_name, chat_id):
+        name = self._session_path(session_name)
+        chat = quote(str(chat_id), safe="")
+        status, content_type, body = self.request_bytes(
+            f"/api/{name}/chats/{chat}/picture",
+            max_bytes=MAX_AVATAR_BYTES,
+        )
+        content_type = str(content_type or "").lower()
+        if content_type.startswith("image/"):
+            return status, content_type, body
+        try:
+            payload = json.loads(body.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError, json.JSONDecodeError) as error:
+            raise ValueError("WAHA 头像响应格式不正确") from error
+        if not isinstance(payload, dict):
+            raise ValueError("WAHA 头像响应格式不正确")
+        data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+        picture_url = data.get("url") or payload.get("url")
+        if not picture_url:
+            raise ValueError("WAHA 未返回头像地址")
+        return self.get_media_bytes(picture_url, max_bytes=MAX_AVATAR_BYTES)
 
     def request_pairing_code(self, session_name=DEFAULT_SESSION_NAME, phone_number=None):
         # Keep the old two-argument shape (phone_number) usable for integrations
@@ -657,7 +683,7 @@ class WahaClient:
         port = parsed.port or (443 if scheme == "https" else 80 if scheme == "http" else None)
         return scheme, host, port
 
-    def get_media_bytes(self, media_url):
+    def get_media_bytes(self, media_url, max_bytes=None):
         target = urljoin(self.base_url + "/", str(media_url or ""))
         parsed = urlparse(target)
         if parsed.username or parsed.password or self._url_origin(target) != self._url_origin(self.base_url):
@@ -671,7 +697,10 @@ class WahaClient:
         )
         try:
             with self.opener(request, timeout=20) as response:
-                return response.status, response.headers.get_content_type(), response.read()
+                body = response.read(max_bytes + 1) if max_bytes is not None else response.read()
+                if max_bytes is not None and len(body) > max_bytes:
+                    raise ValueError("响应内容超过面板读取限制")
+                return response.status, response.headers.get_content_type(), body
         except HTTPError as error:
             raw = error.read().decode("utf-8", errors="replace")
             raise WahaApiError(error.code, redact_error(raw, self.api_key)) from error
@@ -2774,7 +2803,7 @@ class PanelHandler(BaseHTTPRequestHandler):
         name = normalize_session_name(decoded)
         action = "/".join(parts[1:])
         allowed = {
-            "overview", "messages", "media", "events",
+            "overview", "messages", "media", "avatar", "events",
             "send-text", "send-image", "takeover", "resume-ai", "note",
             "follow-ups", "labels", "summary",
         }
@@ -2867,6 +2896,11 @@ class PanelHandler(BaseHTTPRequestHandler):
             if not chat_ref or not message_ref:
                 raise ValueError("缺少聊天或消息引用")
             self.send_media(*chat.media(name, chat_ref, message_ref))
+            return
+        if action == "avatar":
+            if not chat_ref:
+                raise ValueError("缺少聊天引用")
+            self.send_media(*chat.avatar(name, chat_ref))
             return
         if action == "events":
             after = self.headers.get("Last-Event-ID") or query.get("after", [0])[0]

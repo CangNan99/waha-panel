@@ -8,8 +8,9 @@ import threading
 import time
 import uuid
 import warnings
-from collections import defaultdict, deque
+from collections import OrderedDict, defaultdict, deque
 from pathlib import Path
+from urllib.parse import quote, urlencode
 
 from PIL import Image, UnidentifiedImageError
 
@@ -23,6 +24,10 @@ SESSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
 MAX_IMAGE_PIXELS = 40_000_000
 MAX_MEDIA_PROXY_BYTES = 15 * 1024 * 1024
+MAX_AVATAR_BYTES = 2 * 1024 * 1024
+AVATAR_CACHE_LIMIT = 256
+AVATAR_TTL_SECONDS = 24 * 60 * 60
+AVATAR_NEGATIVE_TTL_SECONDS = 30
 CHAT_REF_TTL = 24 * 60 * 60
 MESSAGE_REF_TTL = 60 * 60
 IMAGE_TYPES = {
@@ -160,6 +165,9 @@ class ChatService:
         self._reference_lock = threading.Lock()
         self._chat_reference_cache = {}
         self._message_reference_cache = {}
+        self._avatar_lock = threading.RLock()
+        self._avatar_cache = OrderedDict()
+        self._avatar_slots = threading.BoundedSemaphore(4)
 
     def _notify_outbound(self, session, chat_id, message_id, content, request_id):
         if not self.outbound_recorder:
@@ -176,6 +184,99 @@ class ChatService:
         except Exception as error:
             if self.logger:
                 self.logger("ERROR", "出站消息归档失败：" + sanitize_context_content(error, 300))
+
+    def _avatar_cache_get(self, key, now):
+        with self._avatar_lock:
+            cached = self._avatar_cache.get(key)
+            if not cached:
+                return None
+            if cached[0] <= now:
+                self._avatar_cache.pop(key, None)
+                return None
+            self._avatar_cache.move_to_end(key)
+            return cached
+
+    def _avatar_cache_put(self, key, value):
+        with self._avatar_lock:
+            self._avatar_cache[key] = value
+            self._avatar_cache.move_to_end(key)
+            while len(self._avatar_cache) > AVATAR_CACHE_LIMIT:
+                self._avatar_cache.popitem(last=False)
+
+    @staticmethod
+    def _validate_avatar_response(response):
+        if not isinstance(response, tuple) or len(response) != 3:
+            raise ValueError("头像响应格式不正确")
+        status, content_type, body = response
+        try:
+            status = int(status)
+        except (TypeError, ValueError) as error:
+            raise ValueError("头像响应状态不正确") from error
+        if status < 200 or status >= 300:
+            raise ValueError("头像响应状态不正确")
+        if not isinstance(body, bytes) or not body or len(body) > MAX_AVATAR_BYTES:
+            raise ValueError("头像内容超过面板读取限制")
+        media_type = str(content_type or "").split(";", 1)[0].strip().lower()
+        if media_type not in {"image/jpeg", "image/png", "image/webp"}:
+            raise ValueError("头像不是受支持的图片格式")
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("error", Image.DecompressionBombWarning)
+                with Image.open(io.BytesIO(body)) as image:
+                    image_format = str(image.format or "").upper()
+                    if image_format not in {"JPEG", "PNG", "WEBP"}:
+                        raise ValueError("头像不是受支持的图片格式")
+                    image.verify()
+        except (UnidentifiedImageError, Image.DecompressionBombError,
+                Image.DecompressionBombWarning, OSError, ValueError) as error:
+            raise ValueError("头像图片内容无法识别") from error
+        return status, media_type, body
+
+    def avatar(self, session, chat_ref):
+        name = _session_name(session)
+        chat_id = self._decode_chat(name, chat_ref)
+        key = (name, str(chat_id))
+        now = int(self.clock())
+        cached = self._avatar_cache_get(key, now)
+        if cached:
+            _expires_at, status, content_type, payload = cached
+            if isinstance(payload, bytes):
+                return status, content_type, payload
+            raise ChatServiceError("客户头像暂不可用", "AVATAR_UNAVAILABLE")
+        self._avatar_slots.acquire()
+        try:
+            # Another request may have filled the cache while this one waited.
+            cached = self._avatar_cache_get(key, int(self.clock()))
+            if cached:
+                _expires_at, status, content_type, payload = cached
+                if isinstance(payload, bytes):
+                    return status, content_type, payload
+                raise ChatServiceError("客户头像暂不可用", "AVATAR_UNAVAILABLE")
+            try:
+                response = self._validate_avatar_response(
+                    self.client.get_chat_picture(name, chat_id)
+                )
+            except Exception as error:
+                self._avatar_cache_put(
+                    key,
+                    (
+                        int(self.clock()) + AVATAR_NEGATIVE_TTL_SECONDS,
+                        None,
+                        None,
+                        "AVATAR_UNAVAILABLE",
+                    ),
+                )
+                if isinstance(error, ChatServiceError):
+                    raise
+                raise ChatServiceError("客户头像暂不可用", "AVATAR_UNAVAILABLE") from error
+            status, content_type, body = response
+            self._avatar_cache_put(
+                key,
+                (int(self.clock()) + AVATAR_TTL_SECONDS, status, content_type, body),
+            )
+            return response
+        finally:
+            self._avatar_slots.release()
 
     def _chat_key(self, session, chat_id):
         return chat_key_hmac(self.hmac_secret, _session_name(session), str(chat_id))
@@ -408,13 +509,57 @@ class ChatService:
             connection.close()
         return self._takeover_state_by_id(name, chat_id)
 
+    def _overview_metadata(self, session, chat_ids):
+        name = _session_name(session)
+        unique_ids = [str(chat_id) for chat_id in dict.fromkeys(chat_ids) if str(chat_id)]
+        if not unique_ids:
+            return {}
+        keys = {chat_id: self._chat_key(name, chat_id) for chat_id in unique_ids}
+        placeholders = ",".join("?" for _ in keys)
+        values = [keys[chat_id] for chat_id in unique_ids]
+        metadata = {
+            chat_id: {"key": key, "note": "", "labels": []}
+            for chat_id, key in keys.items()
+        }
+        connection = sqlite3.connect(self.database_path)
+        try:
+            note_rows = connection.execute(
+                "SELECT chat_key_hmac,note FROM chat_notes "
+                f"WHERE session_name=? AND chat_key_hmac IN ({placeholders})",
+                [name, *values],
+            ).fetchall()
+            by_key = {key: chat_id for chat_id, key in keys.items()}
+            for chat_key, note in note_rows:
+                chat_id = by_key.get(chat_key)
+                if chat_id is not None:
+                    metadata[chat_id]["note"] = _limited_text(note, 1000)
+            label_rows = connection.execute(
+                "SELECT id,chat_key_hmac,source,label FROM customer_labels "
+                f"WHERE session_name=? AND chat_key_hmac IN ({placeholders}) "
+                "ORDER BY CASE source WHEN 'MANUAL' THEN 0 ELSE 1 END, id",
+                [name, *values],
+            ).fetchall()
+            for label_id, chat_key, source, label in label_rows:
+                chat_id = by_key.get(chat_key)
+                if chat_id is None:
+                    continue
+                metadata[chat_id]["labels"].append({
+                    "id": int(label_id),
+                    "source": "manual" if source == "MANUAL" else "ai",
+                    "label": _limited_text(label, 100),
+                })
+        finally:
+            connection.close()
+        return metadata
+
     def overview(self, session, limit=30, offset=0, search="", unread_only=False):
         name = _session_name(session)
         page_limit = max(1, min(int(limit), 100))
         page_offset = max(0, int(offset))
         raw_items = self.client.get_chats(name, page_limit, page_offset)
         needle = str(search or "").strip().casefold()
-        items = []
+        normalized = []
+        chat_ids = []
         for raw in raw_items:
             chat_id = _value_id(raw.get("id") or raw.get("chatId"))
             if not chat_id:
@@ -422,10 +567,6 @@ class ChatService:
             contact_name = _limited_text(
                 raw.get("name") or raw.get("title") or raw.get("pushName") or chat_id.split("@", 1)[0],
                 120,
-            )
-            avatar = _avatar_url(
-                raw.get("avatar_url") or raw.get("avatarUrl") or raw.get("profilePictureUrl")
-                or raw.get("profile_picture_url") or raw.get("picture") or raw.get("avatar")
             )
             display_id = chat_id.split("@", 1)[0]
             last = raw.get("lastMessage") if isinstance(raw.get("lastMessage"), dict) else {}
@@ -442,11 +583,25 @@ class ChatService:
                 last.get("timestamp") or raw.get("messageTimestamp") or raw.get("timestamp") or 0
             )
             state = self._takeover_state_by_id(name, chat_id)
+            chat_ref = self._encode_chat(name, chat_id)
+            normalized.append((chat_id, chat_ref, contact_name, display_id, last_text, unread, timestamp, state))
+            chat_ids.append(chat_id)
+        metadata = self._overview_metadata(name, chat_ids)
+        items = []
+        for chat_id, chat_ref, contact_name, display_id, last_text, unread, timestamp, state in normalized:
+            chat_metadata = metadata.get(chat_id, {"note": "", "labels": []})
+            labels = chat_metadata.get("labels", [])
+            visible_labels = labels[:4]
             items.append({
-                "chat_ref": self._encode_chat(name, chat_id),
+                "chat_ref": chat_ref,
                 "name": contact_name,
-                "avatar_url": avatar,
-                "note": self._note_for_id(name, chat_id)["note"],
+                "avatar_url": (
+                    f"/api/chat/sessions/{quote(name, safe='')}/avatar?"
+                    + urlencode({"chat_ref": chat_ref})
+                ),
+                "note": chat_metadata.get("note", ""),
+                "labels": visible_labels,
+                "label_overflow": max(0, len(labels) - len(visible_labels)),
                 "display_id": display_id,
                 "is_group": chat_id.endswith("@g.us"),
                 "unread_count": unread,

@@ -71,7 +71,12 @@ class ChatFeatureTests(unittest.TestCase):
         self.temp.cleanup()
 
     def test_avatar_and_customer_note_are_session_scoped(self):
-        self.assertEqual(self.item["avatar_url"], "https://waha.example/avatar.jpg")
+        self.assertTrue(
+            self.item["avatar_url"].startswith(
+                "/api/chat/sessions/default/avatar?chat_ref="
+            )
+        )
+        self.assertNotIn("waha.example", self.item["avatar_url"])
         self.assertEqual(self.item["note"], "")
         saved = self.service.save_note("default", self.item["chat_ref"], "VIP 客户")
         self.assertEqual(saved["note"], "VIP 客户")
