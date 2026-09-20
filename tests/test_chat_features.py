@@ -192,8 +192,8 @@ class QrAndReleaseTests(unittest.TestCase):
         self.assertIn("${WAHA_BIND_ADDRESS:-127.0.0.1}:${WAHA_PORT:-3002}:3000", compose)
         self.assertIn("${PANEL_BIND_ADDRESS:-127.0.0.1}:${PANEL_PORT:-3003}:3001", compose)
         self.assertIn("- internal", compose)
-        self.assertIn("[INSTALL.zh-CN.md](INSTALL.zh-CN.md)", readme)
-        self.assertIn("[INSTALL.zh-CN.md](INSTALL.zh-CN.md)", readme_zh)
+        self.assertIn("(INSTALL.zh-CN.md)", readme)
+        self.assertIn("(INSTALL.zh-CN.md)", readme_zh)
 
     def test_update_service_defaults_to_panel_1_0_6(self):
         self.assertEqual(UpdateService().current["panel"], "1.0.6")

@@ -114,11 +114,25 @@ DEFAULT_SETTINGS = {
     "ai_model": "",
     "ai_api_key": "",
     "theme": "daylight",
+    "auto_reply_context_per_side": "5",
+    "auto_reply_media_types": json.dumps(
+        {"image": False, "video": False, "audio": False, "file": False},
+        ensure_ascii=False,
+        sort_keys=True,
+    ),
 }
 HOT_CONVERSATION_SECONDS = 10 * 60
 MIN_TYPING_DELAY_SECONDS = 6.0
 MAX_TYPING_DELAY_SECONDS = 15.0
-CONTEXT_MESSAGE_LIMIT = 20
+CONTEXT_PER_SIDE_MIN = 5
+CONTEXT_PER_SIDE_MAX = 50
+MEDIA_TYPE_KEYS = ("image", "video", "audio", "file")
+DEFAULT_AUTO_REPLY_MEDIA_TYPES = {
+    "image": False,
+    "video": False,
+    "audio": False,
+    "file": False,
+}
 CONTEXT_CHARACTER_LIMIT = 12000
 SENSITIVE_NAME = re.compile(
     r"(?i)(api[_-]?key|password|token|secret|authorization)\s*([:=])\s*([^\s,;}&]+)"
@@ -153,6 +167,32 @@ def as_bool(value):
     if isinstance(value, bool):
         return value
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def normalize_context_per_side(value, default=CONTEXT_PER_SIDE_MIN):
+    try:
+        number = int(str(value).strip())
+    except (TypeError, ValueError):
+        return default
+    if number < CONTEXT_PER_SIDE_MIN or number > CONTEXT_PER_SIDE_MAX:
+        return default
+    return number
+
+
+def normalize_media_types(value, strict=False):
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except (TypeError, ValueError):
+            value = {}
+    if not isinstance(value, dict):
+        if strict:
+            raise ValueError("媒体处理选项格式不正确")
+        value = {}
+    unknown = set(value) - set(MEDIA_TYPE_KEYS)
+    if strict and unknown:
+        raise ValueError("包含不支持的媒体处理选项")
+    return {key: as_bool(value.get(key, False)) for key in MEDIA_TYPE_KEYS}
 
 
 def normalize_theme(value):
@@ -984,6 +1024,12 @@ class PanelState:
             "ai_model": values.get("ai_model", ""),
             "ai_api_key_configured": bool(values.get("ai_api_key", "")),
             "theme": normalize_theme(values.get("theme", "daylight")),
+            "auto_reply_context_per_side": normalize_context_per_side(
+                values.get("auto_reply_context_per_side", CONTEXT_PER_SIDE_MIN)
+            ),
+            "auto_reply_media_types": normalize_media_types(
+                values.get("auto_reply_media_types", DEFAULT_AUTO_REPLY_MEDIA_TYPES)
+            ),
             "timezone": "Asia/Shanghai",
         }
 
@@ -993,6 +1039,20 @@ class PanelState:
         name = normalize_session_name(session_name)
         self.ensure_managed_session(name)
         updates = {}
+        if "auto_reply_context_per_side" in payload:
+            try:
+                context_count = int(str(payload["auto_reply_context_per_side"]).strip())
+            except (TypeError, ValueError) as error:
+                raise ValueError("历史消息数必须为 5-50") from error
+            if not CONTEXT_PER_SIDE_MIN <= context_count <= CONTEXT_PER_SIDE_MAX:
+                raise ValueError("历史消息数必须为 5-50")
+            updates["auto_reply_context_per_side"] = str(context_count)
+        if "auto_reply_media_types" in payload:
+            updates["auto_reply_media_types"] = json.dumps(
+                normalize_media_types(payload["auto_reply_media_types"], strict=True),
+                ensure_ascii=False,
+                sort_keys=True,
+            )
         if "auto_reply_enabled" in payload:
             updates["auto_reply_enabled"] = "1" if as_bool(payload["auto_reply_enabled"]) else "0"
         if "auto_reply_all_day" in payload:
@@ -1334,31 +1394,61 @@ class PanelState:
             connection.close()
         return "\n\n".join(f"[{name}]\n{content}" for name, content in rows)
 
-    def _conversation_context(self, chat_id, exclude_message_id=None, session_name=DEFAULT_SESSION_NAME):
+    def _conversation_context(
+        self,
+        chat_id,
+        exclude_message_id=None,
+        session_name=DEFAULT_SESSION_NAME,
+        per_side=None,
+    ):
         name = normalize_session_name(session_name)
+        limit = normalize_context_per_side(
+            per_side
+            if per_side is not None
+            else self._settings(name).get("auto_reply_context_per_side", CONTEXT_PER_SIDE_MIN)
+        )
+        inbound = self._context_rows(name, chat_id, "inbound", limit, exclude_message_id)
+        outbound = self._context_rows(name, chat_id, "outbound", limit, exclude_message_id)
+        rows = sorted(inbound + outbound, key=lambda row: (row["created_at"], row["id"]))
+        return self._bounded_context_text(rows, CONTEXT_CHARACTER_LIMIT)
+
+    def _context_rows(self, session_name, chat_id, direction, limit, exclude_message_id):
         connection = sqlite3.connect(self.database_path)
         try:
-            rows = connection.execute(
-                "SELECT direction, message_id, content FROM conversation_messages "
-                "WHERE session_name = ? AND chat_id = ? "
-                "AND (? IS NULL OR message_id IS NULL OR message_id != ?) "
-                "ORDER BY id DESC LIMIT ?",
-                (name, chat_id, exclude_message_id, exclude_message_id, CONTEXT_MESSAGE_LIMIT),
-            ).fetchall()
+            connection.row_factory = sqlite3.Row
+            return [
+                dict(row)
+                for row in connection.execute(
+                    "SELECT id,direction,message_id,content,created_at FROM conversation_messages "
+                    "WHERE session_name=? AND chat_id=? AND direction=? "
+                    "AND (? IS NULL OR message_id IS NULL OR message_id != ?) "
+                    "ORDER BY id DESC LIMIT ?",
+                    (
+                        normalize_session_name(session_name),
+                        chat_id,
+                        direction,
+                        exclude_message_id,
+                        exclude_message_id,
+                        limit,
+                    ),
+                )
+            ]
         finally:
             connection.close()
-        lines = []
-        total = 0
-        for direction, _message_id, content in reversed(rows):
-            label = "客户" if direction == "inbound" else "客服"
-            line = f"{label}：{content.strip()}"
-            if total + len(line) > CONTEXT_CHARACTER_LIMIT:
-                remaining = CONTEXT_CHARACTER_LIMIT - total
-                if remaining > 20:
-                    lines.append(line[:remaining] + "…")
-                break
-            lines.append(line)
-            total += len(line)
+
+    @staticmethod
+    def _bounded_context_text(rows, character_limit):
+        lines = [
+            ("客户" if row["direction"] == "inbound" else "客服")
+            + "："
+            + str(row["content"] or "").strip()
+            for row in rows
+            if str(row["content"] or "").strip()
+        ]
+        while len("\n".join(lines)) > character_limit and len(lines) > 1:
+            lines.pop(0)
+        if lines and len(lines[0]) > character_limit:
+            lines[0] = lines[0][: max(0, character_limit - 1)] + "…"
         return "\n".join(lines)
 
     def _record_conversation_message(self, chat_id, direction, message_id, content, created_at=None,
