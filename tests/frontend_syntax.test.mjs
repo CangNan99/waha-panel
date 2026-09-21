@@ -45,6 +45,7 @@ test('stale QR requests cannot update a newly selected session', async () => {
     ['globalNotice', { textContent: '' }],
     ['logs', { innerHTML: '' }],
     ['qrButton', { disabled: false }],
+    ['pairingButton', { disabled: false, setAttribute() {} }],
     ['qrWrap', qrWrap],
     ['qrImageLayer', qrImageLayer],
     ['qrFrosted', qrFrosted],
