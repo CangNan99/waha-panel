@@ -24,7 +24,7 @@ services:
       - internal
 
   waha-panel:
-    image: ${PANEL_IMAGE:-docker.io/cangnan88/waha-panel:1.0.6}
+    image: ${PANEL_IMAGE:-docker.io/cangnan88/waha-panel:1.0.7}
     restart: unless-stopped
     mem_limit: 512m
     depends_on:
@@ -39,7 +39,7 @@ services:
       PANEL_ADMIN_DB_AUTH: "1"
       PANEL_ADMIN_BOOTSTRAP_FILE: /run/panel-secrets/panel_admin_bootstrap
       PANEL_DATA_ENCRYPTION_KEY: ${PANEL_DATA_ENCRYPTION_KEY}
-      PANEL_VERSION: ${PANEL_VERSION:-1.0.6}
+      PANEL_VERSION: ${PANEL_VERSION:-1.0.7}
       WAHA_IMAGE_TAG: ${WAHA_IMAGE_TAG:-latest-2026.8.2}
       PANEL_SPONSOR_ENABLED: ${PANEL_SPONSOR_ENABLED:-1}
       PANEL_SPONSOR_IMAGE_URL: ${PANEL_SPONSOR_IMAGE_URL:-https://www.6spring.com/wp-content/uploads/2026/09/cangnan.jpg}

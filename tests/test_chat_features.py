@@ -194,22 +194,22 @@ class QrAndReleaseTests(unittest.TestCase):
         readme = (root / "README.md").read_text(encoding="utf-8")
         readme_zh = (root / "README.zh-CN.md").read_text(encoding="utf-8")
 
-        self.assertEqual(release["tag"], "1.0.6")
-        self.assertEqual(release["version"], "1.0.6")
-        self.assertIn("${PANEL_IMAGE:-docker.io/cangnan88/waha-panel:1.0.6}", compose)
-        self.assertIn("${PANEL_VERSION:-1.0.6}", compose)
-        self.assertIn('os.environ.get("PANEL_VERSION", "1.0.6")', (root / "panel" / "app.py").read_text(encoding="utf-8"))
+        self.assertEqual(release["tag"], "1.0.7")
+        self.assertEqual(release["version"], "1.0.7")
+        self.assertIn("${PANEL_IMAGE:-docker.io/cangnan88/waha-panel:1.0.7}", compose)
+        self.assertIn("${PANEL_VERSION:-1.0.7}", compose)
+        self.assertIn('os.environ.get("PANEL_VERSION", "1.0.7")', (root / "panel" / "app.py").read_text(encoding="utf-8"))
         self.assertIn("mem_limit: 512m", compose)
         for installer in (env_example, install_sh, install_ps1):
-            self.assertIn("PANEL_IMAGE=docker.io/cangnan88/waha-panel:1.0.6", installer)
-            self.assertIn("PANEL_VERSION=1.0.6", installer)
+            self.assertIn("PANEL_IMAGE=docker.io/cangnan88/waha-panel:1.0.7", installer)
+            self.assertIn("PANEL_VERSION=1.0.7", installer)
             self.assertNotIn("PANEL_IMAGE=docker.io/cangnan88/waha-panel:1.0.2", installer)
             self.assertNotIn("PANEL_VERSION=1.0.2", installer)
-        self.assertIn("docker.io/cangnan88/waha-panel:1.0.6", install_docs)
+        self.assertIn("docker.io/cangnan88/waha-panel:1.0.7", install_docs)
         self.assertIn("1.0.2", release_plan)
         self.assertIn("1.0.2", release_design)
-        self.assertIn("docker.io/cangnan88/waha-panel:1.0.6", readme)
-        self.assertIn("docker.io/cangnan88/waha-panel:1.0.6", readme_zh)
+        self.assertIn("docker.io/cangnan88/waha-panel:1.0.7", readme)
+        self.assertIn("docker.io/cangnan88/waha-panel:1.0.7", readme_zh)
         self.assertIn("${WAHA_IMAGE:-devlikeapro/waha:latest-2026.8.2}", compose)
         self.assertIn("${WAHA_BIND_ADDRESS:-127.0.0.1}:${WAHA_PORT:-3002}:3000", compose)
         self.assertIn("${PANEL_BIND_ADDRESS:-127.0.0.1}:${PANEL_PORT:-3003}:3001", compose)
@@ -218,7 +218,7 @@ class QrAndReleaseTests(unittest.TestCase):
         self.assertIn("(INSTALL.zh-CN.md)", readme_zh)
 
     def test_update_service_defaults_to_panel_1_0_6(self):
-        self.assertEqual(UpdateService().current["panel"], "1.0.6")
+        self.assertEqual(UpdateService().current["panel"], "1.0.7")
 
 
 class ChatPageRegressionTests(unittest.TestCase):
