@@ -5,9 +5,10 @@ import unittest
 from pathlib import Path
 from urllib.parse import urlparse
 
-from panel.app import PanelState, WahaClient, init_db, multi_session_html_page
+from panel.app import PanelState, WahaClient, html_page, init_db, multi_session_html_page
 from panel.chat_page import chat_management_page
 from panel.chat_service import ChatService
+from panel.commerce_page import commerce_page
 from panel.update_service import UpdateService
 
 
@@ -154,15 +155,31 @@ class QrAndReleaseTests(unittest.TestCase):
         self.assertIn("正在获取二维码", page)
         self.assertIn("二维码获取失败", page)
         for state in ("idle", "loading", "error"):
-            self.assertIn(f"qrPlaceholder('{state}'", page)
+            self.assertIn(f"setQrState('{state}'", page)
+        self.assertIn("qr-decoration", page)
+        self.assertIn("qrImageLayer", page)
+        self.assertIn('aria-busy', page)
         self.assertNotIn("data:image/", page)
 
     def test_qr_image_replaces_placeholder_only_after_image_response(self):
         page = multi_session_html_page()
         content_type_guard = "if (!response.ok || !type.startsWith('image/'))"
         self.assertIn(content_type_guard, page)
-        self.assertIn("$('qrWrap').replaceChildren(image)", page)
-        self.assertLess(page.index(content_type_guard), page.index("$('qrWrap').replaceChildren(image)"))
+        self.assertIn("$('qrImageLayer').replaceChildren(image)", page)
+        load_qr = page[page.index("async function loadQr()"):]
+        self.assertLess(load_qr.index(content_type_guard), load_qr.index("await revealQrImage"))
+
+    def test_panel_brand_and_qr_motion_contract(self):
+        pages = (html_page(), multi_session_html_page())
+        commerce = commerce_page()
+        for page in pages:
+            self.assertIn("WhatsAPP AI管理面板", page)
+            self.assertIn("WAHA 服务", page)
+            self.assertIn("data-state=", page)
+            self.assertIn("420ms ease-out", page)
+            self.assertIn("prefers-reduced-motion", page)
+            self.assertNotIn("data:image/", page)
+        self.assertIn("WhatsAPP AI管理面板", commerce)
 
     def test_release_metadata_uses_panel_1_0_6_without_changing_waha_or_network(self):
         root = Path(__file__).resolve().parents[1]

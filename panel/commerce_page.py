@@ -15,7 +15,7 @@ def commerce_page():
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>订单与支付管理 | WAHA</title>
+  <title>订单与支付管理 | WhatsAPP AI管理面板</title>
   <style>
     :root {
       color-scheme: dark;
@@ -154,7 +154,7 @@ def commerce_page():
     <header class="topbar">
       <div>
         <div class="eyebrow">Commerce operations / WAHA</div>
-        <h1>订单与支付管理</h1>
+        <h1>WhatsAPP AI管理面板 · 订单与支付管理</h1>
         <p class="subhead">按需核对 WooCommerce 订单与 PayPal 支付，人工工单和查询审计集中在同一处。</p>
       </div>
       <div class="status-actions">

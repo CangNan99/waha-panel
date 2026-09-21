@@ -32,15 +32,25 @@ test('stale QR requests cannot update a newly selected session', async () => {
     .slice(0, source.indexOf("$('themeSelect').addEventListener"));
   const qrWrap = {
     _innerHTML: '',
+    dataset: {},
+    setAttribute(name, value) { this[name] = value; },
     get innerHTML() { return this._innerHTML; },
     set innerHTML(value) { this._innerHTML = value; delete this.child; },
-    replaceChildren(child) { this.child = child; this._innerHTML = ''; },
+    replaceChildren(...children) { this.child = children[0]; this._innerHTML = ''; },
   };
+  const qrImageLayer = { child: undefined, replaceChildren(...children) { this.child = children[0]; } };
+  const qrFrosted = { dataset: {}, setAttribute() {}, textContent: '' };
+  const pairingCode = { dataset: {}, hidden: true, setAttribute() {}, replaceChildren() {} };
   const elements = new Map([
     ['globalNotice', { textContent: '' }],
     ['logs', { innerHTML: '' }],
     ['qrButton', { disabled: false }],
     ['qrWrap', qrWrap],
+    ['qrImageLayer', qrImageLayer],
+    ['qrFrosted', qrFrosted],
+    ['qrTitle', { textContent: '' }],
+    ['qrDetail', { textContent: '' }],
+    ['pairingCode', pairingCode],
   ]);
   const deferred = () => {
     let resolve;
@@ -62,12 +72,14 @@ test('stale QR requests cannot update a newly selected session', async () => {
     throw new Error(`unexpected fetch ${url}`);
   };
   class TestURL extends URL {
+    static revoked = [];
     static createObjectURL(blob) { return `blob:${blob.id}`; }
+    static revokeObjectURL(url) { TestURL.revoked.push(url); }
   }
   const context = vm.createContext({
     console,
     document: {
-      createElement: () => ({}),
+      createElement: (tag) => tag === 'img' ? { src: '', alt: '', decode: async () => {} } : {},
       getElementById: (id) => elements.get(id) || { addEventListener() {} },
       querySelectorAll: () => [],
     },
@@ -79,6 +91,7 @@ test('stale QR requests cannot update a newly selected session', async () => {
     location: { href: 'http://panel.local/?session=default', search: '?session=default' },
     URL: TestURL,
     URLSearchParams,
+    requestAnimationFrame: (callback) => callback(),
   });
   vm.runInContext(`${declarations}\nglobalThis.qrTest = { loadQr, selectSession, setSelectedSession };`, context);
 
@@ -88,12 +101,13 @@ test('stale QR requests cannot update a newly selected session', async () => {
   first.resolve(imageResponse('default'));
   await firstLoad;
 
-  assert.equal(elements.get('qrWrap').child, undefined, 'session A must not replace session B loading state');
+  assert.equal(elements.get('qrImageLayer').child, undefined, 'session A must not replace session B loading state');
+  assert.ok(TestURL.revoked.includes('blob:default'), 'stale QR object URL must be released');
   assert.equal(elements.get('qrButton').disabled, true, 'session A must not release session B button ownership');
 
   second.resolve(imageResponse('sales'));
   await secondLoad;
-  assert.equal(elements.get('qrWrap').child.src, 'blob:sales');
+  assert.equal(elements.get('qrImageLayer').child.src, 'blob:sales');
   assert.equal(elements.get('qrButton').disabled, false);
 
   context.qrTest.setSelectedSession('default');
@@ -111,7 +125,8 @@ test('stale QR requests cannot update a newly selected session', async () => {
 
   current.resolve(imageResponse('sales-current'));
   await currentLoad;
-  assert.equal(elements.get('qrWrap').child.src, 'blob:sales-current');
+  assert.equal(elements.get('qrImageLayer').child.src, 'blob:sales-current');
+  assert.ok(TestURL.revoked.includes('blob:sales'), 'replaced QR object URL must be released');
   assert.equal(elements.get('qrButton').disabled, false);
 
   assert.match(declarations, /if \(!names\.includes\(selected\)\) setSelectedSession\(/);
@@ -185,4 +200,20 @@ test('settings page exposes bounded context slider and four media switches', () 
   }
   assert.match(appSource, /auto_reply_context_per_side/);
   assert.match(appSource, /auto_reply_media_types/);
+});
+
+test('QR reveal and pairing states are explicit and resource-safe', () => {
+  assert.match(appSource, /setQrState\('loading'/);
+  assert.match(appSource, /setQrState\('ready'/);
+  assert.match(appSource, /setQrState\('error'/);
+  assert.match(appSource, /await image\.decode\(\)/);
+  assert.match(appSource, /URL\.revokeObjectURL/);
+  assert.match(appSource, /ownsRequest\(\)/);
+  assert.match(appSource, /420ms ease-out/);
+  assert.match(appSource, /legacyQrImageLayer/);
+  assert.match(appSource, /requestPairingCode/);
+  assert.match(appSource, /setPairingState\(['"]loading/);
+  assert.match(appSource, /setPairingState\(['"]ready/);
+  assert.match(appSource, /setPairingState\(['"]error/);
+  assert.match(appSource, /aria-busy/);
 });

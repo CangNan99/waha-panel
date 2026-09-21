@@ -16,7 +16,7 @@ def chat_management_page(session_name):
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
   <meta name="color-scheme" content="light dark">
-  <title>聊天管理 · WAHA</title>
+  <title>聊天管理 · WhatsAPP AI管理面板</title>
   <style>
     :root{color-scheme:light;--bg:#f5f5f7;--surface:rgba(255,255,255,.92);--solid:#fff;--soft:#f2f2f7;--soft-2:#e9e9ee;--line:rgba(60,60,67,.16);--ink:#1d1d1f;--muted:#6e6e73;--accent:#0071e3;--accent-soft:#e7f2ff;--good:#16875b;--good-soft:#e8f7f0;--warn:#a85f00;--warn-soft:#fff2dc;--bad:#c9342f;--bad-soft:#fff0ef;--bubble-in:#fff;--bubble-out:#dff3e7;--shadow:0 12px 36px rgba(0,0,0,.07);--focus:0 0 0 4px rgba(0,113,227,.18)}
     html[data-theme="night"]{color-scheme:dark;--bg:#0d0e10;--surface:rgba(28,29,32,.94);--solid:#1c1d20;--soft:#26272b;--soft-2:#34353a;--line:rgba(235,235,245,.16);--ink:#f5f5f7;--muted:#aaaab0;--accent:#64a9ff;--accent-soft:#162d49;--good:#55d69a;--good-soft:#15372b;--warn:#f6c26b;--warn-soft:#3e311d;--bad:#ff8a83;--bad-soft:#472421;--bubble-in:#26272b;--bubble-out:#173b2d;--shadow:0 14px 42px rgba(0,0,0,.35);--focus:0 0 0 4px rgba(100,169,255,.22)}
@@ -45,7 +45,7 @@ def chat_management_page(session_name):
 <body data-session="__SESSION__">
 <div class="app" id="app">
   <header class="topbar">
-    <div class="brand"><div class="brand-mark" aria-hidden="true"><svg class="icon" viewBox="0 0 24 24"><path d="M8 9h8M8 13h5"/><path d="M21 12a8.8 8.8 0 0 1-9 9 9.7 9.7 0 0 1-4-.9L3 21l1.2-4A9 9 0 1 1 21 12Z"/></svg></div><div class="brand-copy"><div class="brand-title">聊天管理</div><div class="brand-subtitle" id="sessionLabel">WAHA / __SESSION__</div></div></div>
+    <div class="brand"><div class="brand-mark" aria-hidden="true"><svg class="icon" viewBox="0 0 24 24"><path d="M8 9h8M8 13h5"/><path d="M21 12a8.8 8.8 0 0 1-9 9 9.7 9.7 0 0 1-4-.9L3 21l1.2-4A9 9 0 1 1 21 12Z"/></svg></div><div class="brand-copy"><div class="brand-title">WhatsAPP AI管理面板</div><div class="brand-subtitle" id="sessionLabel">WAHA / __SESSION__</div></div></div>
     <div class="top-actions"><div class="status-group" aria-live="polite"><span class="top-status" id="sessionStatus"><span class="status-dot"></span><span class="status-label">检查会话</span></span><span class="top-status" id="realtimeStatus"><span class="status-dot"></span><span class="status-label">实时更新连接中</span></span><span class="top-status" id="translationServiceStatus"><span class="status-dot"></span><span class="status-label">翻译未配置</span></span></div><label class="sr-only" for="sessionSelect">切换 WhatsApp 会话</label><select class="theme-select" id="sessionSelect" aria-label="切换 WhatsApp 会话"><option value="">读取会话…</option></select><select class="theme-select" id="themeSelect" aria-label="选择界面主题"><option value="daylight">白天</option><option value="night">夜间</option><option value="paper">纸张</option></select><button type="button" id="translationSettingsButton" aria-label="翻译 AI 设置"><svg class="icon" viewBox="0 0 24 24"><path d="m5 8 6 6M4 14l6-7 2-3M2 5h12M7 2v3M22 22l-5-10-5 10M14 18h6"/></svg><span class="settings-label">翻译设置</span></button><a class="nav-link" href="/" aria-label="返回多会话面板"><svg class="icon" viewBox="0 0 24 24"><path d="m15 18-6-6 6-6"/></svg><span>多会话面板</span></a></div>
   </header>
   <main class="workspace">
