@@ -2467,6 +2467,31 @@ def multi_session_html_page():
     @media (prefers-reduced-motion:reduce) { *,*::before,*::after { transition-duration:.01ms!important; animation-duration:.01ms!important; scroll-behavior:auto!important; } }
      .sponsor-slot { padding:12px 14px 14px; border-top:1px solid var(--line); background:var(--surface); } .sponsor-button { width:100%; color:var(--accent); background:var(--accent-soft); border-color:color-mix(in srgb,var(--accent) 28%,var(--line)); } .sponsor-button:hover { background:var(--surface-soft); } .update-grid { display:grid; gap:10px; margin-top:16px; } .update-row { display:grid; grid-template-columns:1fr auto; gap:12px; align-items:center; padding:13px; border:1px solid var(--line); border-radius:12px; background:var(--surface-soft); } .update-name { font-weight:750; } .update-meta { color:var(--muted); font-size:12px; margin-top:3px; overflow-wrap:anywhere; } .update-state { color:var(--muted); font-size:13px; font-weight:700; text-align:right; } .update-state.good { color:var(--good); } .update-state.warn { color:var(--warn); } .update-state.bad { color:var(--bad); } .admin-list { display:grid; gap:8px; margin-top:14px; } .admin-row { display:grid; grid-template-columns:minmax(0,1fr) auto auto; gap:9px; align-items:center; padding:10px 12px; border:1px solid var(--line); border-radius:12px; background:var(--surface-soft); } .admin-name { min-width:0; overflow-wrap:anywhere; font-weight:700; } .admin-meta { color:var(--muted); font-size:12px; margin-top:2px; } .admin-row label { display:flex; align-items:center; gap:6px; color:var(--muted); font-size:12px; white-space:nowrap; } .admin-row input[type=checkbox] { width:18px; height:18px; accent-color:var(--accent); } .admin-password { width:180px!important; } .sponsor-dialog-image { display:block; width:100%; max-height:58dvh; object-fit:contain; border-radius:12px; background:var(--surface-soft); } .sponsor-dialog-error { min-height:24px; color:var(--bad); font-size:13px; }
      .qr-wrap{position:relative;display:block;isolation:isolate;min-height:320px;overflow:hidden}.qr-image-layer,.qr-frosted{position:absolute;inset:0;display:grid;place-items:center}.qr-image-layer img{display:block;width:min(100%,330px);aspect-ratio:1;object-fit:contain;padding:18px;opacity:0;transform:scale(.985);transition:opacity 420ms ease-out,transform 420ms ease-out}.qr-wrap[data-state="ready"] .qr-image-layer img{opacity:1;transform:scale(1)}.qr-frosted{width:100%;height:100%;border:0;border-radius:0;background:color-mix(in srgb,var(--surface) 72%,transparent);opacity:.92;transition:opacity 420ms ease-out;-webkit-backdrop-filter:blur(12px);backdrop-filter:blur(12px)}.qr-wrap[data-state="ready"] .qr-frosted{opacity:0;pointer-events:none}.qr-decoration{position:absolute;inset:0;grid-area:1 / 1;width:100%;height:100%;overflow:hidden;background:radial-gradient(circle at 18% 20%,rgba(255,255,255,.94),transparent 31%),radial-gradient(circle at 72% 64%,rgba(162,171,180,.32),transparent 38%),linear-gradient(135deg,#f8f9fa,#e1e5e8);filter:none;opacity:.78}.qr-frosted-copy{grid-area:1 / 1;position:relative;z-index:2;width:min(calc(100% - 34px),300px);padding:16px;border:1px solid color-mix(in srgb,var(--line) 78%,transparent);border-radius:11px;background:color-mix(in srgb,var(--surface) 88%,transparent);text-align:center;box-shadow:0 8px 24px rgba(31,35,41,.08)}.qr-frosted-title{display:block;font-weight:750;color:var(--ink)}.qr-frosted-detail{display:block;margin-top:5px;color:var(--muted);font-size:12px}.pairing-code{transition:opacity 180ms ease-out,transform 180ms ease-out}.pairing-code[data-state="loading"] .pairing-wait{animation:pairing-wait 900ms ease-in-out infinite alternate}.pairing-code[data-state="ready"]{animation:pairing-ready 220ms ease-out both}@keyframes pairing-wait{from{opacity:.55}to{opacity:1}}@keyframes pairing-ready{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:translateY(0)}}@media(prefers-reduced-motion:reduce){.qr-image-layer img,.qr-frosted{transition:opacity 160ms ease-out;transform:none}.pairing-code,.pairing-code[data-state]{animation:none;transition:opacity 120ms ease-out;transform:none}}@media(prefers-reduced-transparency:reduce){.qr-frosted{-webkit-backdrop-filter:none;backdrop-filter:none;background:var(--surface)}}@supports not ((backdrop-filter:blur(1px)) or (-webkit-backdrop-filter:blur(1px))){.qr-frosted{background:var(--surface)}}
+    /* White embossed glass for the multi-session QR waiting states. */
+    #qrButton { background:rgba(255,255,255,.72); border:1px solid rgba(0,0,0,.08); border-radius:12px; color:#111827; box-shadow:none; }
+    #qrButton:hover { background:rgba(255,255,255,.95); border-color:rgba(0,0,0,.12); box-shadow:0 4px 12px rgba(0,0,0,.05); }
+    .qr-wrap { position:relative; display:block; isolation:isolate; min-height:320px; overflow:hidden; border:1px solid rgba(255,255,255,.72); border-radius:20px; background:rgba(255,255,255,.46); box-shadow:inset 0 1px 0 rgba(255,255,255,.9),inset 0 -1px 0 rgba(0,0,0,.025),0 8px 30px rgba(0,0,0,.04); }
+    .qr-image-layer,.qr-ghost,.qr-frosted { position:absolute; inset:0; display:grid; place-items:center; }
+    .qr-image-layer { z-index:1; }
+    .qr-image-layer img { display:block; width:min(100%,330px); aspect-ratio:1; object-fit:contain; padding:18px; opacity:0; transform:scale(.985); filter:none; transition:opacity 420ms ease-out,transform 420ms ease-out,filter 420ms ease-out; }
+    .qr-ghost { z-index:1; pointer-events:none; opacity:.16; transition:opacity 420ms ease-out,visibility 0s linear 420ms; }
+    .qr-ghost svg { display:block; width:min(68%,244px); height:auto; aspect-ratio:1; filter:blur(10px); transform:scale(.96); }
+    .qr-wrap[data-state="ready"] .qr-image-layer img { opacity:1; transform:scale(1); filter:none; }
+    .qr-wrap[data-state="ready"] .qr-ghost { opacity:0; visibility:hidden; }
+    .qr-frosted { z-index:2; width:100%; height:100%; overflow:hidden; border:0; border-radius:20px; background:rgba(255,255,255,.46); opacity:1; transition:opacity 420ms ease-out,visibility 0s linear 420ms; -webkit-backdrop-filter:blur(18px) saturate(90%); backdrop-filter:blur(18px) saturate(90%); }
+    .qr-wrap[data-state="ready"] .qr-frosted { opacity:0; visibility:hidden; pointer-events:none; }
+    .qr-frosted::before { content:""; position:absolute; inset:0; z-index:1; pointer-events:none; background:radial-gradient(circle at 18% 20%,rgba(255,255,255,.34),transparent 34%),radial-gradient(circle at 74% 68%,rgba(218,218,218,.18),transparent 42%),linear-gradient(145deg,rgba(250,250,250,.18),rgba(238,238,238,.08)); opacity:.62; }
+    .qr-frosted::after { content:""; position:absolute; inset:0; z-index:2; pointer-events:none; background:linear-gradient(135deg,rgba(255,255,255,.42),rgba(255,255,255,.08) 40%,rgba(255,255,255,.02) 70%); opacity:.42; animation:qr-glass-breathe 5s ease-in-out infinite; }
+    .qr-decoration { position:absolute; inset:0; z-index:0; width:100%; height:100%; overflow:hidden; background:radial-gradient(circle at 20% 24%,rgba(255,255,255,.82),transparent 30%),radial-gradient(circle at 72% 64%,rgba(218,218,218,.24),transparent 40%),linear-gradient(135deg,#FAFAFA,#EEEEEE); opacity:.58; pointer-events:none; }
+    .qr-decoration svg { display:block; width:100%; height:100%; }
+    .qr-frosted-copy { position:relative; z-index:3; width:min(72%,300px); padding:18px 20px; border:1px solid rgba(255,255,255,.82); border-radius:19px; background:rgba(255,255,255,.62); color:#111827; text-align:center; box-shadow:0 12px 32px rgba(0,0,0,.08),inset 0 1px 0 rgba(255,255,255,.95); -webkit-backdrop-filter:blur(24px) saturate(90%); backdrop-filter:blur(24px) saturate(90%); }
+    .qr-frosted-title { display:block; color:#111827; font-weight:650; }
+    .qr-frosted-detail { display:block; margin-top:6px; color:#667085; font-size:12px; font-weight:400; }
+    @keyframes qr-glass-breathe { 0%,100% { opacity:.36; } 50% { opacity:.5; } }
+    @media (max-width:420px) { .qr-frosted-copy { width:min(88%,300px); padding:16px; } .qr-ghost svg { width:min(72%,226px); } }
+    @media (prefers-reduced-motion:reduce) { .qr-image-layer img,.qr-ghost,.qr-frosted { transition:opacity 160ms ease-out; transform:none; } .qr-frosted::after { animation:none; opacity:.42; } }
+    @media (prefers-reduced-transparency:reduce) { .qr-frosted,.qr-frosted-copy { background:#FAFAFA; -webkit-backdrop-filter:none; backdrop-filter:none; } .qr-decoration { opacity:.12; } }
+    @supports not ((backdrop-filter:blur(1px)) or (-webkit-backdrop-filter:blur(1px))) { .qr-frosted,.qr-frosted-copy { background:#FAFAFA; } .qr-decoration { opacity:.12; } }
   </style>
 </head>
 <body>
@@ -2486,7 +2511,44 @@ def multi_session_html_page():
             <article class="card"><div class="card-head"><div><div class="card-title">系统记录</div><div class="card-note">仅显示当前会话的处理记录与错误。</div></div><button id="refreshLogsButton" type="button">刷新记录</button></div><div class="logs" id="logs"><div class="empty">正在读取记录...</div></div></article>
           </section>
           <section>
-           <article class="card"><div class="card-head"><div><div class="card-title">扫码连接</div><div class="card-note">二维码属于当前会话，不会把 WAHA 密钥交给浏览器。</div></div><button id="qrButton" type="button">刷新二维码</button></div><div class="qr-wrap" id="qrWrap" data-state="idle" aria-live="polite" aria-busy="false"><div class="qr-image-layer" id="qrImageLayer"></div><div class="qr-frosted" id="qrFrosted" data-state="idle" role="status" aria-live="polite"><div class="qr-decoration" aria-hidden="true"><svg viewBox="0 0 100 100" preserveAspectRatio="none" style="display:block;width:100%;height:100%"><filter id="qrGlassNoise"><feTurbulence type="fractalNoise" baseFrequency=".035 .22" numOctaves="4" seed="17" result="noise"/><feColorMatrix in="noise" type="matrix" values=".72 0 0 0 .18 0 .72 0 0 .18 0 0 .72 0 .18 0 0 0 .46 0"/></filter><rect width="100" height="100" fill="#eef0f2"/><rect width="100" height="100" filter="url(#qrGlassNoise)" opacity=".72"/></svg></div><div class="qr-frosted-copy"><strong class="qr-frosted-title" id="qrTitle">二维码待刷新</strong><span class="qr-frosted-detail" id="qrDetail">点击“刷新二维码”获取当前会话的登录二维码。</span></div></div></div><div class="qr-caption">如果会话已连接，二维码可能暂不可用。</div><div class="pairing"><div class="pairing-title">手机号配对码</div><div class="pairing-note">填写包含国家/地区码的手机号，例如 8613812345678。</div><div class="pairing-form"><label class="sr-only" for="phoneNumber">手机号</label><input id="phoneNumber" type="tel" inputmode="numeric" autocomplete="tel" placeholder="8613812345678"><button class="primary" id="pairingButton" type="button">获取配对码</button></div><div id="pairingCode" class="pairing-code" hidden role="status" aria-live="polite" aria-busy="false"></div></div></article>
+           <article class="card">
+             <div class="card-head"><div><div class="card-title">扫码连接</div><div class="card-note">二维码属于当前会话，不会把 WAHA 密钥交给浏览器。</div></div><button id="qrButton" type="button">刷新二维码</button></div>
+             <div class="qr-wrap" id="qrWrap" data-state="idle" aria-live="polite" aria-busy="false">
+               <div class="qr-image-layer" id="qrImageLayer"></div>
+               <div class="qr-ghost" id="qrGhost" data-non-scannable="true" aria-hidden="true">
+                 <svg viewBox="0 0 210 210" focusable="false" aria-hidden="true">
+                   <g fill="#667085">
+                     <rect x="18" y="18" width="48" height="48" rx="4"/><rect x="27" y="27" width="30" height="30" rx="2" fill="#FAFAFA"/><rect x="35" y="35" width="14" height="14" rx="1"/>
+                     <rect x="144" y="18" width="48" height="48" rx="4"/><rect x="153" y="27" width="30" height="30" rx="2" fill="#FAFAFA"/><rect x="161" y="35" width="14" height="14" rx="1"/>
+                     <rect x="18" y="144" width="48" height="48" rx="4"/><rect x="27" y="153" width="30" height="30" rx="2" fill="#FAFAFA"/><rect x="35" y="161" width="14" height="14" rx="1"/>
+                     <path d="M82 18h12v12H82zM106 18h12v12h-12zM82 42h12v12H82zM106 54h12v12h-12zM78 82h12v12H78zM102 78h12v12h-12zM126 82h12v12h-12zM150 78h12v12h-12zM174 82h12v12h-12zM82 106h12v12H82zM106 102h12v12h-12zM130 106h12v12h-12zM154 102h12v12h-12zM178 110h12v12h-12zM78 130h12v12H78zM102 126h12v12h-12zM126 134h12v12h-12zM150 126h12v12h-12zM174 138h12v12h-12zM82 154h12v12H82zM106 150h12v12h-12zM130 158h12v12h-12zM154 150h12v12h-12zM178 162h12v12h-12zM82 178h12v12H82zM118 178h12v12h-12zM150 178h12v12h-12zM174 186h12v12h-12z"/>
+                   </g>
+                 </svg>
+               </div>
+               <div class="qr-frosted" id="qrFrosted" data-state="idle" role="status" aria-live="polite">
+                 <div class="qr-decoration" aria-hidden="true">
+                   <svg viewBox="0 0 100 100" preserveAspectRatio="none" focusable="false" aria-hidden="true">
+                     <filter id="qrGlassDistortion" x="-15%" y="-15%" width="130%" height="130%" color-interpolation-filters="sRGB">
+                       <feTurbulence type="fractalNoise" baseFrequency=".012 .018" numOctaves="2" seed="8" result="noise"/>
+                       <feDisplacementMap in="SourceGraphic" in2="noise" scale="10" xChannelSelector="R" yChannelSelector="G" result="distorted"/>
+                       <feColorMatrix in="noise" type="matrix" values=".8 0 0 0 .16 0 .8 0 0 .16 0 0 .8 0 .16 0 0 0 .18 0" result="grain"/>
+                       <feBlend in="distorted" in2="grain" mode="screen"/>
+                     </filter>
+                     <rect width="100" height="100" fill="#F5F5F5"/>
+                     <g filter="url(#qrGlassDistortion)" opacity=".58">
+                       <ellipse cx="14" cy="16" rx="30" ry="24" fill="#FFFFFF"/>
+                       <ellipse cx="72" cy="38" rx="37" ry="29" fill="#DADADA" fill-opacity=".44"/>
+                       <ellipse cx="38" cy="78" rx="39" ry="30" fill="#FFFFFF" fill-opacity=".72"/>
+                       <ellipse cx="94" cy="86" rx="31" ry="26" fill="#EEEEEE"/>
+                     </g>
+                   </svg>
+                 </div>
+                 <div class="qr-frosted-copy"><strong class="qr-frosted-title" id="qrTitle">二维码待刷新</strong><span class="qr-frosted-detail" id="qrDetail">点击“刷新二维码”获取当前会话的登录二维码。</span></div>
+               </div>
+             </div>
+             <div class="qr-caption">如果会话已连接，二维码可能暂不可用。</div>
+             <div class="pairing"><div class="pairing-title">手机号配对码</div><div class="pairing-note">填写包含国家/地区码的手机号，例如 8613812345678。</div><div class="pairing-form"><label class="sr-only" for="phoneNumber">手机号</label><input id="phoneNumber" type="tel" inputmode="numeric" autocomplete="tel" placeholder="8613812345678"><button class="primary" id="pairingButton" type="button">获取配对码</button></div><div id="pairingCode" class="pairing-code" hidden role="status" aria-live="polite" aria-busy="false"></div></div>
+           </article>
             <article class="card"><div class="card-head"><div><div class="card-title">服务概况</div><div class="card-note">面板每 10 秒自动刷新。</div></div></div><div class="summary-grid"><div class="summary"><div class="summary-label">WAHA 服务</div><div class="summary-value" id="wahaSummary">检查中</div></div><div class="summary"><div class="summary-label">数据库</div><div class="summary-value" id="dbSummary">检查中</div></div></div><div class="notice" id="globalNotice" role="status" aria-live="polite"></div></article>
           </section>
         </div>

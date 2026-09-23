@@ -169,6 +169,20 @@ class QrAndReleaseTests(unittest.TestCase):
         load_qr = page[page.index("async function loadQr()"):]
         self.assertLess(load_qr.index(content_type_guard), load_qr.index("await revealQrImage"))
 
+    def test_qr_placeholder_uses_embossed_white_glass_contract(self):
+        page = multi_session_html_page()
+        self.assertIn('id="qrGhost"', page)
+        self.assertIn("feDisplacementMap", page)
+        self.assertRegex(page, r'baseFrequency="\.012 \.018"')
+        self.assertRegex(page, r"backdrop-filter:blur\(18px\) saturate\(90%\)")
+        self.assertIn("-webkit-backdrop-filter:blur(18px) saturate(90%)", page)
+        self.assertIn("background:rgba(255,255,255,.46)", page)
+        self.assertIn("border:1px solid rgba(255,255,255,.72)", page)
+        self.assertIn("qr-frosted::after", page)
+        self.assertIn("@keyframes qr-glass-breathe", page)
+        self.assertRegex(page, r'qr-wrap\[data-state="ready"\] \.qr-ghost')
+        self.assertIn("$('qrButton').addEventListener('click', loadQr)", page)
+
     def test_panel_brand_and_qr_motion_contract(self):
         pages = (html_page(), multi_session_html_page())
         commerce = commerce_page()
