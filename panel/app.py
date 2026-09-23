@@ -141,6 +141,9 @@ DEFAULT_AUTO_REPLY_MEDIA_TYPES = {
 CONTEXT_CHARACTER_LIMIT = 12000
 MAX_AVATAR_BYTES = 2 * 1024 * 1024
 TRUSTED_AVATAR_HOSTS = frozenset({"pps.whatsapp.net", "mmg.whatsapp.net"})
+SESSION_AVATAR_CACHE_LIMIT = 32
+SESSION_AVATAR_TTL_SECONDS = 24 * 60 * 60
+SESSION_AVATAR_NEGATIVE_TTL_SECONDS = 30
 SENSITIVE_NAME = re.compile(
     r"(?i)(api[_-]?key|password|token|secret|authorization)\s*([:=])\s*([^\s,;}&]+)"
 )
@@ -595,6 +598,10 @@ class WahaClient:
         name = self._session_path(session_name)
         return self.request_bytes(f"/api/{name}/auth/qr?format=image")
 
+    def get_profile(self, session_name=DEFAULT_SESSION_NAME):
+        name = self._session_path(session_name)
+        return self.request_json(f"/api/{name}/profile")
+
     def get_chat_picture(self, session_name, chat_id):
         name = self._session_path(session_name)
         chat = quote(str(chat_id), safe="")
@@ -804,6 +811,9 @@ class PanelState:
         self._translation_limit_lock = threading.Lock()
         self._translation_request_times = []
         self._translation_slots = threading.BoundedSemaphore(2)
+        self._session_avatar_lock = threading.RLock()
+        self._session_avatar_cache = {}
+        self._session_avatar_slots = threading.BoundedSemaphore(2)
         self._commerce_sender_lock = threading.Lock()
         self.business = BusinessContextService(self.database_path)
         bootstrap_path = os.environ.get("PANEL_ADMIN_BOOTSTRAP_FILE", "").strip()
@@ -2040,6 +2050,7 @@ class PanelState:
             "is_active": metadata["is_active"],
             "created_at": metadata["created_at"],
             "updated_at": metadata["updated_at"],
+            "avatar_url": f"/api/sessions/{quote(name, safe='')}/avatar",
             "auto_reply": {
                 "enabled": settings["auto_reply_enabled"],
                 "all_day": settings["auto_reply_all_day"],
@@ -2228,6 +2239,76 @@ class PanelState:
     def get_qr(self, session_name=DEFAULT_SESSION_NAME):
         name = normalize_session_name(session_name)
         return self._client_session_call("get_qr", name)
+
+    @staticmethod
+    def _profile_picture_url(profile):
+        if not isinstance(profile, dict):
+            return ""
+        data = profile.get("data") if isinstance(profile.get("data"), dict) else profile
+        for key in ("picture", "profilePictureUrl", "avatar", "avatar_url"):
+            value = data.get(key) or profile.get(key)
+            if isinstance(value, dict):
+                value = value.get("url") or value.get("src") or value.get("href")
+            value = str(value or "").strip()
+            if value.startswith(("https://", "http://")) and len(value) <= 2048:
+                return value
+        return ""
+
+    def session_avatar(self, session_name=DEFAULT_SESSION_NAME):
+        name = normalize_session_name(session_name)
+        now = int(self.clock())
+        with self._session_avatar_lock:
+            cached = self._session_avatar_cache.get(name)
+            if cached and cached[0] > now:
+                if isinstance(cached[1], tuple):
+                    return cached[1]
+                raise ChatServiceError("当前 WhatsApp 账号头像暂不可用", "SESSION_AVATAR_UNAVAILABLE")
+            if cached:
+                self._session_avatar_cache.pop(name, None)
+        self._session_avatar_slots.acquire()
+        try:
+            now = int(self.clock())
+            with self._session_avatar_lock:
+                cached = self._session_avatar_cache.get(name)
+                if cached and cached[0] > now:
+                    if isinstance(cached[1], tuple):
+                        return cached[1]
+                    raise ChatServiceError("当前 WhatsApp 账号头像暂不可用", "SESSION_AVATAR_UNAVAILABLE")
+            try:
+                get_profile = getattr(self.client, "get_profile", None)
+                get_avatar = getattr(self.client, "get_avatar_bytes", None)
+                if get_profile is None or get_avatar is None:
+                    raise ValueError("WAHA 未提供当前账号头像接口")
+                profile = self._client_session_call("get_profile", name)
+                picture_url = self._profile_picture_url(profile)
+                if not picture_url:
+                    raise ValueError("WAHA 未返回当前账号头像地址")
+                response = ChatService._validate_avatar_response(
+                    get_avatar(picture_url, max_bytes=MAX_AVATAR_BYTES)
+                )
+            except Exception as error:
+                with self._session_avatar_lock:
+                    self._session_avatar_cache[name] = (
+                        int(self.clock()) + SESSION_AVATAR_NEGATIVE_TTL_SECONDS,
+                        "SESSION_AVATAR_UNAVAILABLE",
+                    )
+                    while len(self._session_avatar_cache) > SESSION_AVATAR_CACHE_LIMIT:
+                        self._session_avatar_cache.pop(next(iter(self._session_avatar_cache)))
+                if isinstance(error, ChatServiceError):
+                    raise
+                raise ChatServiceError(
+                    "当前 WhatsApp 账号头像暂不可用", "SESSION_AVATAR_UNAVAILABLE"
+                ) from error
+            with self._session_avatar_lock:
+                self._session_avatar_cache[name] = (
+                    int(self.clock()) + SESSION_AVATAR_TTL_SECONDS,
+                    response,
+                )
+                while len(self._session_avatar_cache) > SESSION_AVATAR_CACHE_LIMIT:
+                    self._session_avatar_cache.pop(next(iter(self._session_avatar_cache)))
+            return response
+        finally:
+            self._session_avatar_slots.release()
 
     def ensure_session(self, session_name=DEFAULT_SESSION_NAME):
         name = normalize_session_name(session_name)
@@ -2453,7 +2534,7 @@ def multi_session_html_page():
     .main { min-width:0; } .hero { display:flex; justify-content:space-between; align-items:flex-start; gap:18px; margin:2px 0 20px; } .eyebrow { color:var(--accent); font:700 11px ui-monospace,SFMono-Regular,Consolas,monospace; letter-spacing:.08em; } h1 { margin:7px 0 5px; font-size:clamp(27px,4vw,42px); line-height:1.08; letter-spacing:-.04em; } .hero p { margin:0; color:var(--muted); } .hero-actions { display:flex; gap:8px; flex-wrap:wrap; justify-content:flex-end; }
     .status-banner { display:flex; align-items:center; justify-content:space-between; gap:16px; padding:14px 16px; border:1px solid var(--line); border-radius:14px; background:var(--surface); margin-bottom:14px; } .status-copy { min-width:0; } .status-label { color:var(--muted); font-size:12px; } .status-value { margin-top:2px; font-size:18px; font-weight:760; } .status-note { color:var(--muted); font-size:12px; margin-top:2px; overflow-wrap:anywhere; } .status-badge { display:inline-flex; align-items:center; gap:7px; padding:7px 11px; border-radius:999px; font-size:13px; font-weight:750; white-space:nowrap; } .status-badge.good { color:var(--good); background:var(--good-soft); } .status-badge.warn { color:var(--warn); background:var(--warn-soft); } .status-badge.bad { color:var(--bad); background:var(--bad-soft); }
     .detail-grid { display:grid; grid-template-columns:minmax(0,1.15fr) minmax(300px,.85fr); gap:14px; } .card { padding:20px; } .card + .card { margin-top:14px; } .card-head { display:flex; align-items:flex-start; justify-content:space-between; gap:14px; margin-bottom:17px; } .card-title { font-size:17px; font-weight:760; letter-spacing:-.015em; } .card-note { color:var(--muted); font-size:12px; margin-top:3px; }
-    .identity { display:flex; align-items:center; gap:13px; padding:14px; border-radius:14px; background:var(--surface-soft); border:1px solid var(--line); } .identity-icon { width:42px; height:42px; display:grid; place-items:center; border-radius:13px; background:var(--accent-soft); color:var(--accent); font-weight:800; } .identity-main { min-width:0; flex:1; } .identity-name { font-size:18px; font-weight:760; overflow-wrap:anywhere; } .identity-tech { color:var(--muted); font:12px ui-monospace,SFMono-Regular,Consolas,monospace; margin-top:2px; } .identity-actions { display:flex; gap:7px; flex-wrap:wrap; justify-content:flex-end; }
+    .identity { display:flex; align-items:center; gap:13px; padding:14px; border-radius:14px; background:var(--surface-soft); border:1px solid var(--line); } .identity-icon { width:42px; height:42px; display:grid; place-items:center; overflow:hidden; border-radius:13px; background:var(--accent-soft); color:var(--accent); font-weight:800; } .identity-icon img { display:block; width:100%; height:100%; object-fit:cover; } .identity-main { min-width:0; flex:1; } .identity-name { font-size:18px; font-weight:760; overflow-wrap:anywhere; } .identity-tech { color:var(--muted); font:12px ui-monospace,SFMono-Regular,Consolas,monospace; margin-top:2px; } .identity-actions { display:flex; gap:7px; flex-wrap:wrap; justify-content:flex-end; }
     .action-row { display:flex; flex-wrap:wrap; gap:8px; margin-top:14px; } .action-row button { flex:0 0 auto; } .summary-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:9px; margin-top:14px; } .summary { padding:12px; border:1px solid var(--line); border-radius:12px; background:var(--surface-soft); } .summary-label { color:var(--muted); font-size:12px; } .summary-value { margin-top:4px; font-weight:730; overflow-wrap:anywhere; }
     .qr-wrap { display:grid; place-items:center; min-height:320px; border:1px dashed var(--line); border-radius:15px; background:var(--surface-soft); overflow:hidden; } .qr-wrap img { display:block; width:min(100%,330px); aspect-ratio:1; object-fit:contain; padding:18px; } .qr-frosted { position:relative; isolation:isolate; display:grid; place-items:center; width:min(76%,240px); aspect-ratio:1; overflow:hidden; border:1px solid var(--line); border-radius:14px; background:var(--surface); } .qr-frosted::before { content:""; position:absolute; inset:-18px; z-index:-2; background:radial-gradient(circle at 28% 22%,rgba(255,255,255,.95),transparent 30%),radial-gradient(circle at 72% 70%,rgba(153,163,173,.28),transparent 38%),linear-gradient(135deg,#f8f9fa,#e2e5e8); filter:none; opacity:.68; transform:none; } .qr-frosted::after { content:""; position:absolute; inset:0; z-index:-1; background:color-mix(in srgb,var(--surface) 70%,transparent); -webkit-backdrop-filter:blur(12px); backdrop-filter:blur(12px); } .qr-frosted-copy { width:calc(100% - 34px); padding:16px; border:1px solid color-mix(in srgb,var(--line) 78%,transparent); border-radius:11px; background:color-mix(in srgb,var(--surface) 88%,transparent); text-align:center; box-shadow:0 8px 24px rgba(31,35,41,.08); } .qr-frosted-title { display:block; font-weight:750; color:var(--ink); } .qr-frosted-detail { display:block; margin-top:5px; color:var(--muted); font-size:12px; } .qr-caption { color:var(--muted); font-size:12px; margin-top:10px; }
     @supports not ((backdrop-filter:blur(1px)) or (-webkit-backdrop-filter:blur(1px))) { .qr-frosted::after, .qr-frosted-copy { background:var(--surface); } }
@@ -2507,7 +2588,7 @@ def multi_session_html_page():
         <div class="status-banner"><div class="status-copy"><div class="status-label">当前会话</div><div class="status-value" id="currentSessionLabel">—</div><div class="status-note" id="currentSessionTech">—</div></div><div class="status-badge warn" id="currentBadge"><span class="service-dot" aria-hidden="true"></span><span>读取中</span></div></div>
         <div class="detail-grid">
           <section>
-            <article class="card"><div class="card-head"><div><div class="card-title">会话控制</div><div class="card-note">每个技术会话独立启动、停止与重启。</div></div><button id="renameButton" type="button">编辑名称</button></div><div class="identity"><div class="identity-icon" aria-hidden="true">W</div><div class="identity-main"><div class="identity-name" id="identityName">—</div><div class="identity-tech" id="identityTech">—</div></div><div class="identity-actions"><span class="status-badge warn" id="identityBadge">未知</span></div></div><div class="action-row"><button class="primary" id="startButton" type="button">启动</button><button id="stopButton" type="button">停止</button><button class="subtle" id="restartButton" type="button">重启</button><button class="subtle" id="ensureButton" type="button">创建 / 启动</button></div><div class="summary-grid"><div class="summary"><div class="summary-label">自动回复</div><div class="summary-value" id="autoReplySummary">—</div></div><div class="summary"><div class="summary-label">AI 模型</div><div class="summary-value" id="aiSummary">—</div></div><div class="summary"><div class="summary-label">WAHA 状态</div><div class="summary-value" id="remoteStateSummary">—</div></div><div class="summary"><div class="summary-label">最后更新</div><div class="summary-value" id="updatedSummary">—</div></div></div><div class="notice" id="controlNotice" role="status" aria-live="polite"></div></article>
+            <article class="card"><div class="card-head"><div><div class="card-title">会话控制</div><div class="card-note">每个技术会话独立启动、停止与重启。</div></div><button id="renameButton" type="button">编辑名称</button></div><div class="identity"><div class="identity-icon" id="identityAvatar" aria-hidden="true">W</div><div class="identity-main"><div class="identity-name" id="identityName">—</div><div class="identity-tech" id="identityTech">—</div></div><div class="identity-actions"><span class="status-badge warn" id="identityBadge">未知</span></div></div><div class="action-row"><button class="primary" id="startButton" type="button">启动</button><button id="stopButton" type="button">停止</button><button class="subtle" id="restartButton" type="button">重启</button><button class="subtle" id="ensureButton" type="button">创建 / 启动</button></div><div class="summary-grid"><div class="summary"><div class="summary-label">自动回复</div><div class="summary-value" id="autoReplySummary">—</div></div><div class="summary"><div class="summary-label">AI 模型</div><div class="summary-value" id="aiSummary">—</div></div><div class="summary"><div class="summary-label">WAHA 状态</div><div class="summary-value" id="remoteStateSummary">—</div></div><div class="summary"><div class="summary-label">最后更新</div><div class="summary-value" id="updatedSummary">—</div></div></div><div class="notice" id="controlNotice" role="status" aria-live="polite"></div></article>
             <article class="card"><div class="card-head"><div><div class="card-title">系统记录</div><div class="card-note">仅显示当前会话的处理记录与错误。</div></div><button id="refreshLogsButton" type="button">刷新记录</button></div><div class="logs" id="logs"><div class="empty">正在读取记录...</div></div></article>
           </section>
           <section>
@@ -2578,10 +2659,12 @@ def multi_session_html_page():
     function applyTheme(theme) { const value = themeNames[theme] ? theme : 'daylight'; document.documentElement.dataset.theme = value; $('themeSelect').value = value; localStorage.setItem('waha-panel-theme', value); }
     async function saveTheme(theme) { applyTheme(theme); try { const response = await mutateFetch('/api/settings?session=' + encodeURIComponent(selected), {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({theme})}); if (!response.ok) throw new Error((await response.json()).message || '主题保存失败'); } catch (error) { $('globalNotice').textContent = error.message; } }
     function badge(element, state) { element.className = 'status-badge ' + stateTone(state); element.innerHTML = `<span class="service-dot" aria-hidden="true"></span><span>${esc(stateText(state))}</span>`; }
-    function formatTime(value) { if (!value) return '—'; return new Date(Number(value) * 1000).toLocaleString(); }
+     function formatTime(value) { if (!value) return '—'; return new Date(Number(value) * 1000).toLocaleString(); }
+     function initials(value) { const text = String(value || 'W').trim(); return Array.from(text)[0]?.toUpperCase() || 'W'; }
+     function renderIdentityAvatar(item) { const node = $('identityAvatar'); const rawUrl = String(item?.avatar_url || ''); const avatarUrl = rawUrl.startsWith('/api/sessions/') ? rawUrl : ''; const fallback = initials(item?.display_name || item?.name); const currentImage = node.querySelector('img'); const sameUrl = node.dataset.avatarUrl === avatarUrl; const sameFallback = node.dataset.avatarFallback === fallback; if (sameUrl && sameFallback && ((avatarUrl && (currentImage || node.dataset.avatarFailed === '1')) || (!avatarUrl && !currentImage))) return; if (!sameUrl) node.dataset.avatarFailed = ''; node.dataset.avatarUrl = avatarUrl; node.dataset.avatarFallback = fallback; if (!avatarUrl || node.dataset.avatarFailed === '1') { node.replaceChildren(); node.textContent = fallback; return; } if (currentImage?.dataset.avatarUrl === avatarUrl) return; const image = document.createElement('img'); image.alt = ''; image.loading = 'lazy'; image.decoding = 'async'; image.dataset.avatarUrl = avatarUrl; image.src = avatarUrl; image.addEventListener('error', () => { if (node.dataset.avatarUrl !== avatarUrl) return; node.dataset.avatarFailed = '1'; node.replaceChildren(); node.textContent = fallback; }); node.replaceChildren(image); }
     function currentItem() { return (statusData?.sessions || []).find(item => item.name === selected) || null; }
     function renderSessions() { const items = statusData?.sessions || []; $('sessionCount').textContent = `${items.length} 个会话`; $('sessionList').innerHTML = items.length ? items.map(item => `<button class="session-item ${item.name === selected ? 'selected' : ''}" data-session="${esc(item.name)}" type="button"><div class="session-name-row"><span class="session-display">${esc(item.display_name || item.name)}</span><span class="mini-status ${stateTone(item.state)}"><span class="service-dot"></span>${esc(stateText(item.state))}</span></div><div class="session-tech">${esc(item.name)}</div><div class="session-meta"><span>${item.auto_reply?.all_day ? '全时段自动回复' : item.auto_reply?.enabled ? '按时段自动回复' : '自动回复关闭'}</span><span>${item.auto_reply?.ai_configured ? 'AI 已配置' : '固定文案'}</span></div></button>`).join('') : '<div class="empty">WAHA 尚未返回会话。</div>'; document.querySelectorAll('[data-session]').forEach(button => button.addEventListener('click', () => selectSession(button.dataset.session))); }
-     function renderDetail() { const item = currentItem(); if (!item) { $('pageTitle').textContent = '没有可用会话'; $('pageSubtitle').textContent = '请先新建或让 WAHA 返回一个会话。'; $('deleteButton').disabled = true; return; } $('pageTitle').textContent = item.display_name || item.name; $('pageSubtitle').textContent = '独立管理连接状态、二维码、聊天、日志和自动回复。'; $('currentSessionLabel').textContent = item.display_name || item.name; $('currentSessionTech').textContent = item.name; $('identityName').textContent = item.display_name || item.name; $('identityTech').textContent = 'WAHA / ' + item.name; badge($('currentBadge'), item.state); badge($('identityBadge'), item.state); $('autoReplySummary').textContent = item.auto_reply?.all_day ? '全时段开启' : item.auto_reply?.enabled ? '按时段开启' : '已关闭'; $('aiSummary').textContent = item.auto_reply?.ai_configured ? '已配置（密钥隐藏）' : '未配置，使用固定文案'; $('remoteStateSummary').textContent = stateText(item.state); $('updatedSummary').textContent = formatTime(item.updated_at); $('chatLink').href = '/sessions/' + encodeURIComponent(item.name) + '/chats'; $('settingsLink').href = '/settings?session=' + encodeURIComponent(item.name); $('startButton').disabled = ['WORKING','CONNECTED','STARTING','AUTHENTICATING','SCAN_QR_CODE'].includes(item.state); $('stopButton').disabled = item.state === 'STOPPED' || item.state === 'NOT_CREATED'; $('restartButton').disabled = item.state === 'NOT_CREATED'; $('deleteButton').disabled = (statusData?.sessions || []).length <= 1; }
+     function renderDetail() { const item = currentItem(); if (!item) { $('pageTitle').textContent = '没有可用会话'; $('pageSubtitle').textContent = '请先新建或让 WAHA 返回一个会话。'; $('deleteButton').disabled = true; return; } $('pageTitle').textContent = item.display_name || item.name; $('pageSubtitle').textContent = '独立管理连接状态、二维码、聊天、日志和自动回复。'; $('currentSessionLabel').textContent = item.display_name || item.name; $('currentSessionTech').textContent = item.name; $('identityName').textContent = item.display_name || item.name; $('identityTech').textContent = 'WAHA / ' + item.name; renderIdentityAvatar(item); badge($('currentBadge'), item.state); badge($('identityBadge'), item.state); $('autoReplySummary').textContent = item.auto_reply?.all_day ? '全时段开启' : item.auto_reply?.enabled ? '按时段开启' : '已关闭'; $('aiSummary').textContent = item.auto_reply?.ai_configured ? '已配置（密钥隐藏）' : '未配置，使用固定文案'; $('remoteStateSummary').textContent = stateText(item.state); $('updatedSummary').textContent = formatTime(item.updated_at); $('chatLink').href = '/sessions/' + encodeURIComponent(item.name) + '/chats'; $('settingsLink').href = '/settings?session=' + encodeURIComponent(item.name); $('startButton').disabled = ['WORKING','CONNECTED','STARTING','AUTHENTICATING','SCAN_QR_CODE'].includes(item.state); $('stopButton').disabled = item.state === 'STOPPED' || item.state === 'NOT_CREATED'; $('restartButton').disabled = item.state === 'NOT_CREATED'; $('deleteButton').disabled = (statusData?.sessions || []).length <= 1; }
     function renderGlobal() { const waha = statusData?.waha || {}; $('wahaSummary').textContent = waha.running ? (waha.version ? '运行中 · ' + waha.version : '运行中') : '不可用'; $('dbSummary').textContent = statusData?.database?.ok ? '数据库正常' : '数据库异常'; $('servicePill').className = 'service-pill ' + (waha.running ? 'good' : ''); $('servicePill').innerHTML = `<span class="service-dot" aria-hidden="true"></span><span>${waha.running ? 'WAHA 运行中' : 'WAHA 不可用'}</span>`; $('globalNotice').textContent = statusData?.errors?.length ? statusData.errors.join('；') : ''; }
     function renderLogs(logs, errors) { const all = [...(errors || []).map(message => ({level:'ERROR',event:'当前检查',message,created_at:Date.now()/1000})), ...(logs || [])]; $('logs').innerHTML = all.length ? all.map(log => `<div class="log ${log.level === 'ERROR' ? 'error' : ''}"><div class="log-meta"><span>${esc(log.level)} / ${esc(log.event)}</span><span>${esc(formatTime(log.created_at))}</span></div><div class="log-message">${esc(log.message)}</div></div>`).join('') : '<div class="empty">暂无当前会话记录</div>'; }
     async function refreshLogs() { if (!selected) return; try { const response = await fetch(apiSession('/logs'), {cache:'no-store'}); const data = await response.json(); if (!response.ok) throw new Error(data.message || '读取记录失败'); renderLogs(data.logs, []); } catch (error) { $('logs').innerHTML = `<div class="empty">${esc(error.message)}</div>`; } }
@@ -3183,7 +3266,9 @@ class PanelHandler(BaseHTTPRequestHandler):
             self.state.begin_translation_request()
             try:
                 self.send_json(translation.translate(
-                    payload.get("text"), force=as_bool(payload.get("force", False))
+                    payload.get("text"),
+                    force=as_bool(payload.get("force", False)),
+                    role=payload.get("role"),
                 ))
             finally:
                 self.state.end_translation_request()
@@ -3327,7 +3412,8 @@ class PanelHandler(BaseHTTPRequestHandler):
 
     def send_admin_users_write(self, route, method):
         self.require_csrf()
-        target, action = self.admin_route(route)
+        parsed = self.admin_route(route)
+        target, action = parsed if parsed is not None else (None, None)
         if target is None:
             if method != "POST":
                 raise ValueError("管理员写入方法不正确")
@@ -3481,6 +3567,9 @@ class PanelHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
+            return
+        if action == "avatar":
+            self.send_media(*self.state.session_avatar(name))
             return
         if action is not None:
             raise ValueError("不支持的会话查询操作")

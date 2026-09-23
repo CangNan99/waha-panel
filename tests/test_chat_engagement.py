@@ -259,6 +259,30 @@ class TranslationServiceEngagementTests(unittest.TestCase):
         context = json.dumps(opener.requests[0]["messages"], ensure_ascii=False)
         self.assertLessEqual(context.count('"role":"customer"'), 20)
 
+    def test_translate_separates_customer_and_agent_roles_in_prompt_and_cache(self):
+        payload = {
+            "source_language_code": "en",
+            "source_language_name_zh": "英语",
+            "already_zh": False,
+            "chinese_translation": "你好",
+            "chinese_explanation": "问候",
+            "customer_intent_zh": "表达问候",
+            "tone_zh": "友好",
+        }
+        service, opener = self._service([payload, payload])
+        customer = service.translate("Hello", role="customer")
+        agent = service.translate("Hello", role="agent")
+        cached_customer = service.translate("Hello", role="customer")
+
+        self.assertEqual(customer["speaker_role"], "customer")
+        self.assertEqual(agent["speaker_role"], "agent")
+        self.assertEqual(customer["speaker_intent_zh"], "表达问候")
+        self.assertTrue(cached_customer["cached"])
+        self.assertEqual(len(opener.requests), 2)
+        prompts = [request["messages"][0]["content"] for request in opener.requests]
+        self.assertTrue(any("客户" in prompt for prompt in prompts))
+        self.assertTrue(any("客服" in prompt for prompt in prompts))
+
     def test_translate_follow_up_rejects_empty_context(self):
         service, _opener = self._service({"target_language_code": "en", "target_language_name_zh": "英语", "message": "Thanks!"})
         with self.assertRaisesRegex(TranslationError, "当前对话没有可用于判断客户语言的文字"):
@@ -820,3 +844,13 @@ class PanelEngagementRouteTests(unittest.TestCase):
         serialized = json.dumps([payload for _status, payload in responses], ensure_ascii=False)
         for secret in ("private fixed copy", "chat-1@c.us", "fixed_copy", "client_request_id", "chat_id_ciphertext"):
             self.assertNotIn(secret, serialized)
+
+    def test_admin_collection_post_is_reachable_through_http_route(self):
+        status, payload = self.request(
+            "POST",
+            "/api/admin/users",
+            {"username": "operator", "password": "a" * 12},
+            csrf=True,
+        )
+        self.assertEqual(status, 201)
+        self.assertEqual(payload["username"], "operator")

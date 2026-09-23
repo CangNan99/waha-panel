@@ -184,6 +184,36 @@ test('mobile primary takeover actions remain visible', () => {
   assert.doesNotMatch(chatSource, /takeover-actions \.state-pill\{display:none/);
 });
 
+test('mobile conversation hides only the global header and keeps the recent-chat view intact', () => {
+  assert.match(chatSource, /\.app\.has-chat > \.topbar\{display:none/);
+  assert.match(chatSource, /\.app\.has-chat\{grid-template-rows:minmax\(0,1fr\)/);
+  assert.match(chatSource, /\.app:not\(\.has-chat\) \.chat-pane\.mobile-view-layer/);
+  assert.match(chatSource, /function setMobileView\(view\).*app\.classList/);
+});
+
+test('chat avatars are reused across metadata refreshes instead of being rebuilt', () => {
+  assert.match(chatSource, /node\.dataset\.avatarUrl/);
+  assert.match(chatSource, /sameUrl&&sameFallback/);
+  assert.match(chatSource, /image\.dataset\.avatarUrl=avatarUrl/);
+  assert.match(chatSource, /node\.dataset\.avatarFailed/);
+  assert.match(chatSource, /button\.querySelector\('\.avatar'\)\|\|element\('div','avatar'\)/);
+});
+
+test('session control uses a protected current-account avatar proxy', () => {
+  assert.match(appSource, /id="identityAvatar"/);
+  assert.match(appSource, /function renderIdentityAvatar\(item\)/);
+  assert.match(appSource, /avatar_url/);
+  assert.match(appSource, /def session_avatar\(/);
+  assert.match(appSource, /send_media\(\*self\.state\.session_avatar/);
+});
+
+test('translation cards identify the message speaker and send role to the API', () => {
+  assert.match(chatSource, /role:message\.from_me\?'agent':'customer'/);
+  assert.match(chatSource, /消息来源/);
+  assert.match(chatSource, /speaker_intent_zh/);
+  assert.match(chatSource, /客服表达目的/);
+});
+
 test('chat motion uses restrained transitions with a reduced-motion fallback', () => {
   assert.match(chatSource, /dialog\[data-motion="opening"\][^\n]*animation:dialog-in 200ms/);
   assert.match(chatSource, /dialog\[data-motion="closing"\][^\n]*animation:dialog-out 200ms/);
