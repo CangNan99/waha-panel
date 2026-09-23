@@ -68,6 +68,7 @@ pwsh -File .\update.ps1 -Component waha
 
 | 版本 | 更新内容 | 详细说明 |
 | --- | --- | --- |
+| 1.0.8 | 修复 WhatsApp CDN 头像加载；将二维码未刷新占位改为磨砂纹理层；更新 WAHA 至 `latest-2026.9.1`。 | [docs/releases/1.0.8.md](docs/releases/1.0.8.md) |
 | 1.0.7 | 优化客户备注、标签和头像展示；增加双向上下文、媒体消息开关、移动端聊天布局与扫码/手机号配对动效；统一面板品牌。 | [docs/releases/1.0.7.md](docs/releases/1.0.7.md) |
 | 1.0.6 | 修复并发认证导致 SQLite 锁定；合并相同凭据的并发认证请求，并增加有上限、带过期时间的摘要缓存。 | [docs/releases/1.0.6.md](docs/releases/1.0.6.md) |
 | 1.0.5 | 面板内存上限提升至 512 MiB；增加 Argon2 并发控制和渐进式重哈希，降低多对话页面的瞬时内存压力。 | [docs/releases/1.0.5.md](docs/releases/1.0.5.md) |
@@ -95,7 +96,7 @@ pwsh -File .\backup.ps1
 
 当前镜像版本：
 
-- `devlikeapro/waha:latest-2026.8.2`
-- `docker.io/cangnan88/waha-panel:1.0.7`
+- `devlikeapro/waha:latest-2026.9.1`
+- `docker.io/cangnan88/waha-panel:1.0.8`
 
 如需域名访问，只反代到面板端口 `127.0.0.1:3003`。WAHA API 端口 `3002` 默认不应公开。请在反向代理层启用 HTTPS，并确保代理不会记录 `Authorization`、APIKey 或密码字段。

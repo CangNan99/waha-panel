@@ -28,14 +28,14 @@ if [[ ! -f "$ROOT/.env" ]]; then
   umask 077
   printf '%s\n' \
     "WAHA_API_KEY=$waha_api_key" \
-    'WAHA_IMAGE=devlikeapro/waha:latest-2026.8.2' \
-    'WAHA_IMAGE_TAG=latest-2026.8.2' \
+    'WAHA_IMAGE=devlikeapro/waha:latest-2026.9.1' \
+    'WAHA_IMAGE_TAG=latest-2026.9.1' \
     'WAHA_DASHBOARD_USERNAME=admin' \
     "WAHA_DASHBOARD_PASSWORD=$waha_dashboard_password" \
     "WAHA_WEBHOOK_SECRET=$webhook_secret" \
     "PANEL_DATA_ENCRYPTION_KEY=$panel_data_key" \
-    'PANEL_IMAGE=docker.io/cangnan88/waha-panel:1.0.7' \
-    'PANEL_VERSION=1.0.7' \
+    'PANEL_IMAGE=docker.io/cangnan88/waha-panel:1.0.8' \
+    'PANEL_VERSION=1.0.8' \
     'PANEL_PORT=3003' 'PANEL_BIND_ADDRESS=127.0.0.1' \
     'WAHA_PORT=3002' 'WAHA_BIND_ADDRESS=127.0.0.1' \
     'PORTABLE_VOLUME_PREFIX=waha-release' \

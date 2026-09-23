@@ -37,14 +37,14 @@ try {
 
         Write-Utf8NoBom $envPath @"
 WAHA_API_KEY=$wahaApiKey
-WAHA_IMAGE=devlikeapro/waha:latest-2026.8.2
-WAHA_IMAGE_TAG=latest-2026.8.2
+WAHA_IMAGE=devlikeapro/waha:latest-2026.9.1
+WAHA_IMAGE_TAG=latest-2026.9.1
 WAHA_DASHBOARD_USERNAME=admin
 WAHA_DASHBOARD_PASSWORD=$wahaDashboardPassword
 WAHA_WEBHOOK_SECRET=$webhookSecret
 PANEL_DATA_ENCRYPTION_KEY=$panelDataKey
-PANEL_IMAGE=docker.io/cangnan88/waha-panel:1.0.7
-PANEL_VERSION=1.0.7
+PANEL_IMAGE=docker.io/cangnan88/waha-panel:1.0.8
+PANEL_VERSION=1.0.8
 PANEL_PORT=3003
 PANEL_BIND_ADDRESS=127.0.0.1
 WAHA_PORT=3002

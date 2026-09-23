@@ -46,7 +46,7 @@ class SessionClient:
         return {"status": "ok"}
 
     def get_version(self):
-        return {"version": "2026.8.2"}
+        return {"version": "2026.9.1"}
 
     def get_sessions(self):
         return [
@@ -181,7 +181,7 @@ class QrAndReleaseTests(unittest.TestCase):
             self.assertNotIn("data:image/", page)
         self.assertIn("WhatsAPP AI管理面板", commerce)
 
-    def test_release_metadata_uses_panel_1_0_6_without_changing_waha_or_network(self):
+    def test_release_metadata_uses_panel_1_0_8_and_waha_2026_9_1(self):
         root = Path(__file__).resolve().parents[1]
         release = json.loads((root / "panel-release.json").read_text(encoding="utf-8"))
         compose = (root / "docker-compose.yml").read_text(encoding="utf-8")
@@ -194,31 +194,82 @@ class QrAndReleaseTests(unittest.TestCase):
         readme = (root / "README.md").read_text(encoding="utf-8")
         readme_zh = (root / "README.zh-CN.md").read_text(encoding="utf-8")
 
-        self.assertEqual(release["tag"], "1.0.7")
-        self.assertEqual(release["version"], "1.0.7")
-        self.assertIn("${PANEL_IMAGE:-docker.io/cangnan88/waha-panel:1.0.7}", compose)
-        self.assertIn("${PANEL_VERSION:-1.0.7}", compose)
-        self.assertIn('os.environ.get("PANEL_VERSION", "1.0.7")', (root / "panel" / "app.py").read_text(encoding="utf-8"))
+        self.assertEqual(release["tag"], "1.0.8")
+        self.assertEqual(release["version"], "1.0.8")
+        self.assertIn("${PANEL_IMAGE:-docker.io/cangnan88/waha-panel:1.0.8}", compose)
+        self.assertIn("${PANEL_VERSION:-1.0.8}", compose)
+        self.assertIn('os.environ.get("PANEL_VERSION", "1.0.8")', (root / "panel" / "app.py").read_text(encoding="utf-8"))
         self.assertIn("mem_limit: 512m", compose)
         for installer in (env_example, install_sh, install_ps1):
-            self.assertIn("PANEL_IMAGE=docker.io/cangnan88/waha-panel:1.0.7", installer)
-            self.assertIn("PANEL_VERSION=1.0.7", installer)
+            self.assertIn("PANEL_IMAGE=docker.io/cangnan88/waha-panel:1.0.8", installer)
+            self.assertIn("PANEL_VERSION=1.0.8", installer)
             self.assertNotIn("PANEL_IMAGE=docker.io/cangnan88/waha-panel:1.0.2", installer)
             self.assertNotIn("PANEL_VERSION=1.0.2", installer)
-        self.assertIn("docker.io/cangnan88/waha-panel:1.0.7", install_docs)
+        self.assertIn("docker.io/cangnan88/waha-panel:1.0.8", install_docs)
         self.assertIn("1.0.2", release_plan)
         self.assertIn("1.0.2", release_design)
-        self.assertIn("docker.io/cangnan88/waha-panel:1.0.7", readme)
-        self.assertIn("docker.io/cangnan88/waha-panel:1.0.7", readme_zh)
-        self.assertIn("${WAHA_IMAGE:-devlikeapro/waha:latest-2026.8.2}", compose)
+        self.assertIn("docker.io/cangnan88/waha-panel:1.0.8", readme)
+        self.assertIn("docker.io/cangnan88/waha-panel:1.0.8", readme_zh)
+        self.assertIn("${WAHA_IMAGE:-devlikeapro/waha:latest-2026.9.1}", compose)
+        self.assertIn("${WAHA_IMAGE_TAG:-latest-2026.9.1}", compose)
         self.assertIn("${WAHA_BIND_ADDRESS:-127.0.0.1}:${WAHA_PORT:-3002}:3000", compose)
         self.assertIn("${PANEL_BIND_ADDRESS:-127.0.0.1}:${PANEL_PORT:-3003}:3001", compose)
         self.assertIn("- internal", compose)
         self.assertIn("(INSTALL.zh-CN.md)", readme)
         self.assertIn("(INSTALL.zh-CN.md)", readme_zh)
 
-    def test_update_service_defaults_to_panel_1_0_6(self):
-        self.assertEqual(UpdateService().current["panel"], "1.0.7")
+    def test_update_service_defaults_to_panel_1_0_8(self):
+        self.assertEqual(UpdateService().current["panel"], "1.0.8")
+        self.assertEqual(UpdateService().current["waha"], "latest-2026.9.1")
+
+
+class AvatarProxyTests(unittest.TestCase):
+    def test_waha_avatar_downloads_whatsapp_cdn_without_api_key(self):
+        requests = []
+        png = b"\x89PNG\r\n\x1a\n"
+
+        class Headers:
+            def __init__(self, content_type):
+                self.content_type = content_type
+
+            def get_content_type(self):
+                return self.content_type
+
+        class Response:
+            status = 200
+
+            def __init__(self, body):
+                self.body = body
+                content_type = "application/json" if body.lstrip().startswith(b"{") else "image/png"
+                self.headers = Headers(content_type)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self, *_args):
+                return self.body
+
+        def opener(request, timeout=0):
+            requests.append(request)
+            if request.full_url.endswith("/picture"):
+                return Response(b'{"url":"https://pps.whatsapp.net/avatar.jpg"}')
+            return Response(png)
+
+        client = WahaClient("http://waha:3000", "secret-api-key", opener=opener)
+        status, content_type, body = client.get_chat_picture("default", "12345@c.us")
+        self.assertEqual((status, content_type, body), (200, "image/png", png))
+        self.assertEqual(requests[0].full_url, "http://waha:3000/api/default/chats/12345%40c.us/picture")
+        self.assertNotIn("X-Api-Key", requests[1].headers)
+        self.assertEqual(requests[1].host, "pps.whatsapp.net")
+
+    def test_qr_placeholder_uses_frosted_texture_layers(self):
+        page = multi_session_html_page()
+        self.assertIn("feTurbulence", page)
+        self.assertIn("grid-area:1 / 1", page)
+        self.assertNotIn("repeating-conic-gradient", page)
 
 
 class ChatPageRegressionTests(unittest.TestCase):
