@@ -1,3 +1,4 @@
+import base64
 import json
 import sqlite3
 import tempfile
@@ -5,11 +6,16 @@ import unittest
 from pathlib import Path
 from urllib.parse import urlparse
 
-from panel.app import PanelState, WahaClient, html_page, init_db, multi_session_html_page
+from panel.app import PanelHandler, PanelState, WahaClient, html_page, init_db, multi_session_html_page
 from panel.chat_page import chat_management_page
 from panel.chat_service import ChatService
 from panel.commerce_page import commerce_page
 from panel.update_service import UpdateService
+
+
+PROFILE_PNG = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+)
 
 
 class ReferenceCodec:
@@ -41,6 +47,8 @@ class ChatClient:
 class SessionClient:
     def __init__(self):
         self.deleted = []
+        self.profile_calls = []
+        self.avatar_calls = []
 
     def get_health(self):
         return {"status": "ok"}
@@ -53,6 +61,14 @@ class SessionClient:
             {"name": "default", "status": "WORKING"},
             {"name": "sales", "status": "WORKING"},
         ]
+
+    def get_profile(self, session_name):
+        self.profile_calls.append(session_name)
+        return {"name": "客服账号", "picture": "https://pps.whatsapp.net/profile.jpg"}
+
+    def get_avatar_bytes(self, media_url, max_bytes=None):
+        self.avatar_calls.append((media_url, max_bytes))
+        return 200, "image/png", PROFILE_PNG
 
     def delete_session(self, session_name):
         self.deleted.append(session_name)
@@ -114,6 +130,31 @@ class WahaDeleteTests(unittest.TestCase):
         self.assertEqual(requests[0][:2], ("DELETE", "/api/sessions/sales"))
 
 
+class WahaProfileTests(unittest.TestCase):
+    def test_client_uses_session_profile_endpoint(self):
+        requests = []
+
+        class Response:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self):
+                return b'{"picture":"https://pps.whatsapp.net/profile.jpg"}'
+
+        def opener(request, timeout=0):
+            requests.append((request.method, urlparse(request.full_url).path, timeout))
+            return Response()
+
+        profile = WahaClient("http://waha:3000", "redacted", opener=opener).get_profile("sales")
+        self.assertEqual(profile["picture"], "https://pps.whatsapp.net/profile.jpg")
+        self.assertEqual(requests[0][:2], ("GET", "/api/sales/profile"))
+
+
 class SessionRegressionTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -135,6 +176,27 @@ class SessionRegressionTests(unittest.TestCase):
         self.assertIn("function renderSessions()", page)
         self.assertIn("fetch('/api/status?session='", page)
         self.assertIn("$('sessionList').innerHTML = items.length", page)
+
+    def test_session_control_exposes_local_avatar_and_caches_profile_download(self):
+        detail = self.state.session_detail("sales")
+        self.assertEqual(detail["avatar_url"], "/api/sessions/sales/avatar")
+        first = self.state.session_avatar("sales")
+        second = self.state.session_avatar("sales")
+        self.assertEqual(first, (200, "image/png", PROFILE_PNG))
+        self.assertEqual(second, first)
+        self.assertEqual(self.client.profile_calls, ["sales"])
+        self.assertEqual(self.client.avatar_calls[0][0], "https://pps.whatsapp.net/profile.jpg")
+
+    def test_session_avatar_route_returns_only_the_cached_local_media(self):
+        handler = object.__new__(PanelHandler)
+        responses = []
+        handler.require_admin_auth = lambda: None
+        handler.state = self.state
+        handler.send_media = lambda *payload: responses.append(payload)
+
+        handler.send_session_get("/api/sessions/sales/avatar")
+
+        self.assertEqual(responses[0], (200, "image/png", PROFILE_PNG))
 
     def test_delete_session_removes_a_nonfinal_session(self):
         self.state.sessions_payload()
@@ -169,6 +231,20 @@ class QrAndReleaseTests(unittest.TestCase):
         load_qr = page[page.index("async function loadQr()"):]
         self.assertLess(load_qr.index(content_type_guard), load_qr.index("await revealQrImage"))
 
+    def test_qr_placeholder_uses_embossed_white_glass_contract(self):
+        page = multi_session_html_page()
+        self.assertIn('id="qrGhost"', page)
+        self.assertIn("feDisplacementMap", page)
+        self.assertRegex(page, r'baseFrequency="\.012 \.018"')
+        self.assertRegex(page, r"backdrop-filter:blur\(18px\) saturate\(90%\)")
+        self.assertIn("-webkit-backdrop-filter:blur(18px) saturate(90%)", page)
+        self.assertIn("background:rgba(255,255,255,.46)", page)
+        self.assertIn("border:1px solid rgba(255,255,255,.72)", page)
+        self.assertIn("qr-frosted::after", page)
+        self.assertIn("@keyframes qr-glass-breathe", page)
+        self.assertRegex(page, r'qr-wrap\[data-state="ready"\] \.qr-ghost')
+        self.assertIn("$('qrButton').addEventListener('click', loadQr)", page)
+
     def test_panel_brand_and_qr_motion_contract(self):
         pages = (html_page(), multi_session_html_page())
         commerce = commerce_page()
@@ -194,22 +270,22 @@ class QrAndReleaseTests(unittest.TestCase):
         readme = (root / "README.md").read_text(encoding="utf-8")
         readme_zh = (root / "README.zh-CN.md").read_text(encoding="utf-8")
 
-        self.assertEqual(release["tag"], "1.0.8")
-        self.assertEqual(release["version"], "1.0.8")
-        self.assertIn("${PANEL_IMAGE:-docker.io/cangnan88/waha-panel:1.0.8}", compose)
-        self.assertIn("${PANEL_VERSION:-1.0.8}", compose)
-        self.assertIn('os.environ.get("PANEL_VERSION", "1.0.8")', (root / "panel" / "app.py").read_text(encoding="utf-8"))
+        self.assertEqual(release["tag"], "1.0.9")
+        self.assertEqual(release["version"], "1.0.9")
+        self.assertIn("${PANEL_IMAGE:-docker.io/cangnan88/waha-panel:1.0.9}", compose)
+        self.assertIn("${PANEL_VERSION:-1.0.9}", compose)
+        self.assertIn('os.environ.get("PANEL_VERSION", "1.0.9")', (root / "panel" / "app.py").read_text(encoding="utf-8"))
         self.assertIn("mem_limit: 512m", compose)
         for installer in (env_example, install_sh, install_ps1):
-            self.assertIn("PANEL_IMAGE=docker.io/cangnan88/waha-panel:1.0.8", installer)
-            self.assertIn("PANEL_VERSION=1.0.8", installer)
+            self.assertIn("PANEL_IMAGE=docker.io/cangnan88/waha-panel:1.0.9", installer)
+            self.assertIn("PANEL_VERSION=1.0.9", installer)
             self.assertNotIn("PANEL_IMAGE=docker.io/cangnan88/waha-panel:1.0.2", installer)
             self.assertNotIn("PANEL_VERSION=1.0.2", installer)
-        self.assertIn("docker.io/cangnan88/waha-panel:1.0.8", install_docs)
+        self.assertIn("docker.io/cangnan88/waha-panel:1.0.9", install_docs)
         self.assertIn("1.0.2", release_plan)
         self.assertIn("1.0.2", release_design)
-        self.assertIn("docker.io/cangnan88/waha-panel:1.0.8", readme)
-        self.assertIn("docker.io/cangnan88/waha-panel:1.0.8", readme_zh)
+        self.assertIn("docker.io/cangnan88/waha-panel:1.0.9", readme)
+        self.assertIn("docker.io/cangnan88/waha-panel:1.0.9", readme_zh)
         self.assertIn("${WAHA_IMAGE:-devlikeapro/waha:latest-2026.9.1}", compose)
         self.assertIn("${WAHA_IMAGE_TAG:-latest-2026.9.1}", compose)
         self.assertIn("${WAHA_BIND_ADDRESS:-127.0.0.1}:${WAHA_PORT:-3002}:3000", compose)
@@ -219,7 +295,7 @@ class QrAndReleaseTests(unittest.TestCase):
         self.assertIn("(INSTALL.zh-CN.md)", readme_zh)
 
     def test_update_service_defaults_to_panel_1_0_8(self):
-        self.assertEqual(UpdateService().current["panel"], "1.0.8")
+        self.assertEqual(UpdateService().current["panel"], "1.0.9")
         self.assertEqual(UpdateService().current["waha"], "latest-2026.9.1")
 
 
@@ -313,6 +389,21 @@ class ChatPageRegressionTests(unittest.TestCase):
         self.assertIn("requestGeneration", page)
         self.assertIn("updated_at", page)
         self.assertNotIn("Math.floor(Date.now()/1000)", page)
+
+    def test_mobile_header_and_session_avatar_contracts_are_present(self):
+        page = chat_management_page("default")
+        self.assertIn(".app.has-chat > .topbar{display:none", page)
+        self.assertIn("node.dataset.avatarUrl", page)
+        session_page = multi_session_html_page()
+        self.assertIn('id="identityAvatar"', session_page)
+        self.assertIn("function renderIdentityAvatar(item)", session_page)
+        self.assertIn("/api/sessions/", session_page)
+
+    def test_translation_card_labels_customer_and_agent_sources(self):
+        page = chat_management_page("default")
+        self.assertIn("消息来源", page)
+        self.assertIn("speaker_intent_zh", page)
+        self.assertIn("客服表达目的", page)
 
 
 if __name__ == "__main__":

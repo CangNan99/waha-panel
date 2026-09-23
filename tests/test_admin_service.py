@@ -6,6 +6,7 @@ import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from cryptography.hazmat.primitives.kdf.argon2 import Argon2id
@@ -119,6 +120,26 @@ class AdminArgon2Tests(unittest.TestCase):
 
         self.assertEqual(responses[0][1], HTTPStatus.SERVICE_UNAVAILABLE)
         self.assertEqual(responses[0][0]["code"], "ADMIN_AUTH_UNAVAILABLE")
+
+    def test_collection_post_creates_admin_without_unpacking_empty_route(self):
+        handler = object.__new__(PanelHandler)
+        responses = []
+        created = []
+        handler.require_csrf = lambda: None
+        handler.read_api_json = lambda: {"username": "operator", "password": "a" * 12}
+        handler.state = SimpleNamespace(
+            create_admin_user=lambda payload: created.append(payload) or {
+                "id": 7,
+                "username": payload["username"],
+            }
+        )
+        handler.send_json = lambda payload, status=HTTPStatus.OK: responses.append((payload, status))
+
+        handler.send_admin_users_write("/api/admin/users", "POST")
+
+        self.assertEqual(created[0]["username"], "operator")
+        self.assertEqual(responses[0][1], HTTPStatus.CREATED)
+        self.assertEqual(responses[0][0]["id"], 7)
 
     def test_password_verification_does_not_hold_the_sqlite_write_lock(self):
         active = 0
