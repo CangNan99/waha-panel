@@ -796,7 +796,7 @@ class PanelState:
         self.admin_service = AdminService(self.database_path)
         self._admin_db_auth = as_bool(os.environ.get("PANEL_ADMIN_DB_AUTH", "0"))
         self._update_service = UpdateService(
-            current_panel=os.environ.get("PANEL_VERSION", "1.0.9"),
+            current_panel=os.environ.get("PANEL_VERSION", "1.0.10"),
             current_waha=os.environ.get("WAHA_IMAGE_TAG", "latest-2026.9.1"),
         )
         self.sleep_fn = sleep_fn or time.sleep
@@ -2555,21 +2555,21 @@ def multi_session_html_page():
     .qr-image-layer,.qr-ghost,.qr-frosted { position:absolute; inset:0; display:grid; place-items:center; }
     .qr-image-layer { z-index:1; }
     .qr-image-layer img { display:block; width:min(100%,330px); aspect-ratio:1; object-fit:contain; padding:18px; opacity:0; transform:scale(.985); filter:none; transition:opacity 420ms ease-out,transform 420ms ease-out,filter 420ms ease-out; }
-    .qr-ghost { z-index:1; pointer-events:none; opacity:.16; transition:opacity 420ms ease-out,visibility 0s linear 420ms; }
-    .qr-ghost svg { display:block; width:min(68%,244px); height:auto; aspect-ratio:1; filter:blur(10px); transform:scale(.96); }
+    .qr-ghost { z-index:3; pointer-events:none; opacity:.18; mix-blend-mode:multiply; transition:opacity 420ms ease-out,visibility 0s linear 420ms; }
+    .qr-ghost svg { display:block; width:min(82%,320px); height:auto; aspect-ratio:1; filter:blur(10px) contrast(1.18); transform:scale(.98); }
     .qr-wrap[data-state="ready"] .qr-image-layer img { opacity:1; transform:scale(1); filter:none; }
     .qr-wrap[data-state="ready"] .qr-ghost { opacity:0; visibility:hidden; }
     .qr-frosted { z-index:2; width:100%; height:100%; overflow:hidden; border:0; border-radius:20px; background:rgba(255,255,255,.46); opacity:1; transition:opacity 420ms ease-out,visibility 0s linear 420ms; -webkit-backdrop-filter:blur(18px) saturate(90%); backdrop-filter:blur(18px) saturate(90%); }
     .qr-wrap[data-state="ready"] .qr-frosted { opacity:0; visibility:hidden; pointer-events:none; }
-    .qr-frosted::before { content:""; position:absolute; inset:0; z-index:1; pointer-events:none; background:radial-gradient(circle at 18% 20%,rgba(255,255,255,.34),transparent 34%),radial-gradient(circle at 74% 68%,rgba(218,218,218,.18),transparent 42%),linear-gradient(145deg,rgba(250,250,250,.18),rgba(238,238,238,.08)); opacity:.62; }
+    .qr-frosted::before { content:""; position:absolute; inset:0; z-index:1; pointer-events:none; background:radial-gradient(circle at 18% 20%,rgba(255,255,255,.34),transparent 34%),radial-gradient(circle at 74% 68%,rgba(218,218,218,.18),transparent 42%),linear-gradient(145deg,rgba(250,250,250,.18),rgba(238,238,238,.08)); opacity:.72; }
     .qr-frosted::after { content:""; position:absolute; inset:0; z-index:2; pointer-events:none; background:linear-gradient(135deg,rgba(255,255,255,.42),rgba(255,255,255,.08) 40%,rgba(255,255,255,.02) 70%); opacity:.42; animation:qr-glass-breathe 5s ease-in-out infinite; }
-    .qr-decoration { position:absolute; inset:0; z-index:0; width:100%; height:100%; overflow:hidden; background:radial-gradient(circle at 20% 24%,rgba(255,255,255,.82),transparent 30%),radial-gradient(circle at 72% 64%,rgba(218,218,218,.24),transparent 40%),linear-gradient(135deg,#FAFAFA,#EEEEEE); opacity:.58; pointer-events:none; }
+    .qr-decoration { position:absolute; inset:0; z-index:0; width:100%; height:100%; overflow:hidden; background:radial-gradient(circle at 20% 24%,rgba(255,255,255,.82),transparent 30%),radial-gradient(circle at 72% 64%,rgba(218,218,218,.24),transparent 40%),linear-gradient(135deg,#FAFAFA,#EEEEEE); opacity:.72; filter:contrast(1.06) saturate(.82); pointer-events:none; }
     .qr-decoration svg { display:block; width:100%; height:100%; }
-    .qr-frosted-copy { position:relative; z-index:3; width:min(72%,300px); padding:18px 20px; border:1px solid rgba(255,255,255,.82); border-radius:19px; background:rgba(255,255,255,.62); color:#111827; text-align:center; box-shadow:0 12px 32px rgba(0,0,0,.08),inset 0 1px 0 rgba(255,255,255,.95); -webkit-backdrop-filter:blur(24px) saturate(90%); backdrop-filter:blur(24px) saturate(90%); }
+    .qr-frosted-copy { position:relative; z-index:4; width:min(82%,520px); padding:18px 20px; border:1px solid rgba(255,255,255,.82); border-radius:19px; background:rgba(255,255,255,.62); color:#111827; text-align:center; box-shadow:0 12px 32px rgba(0,0,0,.08),inset 0 1px 0 rgba(255,255,255,.95); -webkit-backdrop-filter:blur(24px) saturate(90%); backdrop-filter:blur(24px) saturate(90%); }
     .qr-frosted-title { display:block; color:#111827; font-weight:650; }
     .qr-frosted-detail { display:block; margin-top:6px; color:#667085; font-size:12px; font-weight:400; }
     @keyframes qr-glass-breathe { 0%,100% { opacity:.36; } 50% { opacity:.5; } }
-    @media (max-width:420px) { .qr-frosted-copy { width:min(88%,300px); padding:16px; } .qr-ghost svg { width:min(72%,226px); } }
+    @media (max-width:420px) { .qr-frosted-copy { width:min(92%,520px); padding:16px; } .qr-ghost svg { width:min(86%,300px); } }
     @media (prefers-reduced-motion:reduce) { .qr-image-layer img,.qr-ghost,.qr-frosted { transition:opacity 160ms ease-out; transform:none; } .qr-frosted::after { animation:none; opacity:.42; } }
     @media (prefers-reduced-transparency:reduce) { .qr-frosted,.qr-frosted-copy { background:#FAFAFA; -webkit-backdrop-filter:none; backdrop-filter:none; } .qr-decoration { opacity:.12; } }
     @supports not ((backdrop-filter:blur(1px)) or (-webkit-backdrop-filter:blur(1px))) { .qr-frosted,.qr-frosted-copy { background:#FAFAFA; } .qr-decoration { opacity:.12; } }
@@ -2598,7 +2598,7 @@ def multi_session_html_page():
                <div class="qr-image-layer" id="qrImageLayer"></div>
                <div class="qr-ghost" id="qrGhost" data-non-scannable="true" aria-hidden="true">
                  <svg viewBox="0 0 210 210" focusable="false" aria-hidden="true">
-                   <g fill="#667085">
+                   <g fill="#475569">
                      <rect x="18" y="18" width="48" height="48" rx="4"/><rect x="27" y="27" width="30" height="30" rx="2" fill="#FAFAFA"/><rect x="35" y="35" width="14" height="14" rx="1"/>
                      <rect x="144" y="18" width="48" height="48" rx="4"/><rect x="153" y="27" width="30" height="30" rx="2" fill="#FAFAFA"/><rect x="161" y="35" width="14" height="14" rx="1"/>
                      <rect x="18" y="144" width="48" height="48" rx="4"/><rect x="27" y="153" width="30" height="30" rx="2" fill="#FAFAFA"/><rect x="35" y="161" width="14" height="14" rx="1"/>

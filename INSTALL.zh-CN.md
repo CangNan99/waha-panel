@@ -3,7 +3,7 @@
 本指南适用于 GitHub 仓库 `CangNan99/waha-panel` 的便携发布版。它安装两个可以独立更新的 Docker 服务：
 
 - WAHA：`devlikeapro/waha:latest-2026.9.1`
-- 管理面板：`docker.io/cangnan88/waha-panel:1.0.9`
+- 管理面板：`docker.io/cangnan88/waha-panel:1.0.10`
 
 面板默认仅监听服务器本机，不会把管理端口直接暴露到公网。面板使用 SQLite，不部署额外数据库服务；数据通过 Docker 命名卷持久化保存。
 

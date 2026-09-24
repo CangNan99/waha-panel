@@ -154,6 +154,15 @@ test('chat management exposes engagement handlers without replacing dialogs duri
   assert.match(chatSource, /messageStack.*replaceChildren/);
 });
 
+test('chat message refresh reuses keyed rows and preserves active scrolling', () => {
+  assert.match(chatSource, /function syncMessageRows\(/);
+  assert.match(chatSource, /messageNodeByRef/);
+  assert.match(chatSource, /messageScrollGeneration/);
+  assert.match(chatSource, /const scrollGeneration=messageScrollGeneration/);
+  assert.match(chatSource, /if\(scrollGeneration!==messageScrollGeneration\)return/);
+  assert.doesNotMatch(chatSource, /area\.scrollTop=Math\.min\(previousScrollTop/);
+});
+
 test('chat management guards engagement responses across chat switches', () => {
   assert.match(chatSource, /requestedChatRef/);
   assert.match(chatSource, /requestGeneration/);
