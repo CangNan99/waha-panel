@@ -71,6 +71,7 @@ pwsh -File .\update.ps1 -Component waha
 
 | 版本 | 更新内容 | 详细说明 |
 | --- | --- | --- |
+| 1.0.11 | 过滤无内容空消息气泡；打开聊天定位最新消息并在底部跟随新消息；增加固定 7 天管理员登录状态、退出和会话撤销。 | [docs/releases/1.0.11.md](docs/releases/1.0.11.md) |
 | 1.0.10 | 修复聊天消息实时更新时拖拽导致的频闪和滚动位置被旧请求覆盖；按消息引用复用列表节点；优化二维码待刷新状态的白色压花磨砂层、不可扫描虚化定位块和中心提示卡显影。 | [docs/releases/1.0.10.md](docs/releases/1.0.10.md) |
 | 1.0.9 | 修复管理员新增账号失败；增加当前 WhatsApp 账号头像代理与缓存；修复移动端顶部布局、头像闪烁，并区分客服/客户翻译来源。 | [docs/releases/1.0.9.md](docs/releases/1.0.9.md) |
 | 1.0.8 | 修复 WhatsApp CDN 头像加载；将二维码未刷新占位改为磨砂纹理层；更新 WAHA 至 `latest-2026.9.1`。 | [docs/releases/1.0.8.md](docs/releases/1.0.8.md) |
@@ -102,6 +103,6 @@ pwsh -File .\backup.ps1
 当前镜像版本：
 
 - `devlikeapro/waha:latest-2026.9.1`
-- `docker.io/cangnan88/waha-panel:1.0.10`
+- `docker.io/cangnan88/waha-panel:1.0.11`
 
 如需域名访问，只反代到面板端口 `127.0.0.1:3003`。WAHA API 端口 `3002` 默认不应公开。请在反向代理层启用 HTTPS，并确保代理不会记录 `Authorization`、APIKey 或密码字段。
