@@ -390,8 +390,23 @@ class ChatPageRegressionTests(unittest.TestCase):
         self.assertIn("messageNodeByRef", page)
         self.assertIn("messageScrollGeneration", page)
         self.assertIn("const scrollGeneration=messageScrollGeneration", page)
-        self.assertIn("if(scrollGeneration!==messageScrollGeneration)return", page)
+        self.assertIn("const scrollChanged=scrollGeneration!==messageScrollGeneration", page)
+        self.assertIn("else if(open&&!scrollChanged)scrollToBottom()", page)
         self.assertNotRegex(page, r"area\.scrollTop=Math\.min\(previousScrollTop")
+
+    def test_message_rendering_skips_empty_non_media_rows(self):
+        page = chat_management_page("default")
+        self.assertIn("function isDisplayableMessage(message)", page)
+        self.assertIn("if(!isDisplayableMessage(message))continue", page)
+
+    def test_chat_open_and_live_updates_follow_latest_message_without_breaking_history_reading(self):
+        page = chat_management_page("default")
+        self.assertIn('id="latestMessageButton"', page)
+        self.assertIn("function isMessageNearBottom(area)", page)
+        self.assertIn("function showLatestMessageNotice(visible)", page)
+        self.assertIn("loadMessages({background:Boolean(cached),open:true})", page)
+        self.assertIn("if(newerMessage&&!wasAtBottom&&!older)showLatestMessageNotice(true)", page)
+        self.assertIn("if(open&&!scrollChanged)scrollToBottom()", page)
 
     def test_chat_engagement_state_and_accessibility_guards(self):
         page = chat_management_page("default")

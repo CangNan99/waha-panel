@@ -785,6 +785,18 @@ class PanelEngagementRouteTests(unittest.TestCase):
         except HTTPError as error:
             return error.code, json.loads(error.read().decode("utf-8"))
 
+    def request_response(self, method, path, headers=None, payload=None):
+        request_headers = dict(headers or {})
+        data = None
+        if payload is not None:
+            data = json.dumps(payload).encode("utf-8")
+            request_headers["Content-Type"] = "application/json"
+        request = Request(self.base_url + path, data=data, headers=request_headers, method=method)
+        try:
+            return urlopen(request, timeout=3)
+        except HTTPError as error:
+            return error
+
     def test_chat_route_accepts_engagement_paths(self):
         self.assertEqual(PanelHandler.chat_route("/api/chat/sessions/default/follow-ups"), ("default", "follow-ups"))
         self.assertEqual(PanelHandler.chat_route("/api/chat/sessions/default/follow-ups/7/cancel"), ("default", "follow-ups/7/cancel"))
@@ -793,6 +805,34 @@ class PanelEngagementRouteTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             PanelHandler.chat_route("/api/chat/sessions/default/labels/VIP")
         self.assertEqual(PanelHandler.chat_route("/api/chat/sessions/default/summary"), ("default", "summary"))
+
+    def test_basic_auth_sets_persistent_cookie_and_cookie_reauthenticates(self):
+        with self.request_response("GET", "/api/security/csrf", headers=self.auth_headers) as response:
+            cookie = response.headers["Set-Cookie"]
+            self.assertIn("panel_session=", cookie)
+            self.assertIn("Max-Age=604800", cookie)
+            self.assertIn("HttpOnly", cookie)
+            self.assertIn("SameSite=Lax", cookie)
+            cookie_pair = cookie.split(";", 1)[0]
+
+        with self.request_response("GET", "/api/security/csrf", headers={"Cookie": cookie_pair}) as response:
+            self.assertEqual(response.status, 200)
+
+    def test_logout_revokes_cookie_session_and_clears_browser_cookie(self):
+        with self.request_response("GET", "/api/security/csrf", headers=self.auth_headers) as response:
+            cookie_pair = response.headers["Set-Cookie"].split(";", 1)[0]
+            csrf = json.loads(response.read().decode("utf-8"))["csrf_token"]
+
+        with self.request_response(
+            "POST",
+            "/api/auth/logout",
+            headers={"Cookie": cookie_pair, "X-CSRF-Token": csrf},
+        ) as response:
+            self.assertEqual(response.status, 200)
+            self.assertIn("Max-Age=0", response.headers["Set-Cookie"])
+
+        denied = self.request_response("GET", "/api/status", headers={"Cookie": cookie_pair})
+        self.assertEqual(denied.status, 401)
 
     def test_enable_and_background_lifecycle_are_idempotent(self):
         with tempfile.TemporaryDirectory() as directory:

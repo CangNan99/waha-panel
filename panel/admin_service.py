@@ -9,6 +9,7 @@ import hashlib
 import hmac
 import os
 import re
+import secrets
 import sqlite3
 import threading
 import time
@@ -30,6 +31,8 @@ AUTH_CACHE_MAX_ENTRIES = 128
 MAX_FAILED_ATTEMPTS = 5
 FAILED_ATTEMPT_WINDOW = 300
 LOCKOUT_SECONDS = 60
+ADMIN_SESSION_TTL = 7 * 24 * 60 * 60
+ADMIN_SESSION_TOKEN_BYTES = 32
 _ARGON2_GATE = threading.BoundedSemaphore(ARGON2_GATE_LIMIT)
 
 
@@ -78,6 +81,21 @@ def apply_migration(connection):
             locked_until INTEGER NOT NULL DEFAULT 0,
             updated_at INTEGER NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS admin_sessions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            token_hash TEXT NOT NULL UNIQUE,
+            admin_id INTEGER,
+            username TEXT NOT NULL COLLATE NOCASE,
+            created_at INTEGER NOT NULL,
+            expires_at INTEGER NOT NULL,
+            revoked_at INTEGER,
+            FOREIGN KEY (admin_id) REFERENCES admin_users(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_admin_sessions_expiry
+            ON admin_sessions(expires_at, revoked_at);
+        CREATE INDEX IF NOT EXISTS idx_admin_sessions_admin
+            ON admin_sessions(admin_id, revoked_at);
         """
     )
 
@@ -274,6 +292,7 @@ class AdminService:
             connection.execute(
                 f"UPDATE admin_users SET {assignments}, updated_at = ? WHERE id = ?", values
             )
+            self._revoke_user_sessions(connection, numeric_id, now)
             updated = connection.execute(
                 "SELECT id, username, is_active, created_at, updated_at, last_login_at "
                 "FROM admin_users WHERE id = ?", (numeric_id,)
@@ -301,6 +320,7 @@ class AdminService:
             )
             if cursor.rowcount == 0:
                 raise AdminNotFoundError("管理员不存在")
+            self._revoke_user_sessions(connection, numeric_id, now)
             connection.commit()
             row = connection.execute(
                 "SELECT id, username, is_active, created_at, updated_at, last_login_at "
@@ -316,6 +336,104 @@ class AdminService:
             return connection.execute("SELECT * FROM admin_users WHERE id = ?", (user_id,)).fetchone()
         finally:
             connection.close()
+
+    @staticmethod
+    def _session_hash(token):
+        return hashlib.sha256(str(token or "").encode("utf-8")).hexdigest()
+
+    def create_session(self, username):
+        name = str(username or "").strip()
+        if not name:
+            raise AdminValidationError("管理员账号不能为空")
+        now = int(self.clock())
+        expires_at = now + ADMIN_SESSION_TTL
+        token = secrets.token_urlsafe(ADMIN_SESSION_TOKEN_BYTES)
+        token_hash = self._session_hash(token)
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                "DELETE FROM admin_sessions WHERE expires_at <= ? OR revoked_at IS NOT NULL",
+                (now,),
+            )
+            user = connection.execute(
+                "SELECT id, username, is_active FROM admin_users WHERE username = ?",
+                (name,),
+            ).fetchone()
+            if user is not None and not user["is_active"]:
+                raise AdminAuthUnavailableError("管理员账号已停用")
+            connection.execute(
+                "INSERT INTO admin_sessions(token_hash, admin_id, username, created_at, expires_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (token_hash, user["id"] if user is not None else None,
+                 user["username"] if user is not None else name, now, expires_at),
+            )
+            connection.commit()
+            return token, expires_at
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def validate_session(self, token):
+        token_hash = self._session_hash(token)
+        if not str(token or "").strip():
+            return None
+        now = int(self.clock())
+        connection = self._connect()
+        try:
+            row = connection.execute(
+                "SELECT s.id, s.admin_id, s.username, s.expires_at, s.revoked_at, "
+                "u.username AS active_username, u.is_active AS user_active "
+                "FROM admin_sessions AS s LEFT JOIN admin_users AS u ON u.id = s.admin_id "
+                "WHERE s.token_hash = ?",
+                (token_hash,),
+            ).fetchone()
+            if row is None:
+                return None
+            invalid = bool(row["revoked_at"] or row["expires_at"] <= now)
+            invalid = invalid or (row["admin_id"] is not None and not row["user_active"])
+            if invalid:
+                connection.execute(
+                    "UPDATE admin_sessions SET revoked_at = COALESCE(revoked_at, ?) WHERE id = ?",
+                    (now, row["id"]),
+                )
+                connection.commit()
+                return None
+            return {
+                "id": int(row["id"]),
+                "admin_id": row["admin_id"],
+                "username": row["active_username"] or row["username"],
+                "expires_at": int(row["expires_at"]),
+            }
+        finally:
+            connection.close()
+
+    def logout_session(self, token):
+        token_hash = self._session_hash(token)
+        if not str(token or "").strip():
+            return False
+        now = int(self.clock())
+        connection = self._connect()
+        try:
+            cursor = connection.execute(
+                "UPDATE admin_sessions SET revoked_at = COALESCE(revoked_at, ?) "
+                "WHERE token_hash = ? AND revoked_at IS NULL",
+                (now, token_hash),
+            )
+            connection.commit()
+            return bool(cursor.rowcount)
+        finally:
+            connection.close()
+
+    @staticmethod
+    def _revoke_user_sessions(connection, user_id, now):
+        connection.execute(
+            "UPDATE admin_sessions SET revoked_at = COALESCE(revoked_at, ?) "
+            "WHERE admin_id = ? AND revoked_at IS NULL",
+            (now, int(user_id)),
+        )
 
     @staticmethod
     def _identity_hash(username, client_key):

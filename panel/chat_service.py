@@ -634,13 +634,16 @@ class ChatService:
             media = raw.get("media") if isinstance(raw.get("media"), dict) else {}
             body = _limited_text(raw.get("body") or raw.get("text"), 100000)
             caption = _limited_text(raw.get("caption") or (body if raw.get("hasMedia") else ""), 100000)
+            has_media = bool(raw.get("hasMedia") or media)
+            if not body and not caption and not has_media:
+                continue
             items.append({
                 "message_ref": self._encode_message(name, chat_id, message_id),
                 "timestamp": int(raw.get("timestamp") or 0),
                 "from_me": bool(raw.get("fromMe")),
                 "body": body,
                 "caption": caption,
-                "has_media": bool(raw.get("hasMedia") or media),
+                "has_media": has_media,
                 "media_type": _limited_text(media.get("mimetype") or raw.get("type"), 80),
                 "filename": _limited_text(media.get("filename"), 255),
                 "ack": raw.get("ack"),

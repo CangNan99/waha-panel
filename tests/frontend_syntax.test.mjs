@@ -159,7 +159,8 @@ test('chat message refresh reuses keyed rows and preserves active scrolling', ()
   assert.match(chatSource, /messageNodeByRef/);
   assert.match(chatSource, /messageScrollGeneration/);
   assert.match(chatSource, /const scrollGeneration=messageScrollGeneration/);
-  assert.match(chatSource, /if\(scrollGeneration!==messageScrollGeneration\)return/);
+  assert.match(chatSource, /const scrollChanged=scrollGeneration!==messageScrollGeneration/);
+  assert.match(chatSource, /else if\(open&&!scrollChanged\)scrollToBottom\(\)/);
   assert.doesNotMatch(chatSource, /area\.scrollTop=Math\.min\(previousScrollTop/);
 });
 

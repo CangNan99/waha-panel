@@ -397,6 +397,63 @@ class WebhookArchiveTests(UpgradeTestCase):
         self.assertIn("客服：", self.state.last_ai_context)
 
 
+class ChatHistoryMessageTests(UpgradeTestCase):
+    def test_history_omits_empty_non_media_items_but_keeps_displayable_messages(self):
+        self.client.messages = [
+            {
+                "id": "empty-1",
+                "timestamp": 1,
+                "fromMe": False,
+                "body": "",
+                "caption": "",
+                "hasMedia": False,
+                "type": "chat",
+            },
+            {
+                "id": "whitespace-1",
+                "timestamp": 2,
+                "fromMe": False,
+                "body": "   ",
+                "caption": "\n",
+                "hasMedia": False,
+                "type": "chat",
+            },
+            {
+                "id": "text-1",
+                "timestamp": 3,
+                "fromMe": False,
+                "body": "客户消息",
+                "hasMedia": False,
+                "type": "chat",
+            },
+            {
+                "id": "caption-1",
+                "timestamp": 4,
+                "fromMe": False,
+                "body": "",
+                "caption": "图片说明",
+                "hasMedia": True,
+                "type": "image",
+                "media": {"mimetype": "image/jpeg", "filename": "photo.jpg"},
+            },
+            {
+                "id": "media-1",
+                "timestamp": 5,
+                "fromMe": False,
+                "body": "",
+                "caption": "",
+                "hasMedia": True,
+                "type": "image",
+                "media": {"mimetype": "image/jpeg", "filename": "photo-2.jpg"},
+            },
+        ]
+
+        items = self.state.chat.messages("default", self.chat_ref)["items"]
+        message_ids = [self.decode_message_ref(item["message_ref"]) for item in items]
+
+        self.assertEqual(message_ids, ["text-1", "caption-1", "media-1"])
+
+
 class AvatarAndMetadataTests(UpgradeTestCase):
     client_class = AvatarClient
 

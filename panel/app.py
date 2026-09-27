@@ -15,6 +15,7 @@ from datetime import datetime
 from email.parser import BytesParser
 from email.policy import default as email_policy
 from http import HTTPStatus
+from http.cookies import CookieError, SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from ipaddress import ip_address, ip_network
 from pathlib import Path
@@ -847,6 +848,22 @@ class PanelState:
         return hmac.compare_digest(str(username or ""), self.admin_username) and hmac.compare_digest(
             str(password or ""), self.admin_password
         )
+
+    def create_admin_session(self, username):
+        return self.admin_service.create_session(username)
+
+    def validate_admin_session(self, token):
+        session = self.admin_service.validate_session(token)
+        if not session:
+            return None
+        if not self._admin_db_auth and self.admin_username:
+            if not hmac.compare_digest(str(session.get("username") or ""), self.admin_username):
+                self.admin_service.logout_session(token)
+                return None
+        return session
+
+    def logout_admin_session(self, token):
+        return self.admin_service.logout_session(token)
 
     def create_admin_user(self, payload):
         if not isinstance(payload, dict):
@@ -2809,9 +2826,66 @@ def settings_page():
 
 class PanelHandler(BaseHTTPRequestHandler):
     state = None
+    SESSION_COOKIE_NAME = "panel_session"
+    SESSION_COOKIE_MAX_AGE = 7 * 24 * 60 * 60
 
     def log_message(self, format_string, *args):
         return
+
+    def _request_is_secure(self):
+        scheme = (
+            self.headers.get("X-Forwarded-Proto") or "http"
+        ).split(",", 1)[0].strip().lower()
+        return scheme == "https"
+
+    def _session_cookie_header(self, value, max_age=None):
+        if max_age is None:
+            max_age = self.SESSION_COOKIE_MAX_AGE
+        parts = [
+            f"{self.SESSION_COOKIE_NAME}={value}",
+            "Path=/",
+            f"Max-Age={int(max_age)}",
+            "HttpOnly",
+            "SameSite=Lax",
+        ]
+        if self._request_is_secure():
+            parts.append("Secure")
+        return "; ".join(parts)
+
+    def _clear_session_cookie_header(self):
+        return self._session_cookie_header("", max_age=0)
+
+    def _session_token_from_cookie(self):
+        raw = self.headers.get("Cookie", "")
+        if not raw:
+            return ""
+        cookies = SimpleCookie()
+        try:
+            cookies.load(raw)
+        except CookieError:
+            return ""
+        morsel = cookies.get(self.SESSION_COOKIE_NAME)
+        return str(morsel.value or "") if morsel is not None else ""
+
+    def _queue_session_cookie(self, token, expires_at=None):
+        self._session_token_value = str(token or "")
+        self._pending_session_cookie = self._session_cookie_header(
+            token, max_age=self.SESSION_COOKIE_MAX_AGE
+        )
+        self._clear_session_cookie = False
+
+    def _queue_session_cookie_clear(self):
+        self._clear_session_cookie = True
+        self._pending_session_cookie = ""
+
+    def end_headers(self):
+        if getattr(self, "_clear_session_cookie", False):
+            self.send_header("Set-Cookie", self._clear_session_cookie_header())
+        else:
+            pending = getattr(self, "_pending_session_cookie", "")
+            if pending:
+                self.send_header("Set-Cookie", pending)
+        super().end_headers()
 
     def send_json(self, payload, status=HTTPStatus.OK):
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -2901,24 +2975,23 @@ class PanelHandler(BaseHTTPRequestHandler):
 
     def require_admin_auth(self):
         """Require panel credentials for all chat and translation surfaces."""
-        if getattr(self.state, "_admin_db_auth", False):
-            authorization = self.headers.get("Authorization", "")
-            supplied_user = supplied_password = ""
-            if authorization.startswith("Basic "):
-                try:
-                    decoded = base64.b64decode(authorization[6:], validate=True).decode("utf-8")
-                    supplied_user, supplied_password = decoded.split(":", 1)
-                except (ValueError, UnicodeDecodeError):
-                    pass
-            client_key = self.client_address[0] if self.client_address else ""
-            if self.state.authenticate_admin(supplied_user, supplied_password, client_key):
-                return
-            raise AdminAuthError("需要管理员身份验证")
-        username = self.state.admin_username
-        password = self.state.admin_password
-        if not (username and password):
-            self.require_local_admin()
+        if getattr(self, "_admin_authenticated", False):
             return
+        if not getattr(self.state, "_admin_db_auth", False) and not (
+            self.state.admin_username and self.state.admin_password
+        ):
+            self.require_local_admin()
+            self._admin_authenticated = True
+            return
+        session_token = self._session_token_from_cookie()
+        if session_token:
+            session = self.state.validate_admin_session(session_token)
+            if session:
+                self._session_token_value = session_token
+                self._admin_authenticated = True
+                self._admin_session = session
+                return
+            self._queue_session_cookie_clear()
         authorization = self.headers.get("Authorization", "")
         supplied_user = supplied_password = ""
         if authorization.startswith("Basic "):
@@ -2927,11 +3000,14 @@ class PanelHandler(BaseHTTPRequestHandler):
                 supplied_user, supplied_password = decoded.split(":", 1)
             except (ValueError, UnicodeDecodeError):
                 pass
-        if not (
-            hmac.compare_digest(supplied_user, username)
-            and hmac.compare_digest(supplied_password, password)
-        ):
-            raise AdminAuthError("需要管理员身份验证")
+        client_key = self.client_address[0] if self.client_address else ""
+        if self.state.authenticate_admin(supplied_user, supplied_password, client_key):
+            token, expires_at = self.state.create_admin_session(supplied_user)
+            self._queue_session_cookie(token, expires_at)
+            self._admin_authenticated = True
+            self._admin_session = {"username": supplied_user, "expires_at": expires_at}
+            return
+        raise AdminAuthError("需要管理员身份验证")
 
     def require_csrf(self):
         self.require_admin_auth()
@@ -3354,9 +3430,20 @@ class PanelHandler(BaseHTTPRequestHandler):
 
     def require_local_admin(self):
         """Allow loopback callers or an authenticated reverse-proxy request."""
+        if getattr(self, "_admin_authenticated", False):
+            return
         if getattr(self.state, "_admin_db_auth", False):
             self.require_admin_auth()
             return
+        session_token = self._session_token_from_cookie()
+        if session_token:
+            session = self.state.validate_admin_session(session_token)
+            if session:
+                self._session_token_value = session_token
+                self._admin_authenticated = True
+                self._admin_session = session
+                return
+            self._queue_session_cookie_clear()
         try:
             address = ip_address(self.client_address[0])
         except ValueError as error:
@@ -3368,13 +3455,8 @@ class PanelHandler(BaseHTTPRequestHandler):
         password = self.state.admin_password
         authorization = self.headers.get("Authorization", "")
         if username and password and authorization.startswith("Basic "):
-            try:
-                decoded = base64.b64decode(authorization[6:], validate=True).decode("utf-8")
-                supplied_user, supplied_password = decoded.split(":", 1)
-            except (ValueError, UnicodeDecodeError):
-                supplied_user = supplied_password = ""
-            if hmac.compare_digest(supplied_user, username) and hmac.compare_digest(supplied_password, password):
-                return
+            self.require_admin_auth()
+            return
         if username and password:
             raise AdminAuthError("需要管理员身份验证")
         raise PermissionError("业务管理接口仅允许本机访问")
@@ -3733,6 +3815,12 @@ class PanelHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         route = urlparse(self.path).path
         try:
+            if route == "/api/auth/logout":
+                self.require_csrf()
+                self.state.logout_admin_session(getattr(self, "_session_token_value", ""))
+                self._queue_session_cookie_clear()
+                self.send_json({"logged_out": True})
+                return
             if route != "/api/webhook":
                 self.require_mutation_auth()
             if route.startswith("/api/chat/sessions/"):

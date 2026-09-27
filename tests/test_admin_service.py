@@ -1,3 +1,5 @@
+import base64
+import gc
 import os
 import sqlite3
 import threading
@@ -17,6 +19,7 @@ from panel.app import PanelHandler
 from panel.admin_service import (
     AdminAuthUnavailableError,
     AdminService,
+    LastActiveAdministratorError,
     apply_migration,
 )
 
@@ -241,6 +244,149 @@ class AdminArgon2Tests(unittest.TestCase):
                 result = future.result(timeout=2)
 
         self.assertTrue(result)
+
+
+class AdminSessionTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = TemporaryDirectory()
+        self.database = Path(self.temp.name) / "panel.sqlite3"
+        connection = sqlite3.connect(self.database)
+        apply_migration(connection)
+        connection.commit()
+        connection.close()
+        self.now = 1_000
+        self.service = AdminService(self.database, clock=lambda: self.now)
+        self.user = self.service.create_user("admin", "a" * 12)
+
+    def tearDown(self):
+        self.service = None
+        gc.collect()
+        for _attempt in range(10):
+            try:
+                self.temp.cleanup()
+                break
+            except PermissionError:
+                time.sleep(0.05)
+
+    def test_session_is_persistent_opaque_and_expires_after_seven_days(self):
+        token, expires_at = self.service.create_session("admin")
+
+        self.assertTrue(token)
+        self.assertEqual(expires_at, self.now + 7 * 24 * 60 * 60)
+        connection = sqlite3.connect(self.database)
+        try:
+            stored = connection.execute(
+                "SELECT token_hash, expires_at FROM admin_sessions"
+            ).fetchone()
+        finally:
+            connection.close()
+        self.assertNotEqual(stored[0], token)
+        self.assertEqual(stored[1], expires_at)
+        self.assertEqual(self.service.validate_session(token)["username"], "admin")
+
+        restarted = AdminService(self.database, clock=lambda: self.now)
+        self.assertEqual(restarted.validate_session(token)["username"], "admin")
+
+        self.now += 7 * 24 * 60 * 60
+        self.assertIsNone(restarted.validate_session(token))
+
+    def test_logout_password_change_and_disable_revoke_sessions(self):
+        token, _expires_at = self.service.create_session("admin")
+        self.service.logout_session(token)
+        self.assertIsNone(self.service.validate_session(token))
+
+        token, _expires_at = self.service.create_session("admin")
+        self.service.change_password(self.user["id"], "b" * 12)
+        self.assertIsNone(self.service.validate_session(token))
+
+        token, _expires_at = self.service.create_session("admin")
+        with self.assertRaisesRegex(LastActiveAdministratorError, "最后一个有效管理员"):
+            self.service.update_user(self.user["id"], is_active=False)
+        self.assertIsNotNone(self.service.validate_session(token))
+
+        second = self.service.create_user("operator", "c" * 12)
+        self.service.update_user(self.user["id"], is_active=False)
+        self.assertIsNone(self.service.validate_session(token))
+        self.assertTrue(self.service.validate_session(self.service.create_session("operator")[0]))
+
+
+class AdminSessionHandlerTests(unittest.TestCase):
+    @staticmethod
+    def _handler(state, headers):
+        handler = object.__new__(PanelHandler)
+        handler.state = state
+        handler.headers = headers
+        handler.client_address = ("127.0.0.1", 12345)
+        return handler
+
+    def test_basic_auth_success_queues_fixed_seven_day_cookie(self):
+        class State:
+            _admin_db_auth = True
+
+            @staticmethod
+            def authenticate_admin(username, password, _client_key):
+                return (username, password) == ("admin", "password")
+
+            @staticmethod
+            def create_admin_session(username):
+                return "opaque-session-token", 604800
+
+            @staticmethod
+            def validate_admin_session(_token):
+                return None
+
+        credential = base64.b64encode(b"admin:password").decode("ascii")
+        handler = self._handler(
+            State(), {"Authorization": "Basic " + credential, "Cookie": ""}
+        )
+
+        handler.require_admin_auth()
+
+        self.assertIn("panel_session=opaque-session-token", handler._pending_session_cookie)
+        self.assertIn("Max-Age=604800", handler._pending_session_cookie)
+        self.assertIn("HttpOnly", handler._pending_session_cookie)
+        self.assertIn("SameSite=Lax", handler._pending_session_cookie)
+
+    def test_valid_cookie_authenticates_without_rechecking_basic_password(self):
+        class State:
+            _admin_db_auth = True
+
+            @staticmethod
+            def validate_admin_session(token):
+                return {"username": "admin"} if token == "valid-token" else None
+
+            @staticmethod
+            def authenticate_admin(*_args):
+                raise AssertionError("Basic Auth should not be consulted for a valid session")
+
+        handler = self._handler(State(), {"Authorization": "", "Cookie": "panel_session=valid-token"})
+
+        handler.require_admin_auth()
+
+        self.assertTrue(handler._admin_authenticated)
+
+    def test_valid_cookie_is_accepted_by_local_admin_compatibility_routes(self):
+        class State:
+            _admin_db_auth = False
+            admin_username = "admin"
+            admin_password = "password"
+
+            @staticmethod
+            def validate_admin_session(token):
+                return {"username": "admin", "expires_at": 604800} if token == "valid-token" else None
+
+        handler = self._handler(
+            State(),
+            {
+                "Authorization": "",
+                "Cookie": "panel_session=valid-token",
+                "X-Forwarded-For": "203.0.113.10",
+            },
+        )
+
+        handler.require_local_admin()
+
+        self.assertTrue(handler._admin_authenticated)
 
 
 if __name__ == "__main__":
