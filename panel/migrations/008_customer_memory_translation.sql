@@ -1,6 +1,7 @@
 CREATE TABLE IF NOT EXISTS customer_memories (
     session_name TEXT NOT NULL,
     chat_key_hmac TEXT NOT NULL,
+    chat_id_ciphertext TEXT NOT NULL DEFAULT '',
     memory_ciphertext TEXT NOT NULL DEFAULT '',
     message_cursor INTEGER NOT NULL DEFAULT 0,
     message_fingerprint TEXT NOT NULL DEFAULT '',
@@ -20,6 +21,7 @@ CREATE INDEX IF NOT EXISTS idx_customer_memories_status
 CREATE TABLE IF NOT EXISTS conversation_memory_jobs (
     session_name TEXT NOT NULL,
     chat_key_hmac TEXT NOT NULL,
+    chat_id_ciphertext TEXT NOT NULL DEFAULT '',
     state TEXT NOT NULL DEFAULT 'PENDING'
         CHECK (state IN ('PENDING', 'RUNNING', 'FAILED', 'DONE')),
     attempts INTEGER NOT NULL DEFAULT 0,

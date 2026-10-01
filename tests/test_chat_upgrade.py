@@ -6,12 +6,14 @@ import tempfile
 import threading
 import time
 import unittest
+import uuid
 from cryptography.fernet import Fernet
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 from urllib.error import HTTPError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
+from unittest.mock import patch
 
 from panel.app import PanelHandler, PanelState, WahaApiError, WahaClient, init_db, settings_page
 from panel.chat_service import ChatAccessError, ChatServiceError
@@ -274,6 +276,78 @@ class SettingsAndContextTests(UpgradeTestCase):
             }.issubset(tables)
         )
 
+    def test_archive_persists_origin_and_enqueues_customer_memory(self):
+        calls = []
+
+        class MemoryStub:
+            def enqueue(self, session_name, chat_id):
+                calls.append((session_name, chat_id))
+
+        self.state.memory = MemoryStub()
+        self.assertTrue(
+            self.state._archive_message(
+                "default", "chat-1@c.us", "outbound", "manual-1", "人工回复", origin="manual"
+            )
+        )
+        with sqlite3.connect(self.database) as connection:
+            origin = connection.execute(
+                "SELECT origin FROM conversation_messages WHERE message_id='manual-1'"
+            ).fetchone()[0]
+        self.assertEqual(origin, "manual")
+        self.assertEqual(calls, [("default", "chat-1@c.us")])
+
+    def test_chat_send_paths_report_manual_and_automation_origins(self):
+        self.state.chat.send_text("default", self.chat_ref, "人工消息", str(uuid.uuid4()))
+        self.client.send_result = {"id": "wamid.automation"}
+        self.state.chat.send_automated_text("default", "chat-1@c.us", "自动跟进", str(uuid.uuid4()))
+        with sqlite3.connect(self.database) as connection:
+            origins = dict(
+                connection.execute(
+                    "SELECT content,origin FROM conversation_messages "
+                    "WHERE content IN ('人工消息','自动跟进') ORDER BY id"
+                ).fetchall()
+            )
+        self.assertEqual(origins["人工消息"], "manual")
+        self.assertEqual(origins["自动跟进"], "automation")
+
+    def test_ai_reply_injects_customer_memory_context(self):
+        class MemoryStub:
+            def context_for_reply(self, _session_name, _chat_id):
+                return "客户偏好：中文说明\n有效人工回复风格：先确认需求"
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self):
+                return json.dumps(
+                    {"choices": [{"message": {"content": "好的"}}]}, ensure_ascii=False
+                ).encode("utf-8")
+
+        self.state.memory = MemoryStub()
+        self.state._ai_reply = PanelState._ai_reply.__get__(self.state, PanelState)
+        self.state.save_settings(
+            {
+                "ai_base_url": "https://ai.example/v1",
+                "ai_model": "model",
+                "ai_api_key": "secret-key",
+            },
+            "default",
+        )
+        with patch("panel.app.urlopen", return_value=Response()) as opener:
+            reply, mode = self.state._ai_reply(
+                self.state._settings("default"),
+                "我想继续了解",
+                customer_id="chat-1@c.us",
+                session_name="default",
+            )
+        self.assertEqual((reply, mode), ("好的", "ai"))
+        payload = json.loads(opener.call_args.args[0].data.decode("utf-8"))
+        self.assertIn("客户偏好：中文说明", payload["messages"][0]["content"])
+
     def test_settings_default_and_context_are_per_side(self):
         payload = self.state.settings_payload("default")
         self.assertEqual(payload.get("auto_reply_context_per_side"), 5)
@@ -356,6 +430,18 @@ class WebhookArchiveTests(UpgradeTestCase):
         self.state.handle_webhook(event, dispatch=True)
         self.assertEqual(self.client.send_calls, 1)
         self.assertEqual(self.count_message_id("in-1"), 1)
+
+    def test_auto_reply_is_archived_with_auto_ai_origin(self):
+        result = self.state.handle_webhook(
+            self.event(body="客户问题", message_id="in-auto-origin"), dispatch=True
+        )
+        self.assertEqual(result["action"], "replied")
+        with sqlite3.connect(self.database) as connection:
+            origin = connection.execute(
+                "SELECT origin FROM conversation_messages WHERE direction='outbound' "
+                "AND content='测试回复'"
+            ).fetchone()[0]
+        self.assertEqual(origin, "auto_ai")
 
     def test_media_setting_controls_trigger_but_keeps_metadata(self):
         self.state.save_settings({"auto_reply_media_types": {"image": True}})

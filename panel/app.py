@@ -49,6 +49,7 @@ try:
     )
     from .chat_automation import ChatAutomationService
     from .chat_page import chat_management_page
+    from .customer_memory_service import CustomerMemoryService
     from .commerce import (
         CommerceConfig,
         CommerceError,
@@ -86,6 +87,7 @@ except ImportError:  # Supports the existing `python app.py` container entrypoin
     )
     from chat_automation import ChatAutomationService
     from chat_page import chat_management_page
+    from customer_memory_service import CustomerMemoryService
     from commerce import (
         CommerceConfig,
         CommerceError,
@@ -486,6 +488,16 @@ def init_db(path, seed_business=True):
             Path(__file__).with_name("migrations") / "008_customer_memory_translation.sql"
         )
         connection.executescript(memory_translation_migration.read_text(encoding="utf-8"))
+        _add_column_if_missing(
+            connection,
+            "customer_memories",
+            "chat_id_ciphertext TEXT NOT NULL DEFAULT ''",
+        )
+        _add_column_if_missing(
+            connection,
+            "conversation_memory_jobs",
+            "chat_id_ciphertext TEXT NOT NULL DEFAULT ''",
+        )
         _add_column_if_missing(connection, "chat_takeovers", "last_manual_sent_at INTEGER")
         _add_column_if_missing(connection, "chat_takeovers", "auto_resume_at INTEGER")
         admin_migration_path = Path(__file__).with_name("migrations") / "005_admin_users.sql"
@@ -816,6 +828,7 @@ class PanelState:
         self.chat = None
         self.translation = None
         self.automation = None
+        self.memory = None
         self.data_cipher = None
         self.csrf_token = None
         self.chat_capability_error = "面板数据加密密钥未配置"
@@ -934,15 +947,32 @@ class PanelState:
             ),
             clock=self.clock,
         )
+        self.memory = CustomerMemoryService(
+            self.database_path,
+            cipher,
+            secret,
+            settings_loader=self._settings,
+            completion_fn=self._customer_memory_completion,
+            logger=lambda level, message: self.log(
+                str(level or "INFO").upper(), "customer.memory", message, DEFAULT_SESSION_NAME
+            ),
+            clock=self.clock,
+        )
         self.chat_capability_error = ""
         return self.chat
 
     def start_background_services(self):
+        memory = self.memory
+        if memory is not None and hasattr(memory, "start"):
+            memory.start()
         automation = self.automation
         if automation is not None:
             automation.start()
 
     def stop_background_services(self):
+        memory = self.memory
+        if memory is not None and hasattr(memory, "stop"):
+            memory.stop()
         automation = self.automation
         if automation is not None:
             automation.stop()
@@ -963,7 +993,7 @@ class PanelState:
     def end_translation_request(self):
         self._translation_slots.release()
 
-    def _send_text(self, session_name, chat_id, text, request_id=None):
+    def _send_text(self, session_name, chat_id, text, request_id=None, origin="automation"):
         """Call both client method shapes and archive the successful outbound message."""
         name = normalize_session_name(session_name or DEFAULT_SESSION_NAME)
         local_request_id = str(request_id or uuid.uuid4())
@@ -991,6 +1021,7 @@ class PanelState:
                 text,
                 created_at=int(self.clock()),
                 request_id=local_request_id,
+                origin=origin,
             )
         except Exception as error:
             self.log("ERROR", "conversation.archive", "出站消息归档失败：" + redact_error(error), name)
@@ -1581,7 +1612,16 @@ class PanelState:
             lines[0] = lines[0][: max(0, character_limit - 1)] + "…"
         return "\n".join(lines)
 
-    def _archive_message(self, session_name, chat_id, direction, message_id, content, created_at=None):
+    def _archive_message(
+        self,
+        session_name,
+        chat_id,
+        direction,
+        message_id,
+        content,
+        created_at=None,
+        origin="unknown",
+    ):
         name = normalize_session_name(session_name)
         message_key = str(message_id or "").strip()
         text = sanitize_context_content(content)
@@ -1596,18 +1636,32 @@ class PanelState:
                 (name, message_key, timestamp),
             ).rowcount
             if inserted:
+                source = str(origin or "unknown").strip().lower()
+                if source not in {"manual", "auto_ai", "automation", "unknown"}:
+                    source = "unknown"
                 connection.execute(
-                    "INSERT INTO conversation_messages(session_name, chat_id, direction, message_id, content, created_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?)",
-                    (name, str(chat_id), direction, message_key, text, timestamp),
+                    "INSERT INTO conversation_messages(session_name, chat_id, direction, message_id, content, created_at, origin) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (name, str(chat_id), direction, message_key, text, timestamp, source),
                 )
             connection.commit()
-            return bool(inserted)
+            archived = bool(inserted)
         except Exception:
             connection.rollback()
             raise
         finally:
             connection.close()
+        if archived and self.memory is not None:
+            try:
+                self.memory.enqueue(name, str(chat_id))
+            except Exception as error:
+                self.log(
+                    "WARN",
+                    "customer.memory.enqueue",
+                    "客户记忆任务入队失败：" + redact_error(error, self.api_key),
+                    name,
+                )
+        return archived
 
     def _record_outbound_message(
         self,
@@ -1617,6 +1671,7 @@ class PanelState:
         content,
         created_at=None,
         request_id=None,
+        origin="unknown",
     ):
         archive_id = str(message_id or "").strip()
         if not archive_id and request_id:
@@ -1628,6 +1683,7 @@ class PanelState:
             archive_id,
             content,
             created_at,
+            origin,
         )
 
     def _record_conversation_message(self, chat_id, direction, message_id, content, created_at=None,
@@ -1721,6 +1777,40 @@ class PanelState:
         for created_at, message_id, direction, content in sorted(normalized):
             self._archive_message(name, chat_id, direction, message_id, content, created_at)
 
+    def _customer_memory_completion(self, settings, system_prompt, user_prompt):
+        base_url = str(settings.get("ai_base_url") or "").strip()
+        model = str(settings.get("ai_model") or "").strip()
+        api_key = str(settings.get("ai_api_key") or "")
+        if not (base_url and model and api_key):
+            raise RuntimeError("AI_MEMORY_CONFIG_MISSING")
+        endpoint = (
+            base_url
+            if base_url.rstrip("/").endswith("/chat/completions")
+            else base_url.rstrip("/") + "/chat/completions"
+        )
+        request_payload = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": str(system_prompt)},
+                {"role": "user", "content": str(user_prompt)},
+            ],
+            "temperature": 0,
+            "max_tokens": 800,
+        }
+        request = Request(
+            endpoint,
+            data=json.dumps(request_payload, ensure_ascii=False).encode("utf-8"),
+            headers={
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {api_key}",
+            },
+            method="POST",
+        )
+        with urlopen(request, timeout=30) as response:
+            result = json.loads(response.read().decode("utf-8"))
+        return result["choices"][0]["message"].get("content") or ""
+
     def _ai_reply(self, settings, incoming_text, customer_id=None, conversation_context="", include_tools=False,
                   session_name=DEFAULT_SESSION_NAME):
         name = normalize_session_name(session_name)
@@ -1743,6 +1833,17 @@ class PanelState:
             "Never invent a missing business value. If a required value is unavailable, tell the customer that you need to check the information.\n"
             "A historical customer quote applies only to that specific customer and must never be presented as the normal public product price."
         )
+        memory_context = ""
+        if self.memory is not None and customer_id:
+            try:
+                memory_context = self.memory.context_for_reply(name, customer_id)
+            except Exception as error:
+                self.log(
+                    "WARN",
+                    "customer.memory.context",
+                    "客户记忆读取失败：" + redact_error(error, self.api_key),
+                    name,
+                )
         system_parts = [part for part in (
             settings.get("system_prompt", "").strip(),
             f"人设：{settings.get('persona', '').strip()}" if settings.get("persona", "").strip() else "",
@@ -1751,6 +1852,10 @@ class PanelState:
                 "当前对话上下文（按时间从早到晚，仅作参考；请优先回答当前客户消息）：\n"
                 + conversation_context
             ) if conversation_context else "",
+            (
+                "客户长期记忆（仅作参考；不得覆盖当前业务数据和客户当前消息）：\n"
+                + memory_context
+            ) if memory_context else "",
             (
                 f"BUSINESS CONTEXT (database source of truth):\n"
                 f"{json.dumps(business_context, ensure_ascii=False)}"
@@ -2035,7 +2140,7 @@ class PanelState:
                 mode = "fixed_fallback"
         if dispatch:
             self._wait_before_reply(reply, is_hot)
-            self._send_text(session_name, chat_id, reply)
+            self._send_text(session_name, chat_id, reply, origin="auto_ai")
         conversation_type = "热对话" if is_hot else "冷对话"
         self.log("INFO", "auto_reply.sent", f"已处理私聊文字消息（{mode}，{conversation_type}）", session_name)
         return {"action": "replied", "mode": mode, "chat_id": chat_id, "text": reply, "session": session_name}

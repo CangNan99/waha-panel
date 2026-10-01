@@ -51,6 +51,8 @@
 
 Migration 008 must also create the single-row `aliyun_translation_settings` table with `id=1`, `endpoint`, `region_id`, `access_key_id`, encrypted `access_key_secret_ciphertext`, `last_test_status`, `last_test_at`, and `updated_at`. This makes the Alibaba configuration boundary explicit and keeps it separate from the existing AI `translation_settings` table.
 
+Ruling: `customer_memories` and `conversation_memory_jobs` also store `chat_id_ciphertext` — the worker must recover a customer after restart, while the customer identifier remains encrypted and the lookup key remains HMAC-based.
+
 ---
 
 ### Task 1: Add compatible schema and automatic-reply memory setting
@@ -108,7 +110,7 @@ Migration 008 must also create the single-row `aliyun_translation_settings` tabl
 - Test: `tests/test_customer_memory.py`, `tests/test_chat_upgrade.py`
 
 **Interfaces:**
-- `CustomerMemoryService(database_path, cipher, settings_loader, completion_fn, logger=None, clock=None)`
+- `CustomerMemoryService(database_path, cipher, hmac_secret, settings_loader, completion_fn, logger=None, clock=None)`
 - `start() -> None`, `stop(timeout=2.0) -> None`
 - `enqueue(session_name: str, chat_id: str) -> None`
 - `get(session_name: str, chat_id: str) -> dict`
