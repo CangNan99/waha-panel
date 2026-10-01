@@ -410,6 +410,8 @@ class ChatPageRegressionTests(unittest.TestCase):
         self.assertIn("const previousScrollTop=list.scrollTop", page)
         self.assertIn("const anchorRef", page)
         self.assertIn("list.scrollTop=previousScrollTop", page)
+        self.assertIn("loadChats({resetScroll:true})", page)
+        self.assertIn("renderChats(Boolean(options.resetScroll))", page)
 
     def test_chat_engagement_script_has_state_aware_handlers(self):
         page = chat_management_page("default")
