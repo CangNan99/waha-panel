@@ -414,6 +414,70 @@ class SettingsApiTests(UpgradeTestCase):
         self.assertIn("APIKey：已配置（隐藏）", page)
 
 
+class MemoryAndTranslationRouteTests(UpgradeTestCase):
+    def handler(self, payload=None, path=""):
+        handler = object.__new__(PanelHandler)
+        handler.state = self.state
+        handler.path = path
+        responses = []
+        handler.require_admin_auth = lambda: None
+        handler.require_csrf = lambda: None
+        handler.require_waha_session = lambda *_args, **_kwargs: "default"
+        handler.require_chat_service = lambda: self.state.chat
+        handler.send_json = lambda value, status=200: responses.append((value, status))
+        handler.read_api_json = lambda: payload or {}
+        handler.responses = responses
+        return handler
+
+    def test_memory_get_and_rebuild_routes_are_session_scoped(self):
+        get_handler = self.handler(
+            path="/api/chat/sessions/default/memory?chat_ref=" + quote(self.chat_ref, safe="")
+        )
+        get_handler.send_chat_get("/api/chat/sessions/default/memory")
+        self.assertEqual(get_handler.responses[0][0]["status"], "EMPTY")
+        post_handler = self.handler({"chat_ref": self.chat_ref})
+        post_handler.send_chat_post("/api/chat/sessions/default/memory/rebuild")
+        self.assertIn(post_handler.responses[0][0]["status"], {"EMPTY", "FAILED"})
+        delete_handler = self.handler(
+            path="/api/chat/sessions/default/memory?chat_ref=" + quote(self.chat_ref, safe="")
+        )
+        delete_handler.send_chat_memory_delete("/api/chat/sessions/default/memory")
+        self.assertTrue(delete_handler.responses[0][0]["cleared"])
+
+    def test_machine_translation_route_validates_message_reference_and_returns_batch(self):
+        message_ref = self.state.chat._encode_message("default", "chat-1@c.us", "m-1")
+        calls = []
+
+        class TranslationStub:
+            def translate_batch(self, session_name, chat_key, items):
+                calls.append((session_name, chat_key, items))
+                return {"items": [{"message_ref": items[0]["message_ref"], "status": "READY", "translation": "你好"}]}
+
+        self.state.aliyun_translation = TranslationStub()
+        handler = self.handler({"chat_ref": self.chat_ref, "items": [{"message_ref": message_ref, "text": "Hello"}]})
+        handler.send_chat_post("/api/chat/sessions/default/machine-translations")
+        self.assertEqual(handler.responses[0][0]["items"][0]["translation"], "你好")
+        self.assertEqual(calls[0][0], "default")
+
+    def test_machine_translation_route_rejects_message_from_another_chat(self):
+        message_ref = self.state.chat._encode_message("default", "other@c.us", "m-2")
+        handler = self.handler({"chat_ref": self.chat_ref, "items": [{"message_ref": message_ref, "text": "Hello"}]})
+        with self.assertRaises(ChatAccessError):
+            handler.send_chat_post("/api/chat/sessions/default/machine-translations")
+
+    def test_aliyun_translation_settings_route_never_echoes_secret(self):
+        handler = self.handler(
+            {"endpoint": "mt.cn-hangzhou.aliyuncs.com", "region_id": "cn-hangzhou", "access_key_secret": "credential-value"}
+        )
+        handler.send_translation_write("/api/translation/aliyun/settings", "PUT")
+        saved = handler.responses[0][0]
+        self.assertTrue(saved["access_key_secret_configured"])
+        self.assertNotIn("credential-value", json.dumps(saved))
+        reader = self.handler(path="/api/translation/aliyun/settings")
+        reader.send_translation_get("/api/translation/aliyun/settings")
+        self.assertTrue(reader.responses[0][0]["access_key_secret_configured"])
+
+
 class WebhookArchiveTests(UpgradeTestCase):
     def test_from_me_is_archived_but_never_triggers(self):
         result = self.state.handle_webhook(

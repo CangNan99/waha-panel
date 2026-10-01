@@ -50,6 +50,7 @@ try:
     from .chat_automation import ChatAutomationService
     from .chat_page import chat_management_page
     from .customer_memory_service import CustomerMemoryService
+    from .aliyun_translation_service import AliyunTranslationError, AliyunTranslationService
     from .commerce import (
         CommerceConfig,
         CommerceError,
@@ -88,6 +89,7 @@ except ImportError:  # Supports the existing `python app.py` container entrypoin
     from chat_automation import ChatAutomationService
     from chat_page import chat_management_page
     from customer_memory_service import CustomerMemoryService
+    from aliyun_translation_service import AliyunTranslationError, AliyunTranslationService
     from commerce import (
         CommerceConfig,
         CommerceError,
@@ -829,6 +831,7 @@ class PanelState:
         self.translation = None
         self.automation = None
         self.memory = None
+        self.aliyun_translation = None
         self.data_cipher = None
         self.csrf_token = None
         self.chat_capability_error = "面板数据加密密钥未配置"
@@ -955,6 +958,14 @@ class PanelState:
             completion_fn=self._customer_memory_completion,
             logger=lambda level, message: self.log(
                 str(level or "INFO").upper(), "customer.memory", message, DEFAULT_SESSION_NAME
+            ),
+            clock=self.clock,
+        )
+        self.aliyun_translation = AliyunTranslationService(
+            self.database_path,
+            cipher,
+            logger=lambda level, message: self.log(
+                str(level or "INFO").upper(), "aliyun.translation", message, DEFAULT_SESSION_NAME
             ),
             clock=self.clock,
         )
@@ -3176,6 +3187,16 @@ class PanelHandler(BaseHTTPRequestHandler):
             raise TranslationError("TRANSLATION_UNAVAILABLE", "翻译功能暂不可用，请检查面板加密密钥")
         return self.state.translation
 
+    def require_memory_service(self):
+        if self.state.memory is None:
+            raise ChatServiceError("客户记忆功能暂不可用，请检查面板加密密钥", "MEMORY_UNAVAILABLE")
+        return self.state.memory
+
+    def require_aliyun_translation_service(self):
+        if self.state.aliyun_translation is None:
+            raise AliyunTranslationError("ALIYUN_TRANSLATION_UNAVAILABLE", "阿里云机器翻译暂不可用")
+        return self.state.aliyun_translation
+
     def require_waha_session(self, session_name, connected=False):
         name = normalize_session_name(session_name)
         sessions = self.state.client.get_sessions()
@@ -3203,7 +3224,8 @@ class PanelHandler(BaseHTTPRequestHandler):
         allowed = {
             "overview", "messages", "media", "avatar", "events",
             "send-text", "send-image", "takeover", "resume-ai", "note",
-            "follow-ups", "labels", "summary",
+            "follow-ups", "labels", "summary", "memory", "memory/rebuild",
+            "machine-translations",
         }
         if action not in allowed and not (
             len(parts) == 4 and parts[1] == "follow-ups" and parts[2] and parts[3] == "cancel"
@@ -3266,6 +3288,13 @@ class PanelHandler(BaseHTTPRequestHandler):
             if not chat_ref:
                 raise ValueError("缺少聊天引用")
             self.send_json(chat.current_summary(name, chat_ref))
+            return
+        if action == "memory":
+            if not chat_ref:
+                raise ValueError("缺少聊天引用")
+            memory = self.require_memory_service()
+            chat_id = chat._decode_chat(name, chat_ref)
+            self.send_json(memory.get(name, chat_id))
             return
         if action == "overview":
             self.send_json(chat.overview(
@@ -3382,6 +3411,39 @@ class PanelHandler(BaseHTTPRequestHandler):
             summary.pop("ai_labels", None)
             self.send_json(chat.save_summary_and_ai_labels(name, chat_ref, summary, ai_labels))
             return
+        if action == "memory/rebuild":
+            payload = self.read_api_json()
+            chat_ref = payload.get("chat_ref")
+            if not chat_ref:
+                raise ValueError("缺少聊天引用")
+            memory = self.require_memory_service()
+            chat_id = chat._decode_chat(name, chat_ref)
+            self.send_json(memory.rebuild(name, chat_id))
+            return
+        if action == "machine-translations":
+            payload = self.read_api_json()
+            chat_ref = payload.get("chat_ref")
+            items = payload.get("items")
+            if not chat_ref or not isinstance(items, list):
+                raise ValueError("缺少聊天引用或翻译消息")
+            if len(items) > 30:
+                raise ValueError("每批最多翻译 30 条消息")
+            chat_id = chat._decode_chat(name, chat_ref)
+            chat_key = chat._chat_key(name, chat_id)
+            safe_items = []
+            for item in items:
+                if not isinstance(item, dict):
+                    raise ValueError("翻译消息格式无效")
+                message_ref = str(item.get("message_ref") or "")
+                if not message_ref:
+                    raise ValueError("翻译消息缺少引用")
+                message_chat, _message_id = chat._decode_message(name, message_ref)
+                if not hmac.compare_digest(str(message_chat), str(chat_id)):
+                    raise ChatAccessError("消息不属于当前聊天")
+                safe_items.append({"message_ref": message_ref, "text": str(item.get("text") or "")})
+            translation = self.require_aliyun_translation_service()
+            self.send_json(translation.translate_batch(name, chat_key, safe_items))
+            return
         if action == "send-image":
             form = self.read_image_form()
             image = form["image"]
@@ -3407,6 +3469,21 @@ class PanelHandler(BaseHTTPRequestHandler):
         chat.broker.publish(name, {"type": "refresh", "reason": action})
         self.state.log("INFO", "chat." + action, "聊天管理操作已完成", name)
         self.send_json(result)
+
+    def send_chat_memory_delete(self, route):
+        self.require_csrf()
+        chat = self.require_chat_service()
+        name, action = self.chat_route(route)
+        if action != "memory":
+            raise ValueError("不支持的客户记忆删除操作")
+        self.require_waha_session(name)
+        query = parse_qs(urlparse(self.path).query)
+        chat_ref = query.get("chat_ref", [""])[0]
+        if not chat_ref:
+            raise ValueError("缺少聊天引用")
+        memory = self.require_memory_service()
+        chat_id = chat._decode_chat(name, chat_ref)
+        self.send_json(memory.clear(name, chat_id))
 
     def send_chat_labels_write(self, route, method):
         self.require_csrf()
@@ -3440,6 +3517,9 @@ class PanelHandler(BaseHTTPRequestHandler):
 
     def send_translation_get(self, route):
         self.require_admin_auth()
+        if route == "/api/translation/aliyun/settings":
+            self.send_json(self.require_aliyun_translation_service().settings_payload())
+            return
         translation = self.require_translation_service()
         if route != "/api/translation/settings":
             raise ValueError("不支持的翻译查询操作")
@@ -3447,6 +3527,18 @@ class PanelHandler(BaseHTTPRequestHandler):
 
     def send_translation_write(self, route, method):
         self.require_csrf()
+        if route.startswith("/api/translation/aliyun/"):
+            translation = self.require_aliyun_translation_service()
+            if route == "/api/translation/aliyun/settings" and method == "PUT":
+                self.send_json(translation.save_settings(self.read_api_json()))
+                return
+            if route == "/api/translation/aliyun/test" and method == "POST":
+                self.send_json(translation.test_connection())
+                return
+            if route == "/api/translation/aliyun/cache" and method == "DELETE":
+                self.send_json(translation.clear_cache())
+                return
+            raise ValueError("不支持的阿里云翻译操作")
         translation = self.require_translation_service()
         if route == "/api/translation/settings" and method == "PUT":
             self.send_json(translation.save_settings(self.read_api_json()))
@@ -3536,11 +3628,11 @@ class PanelHandler(BaseHTTPRequestHandler):
             status = HTTPStatus.SERVICE_UNAVAILABLE
         elif isinstance(error, (AdminConflictError, LastActiveAdministratorError)):
             status = HTTPStatus.CONFLICT
-        elif code in {"CHAT_CAPABILITY_UNAVAILABLE", "TRANSLATION_UNAVAILABLE"}:
+        elif code in {"CHAT_CAPABILITY_UNAVAILABLE", "TRANSLATION_UNAVAILABLE", "MEMORY_UNAVAILABLE", "ALIYUN_TRANSLATION_UNAVAILABLE"}:
             status = HTTPStatus.SERVICE_UNAVAILABLE
-        elif code in {"SESSION_NOT_CONNECTED", "TRANSLATION_NOT_CONFIGURED"}:
+        elif code in {"SESSION_NOT_CONNECTED", "TRANSLATION_NOT_CONFIGURED", "ALIYUN_CONFIG_MISSING"}:
             status = HTTPStatus.CONFLICT
-        elif code in {"AI_RATE_LIMIT", "AI_BUSY"}:
+        elif code in {"AI_RATE_LIMIT", "AI_BUSY", "ALIYUN_RATE_LIMIT", "ALIYUN_BUSY"}:
             status = HTTPStatus.TOO_MANY_REQUESTS
         elif code in {"AI_CONNECTION_ERROR", "AI_UPSTREAM_ERROR", "AI_RESPONSE_INVALID"}:
             status = HTTPStatus.BAD_GATEWAY
@@ -4039,7 +4131,11 @@ class PanelHandler(BaseHTTPRequestHandler):
             return
         if route.startswith("/api/chat/sessions/"):
             try:
-                self.send_chat_labels_write(route, "DELETE")
+                _name, action = self.chat_route(route)
+                if action == "memory":
+                    self.send_chat_memory_delete(route)
+                else:
+                    self.send_chat_labels_write(route, "DELETE")
             except (ChatServiceError, TranslationError, RequestTooLarge, UnsupportedRequestMedia) as error:
                 self.send_service_error(error)
             except AdminAuthError as error:
@@ -4053,7 +4149,7 @@ class PanelHandler(BaseHTTPRequestHandler):
                 self.state.log("ERROR", "chat.labels", str(error))
                 self.send_json({"message": "标签操作失败，请查看系统记录"}, HTTPStatus.INTERNAL_SERVER_ERROR)
             return
-        if route == "/api/translation/cache":
+        if route in {"/api/translation/cache", "/api/translation/aliyun/cache"}:
             try:
                 self.send_translation_write(route, "DELETE")
             except (ChatServiceError, TranslationError, RequestTooLarge, UnsupportedRequestMedia) as error:
