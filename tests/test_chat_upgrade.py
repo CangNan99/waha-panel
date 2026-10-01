@@ -239,6 +239,41 @@ class UpgradeTestCase(unittest.TestCase):
 
 
 class SettingsAndContextTests(UpgradeTestCase):
+    def test_customer_memory_defaults_to_disabled(self):
+        payload = self.state.settings_payload("default")
+        self.assertFalse(payload["customer_memory_enabled"])
+
+    def test_customer_memory_setting_round_trips_per_session(self):
+        saved = self.state.save_settings({"customer_memory_enabled": True}, "sales")
+        self.assertTrue(saved["customer_memory_enabled"])
+        self.assertFalse(self.state.settings_payload("default")["customer_memory_enabled"])
+        self.assertTrue(self.state.settings_payload("sales")["customer_memory_enabled"])
+
+    def test_message_origin_and_new_storage_tables_are_migrated(self):
+        with sqlite3.connect(self.database) as connection:
+            connection.execute(
+                "INSERT INTO conversation_messages(chat_id,direction,message_id,content,created_at) "
+                "VALUES ('chat-1@c.us','inbound','legacy-1','历史消息',1)"
+            )
+            origin = connection.execute(
+                "SELECT origin FROM conversation_messages WHERE message_id='legacy-1'"
+            ).fetchone()[0]
+            tables = {
+                row[0]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                )
+            }
+        self.assertEqual(origin, "unknown")
+        self.assertTrue(
+            {
+                "customer_memories",
+                "conversation_memory_jobs",
+                "machine_message_translations",
+                "aliyun_translation_settings",
+            }.issubset(tables)
+        )
+
     def test_settings_default_and_context_are_per_side(self):
         payload = self.state.settings_payload("default")
         self.assertEqual(payload.get("auto_reply_context_per_side"), 5)
@@ -300,6 +335,8 @@ class SettingsApiTests(UpgradeTestCase):
             self.assertIn(f'autoReplyMedia_{name}', page)
         self.assertIn("auto_reply_context_per_side", page)
         self.assertIn("auto_reply_media_types", page)
+        self.assertIn('id="customerMemoryEnabled"', page)
+        self.assertIn("customer_memory_enabled", page)
         self.assertIn("APIKey：已配置（隐藏）", page)
 
 
