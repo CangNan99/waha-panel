@@ -263,7 +263,7 @@ class QrAndReleaseTests(unittest.TestCase):
             self.assertNotIn("data:image/", page)
         self.assertIn("WhatsAPP AI管理面板", commerce)
 
-    def test_release_metadata_uses_panel_1_0_11_and_waha_2026_9_1(self):
+    def test_release_metadata_uses_panel_1_0_12_and_waha_2026_9_1(self):
         root = Path(__file__).resolve().parents[1]
         release = json.loads((root / "panel-release.json").read_text(encoding="utf-8"))
         compose = (root / "docker-compose.yml").read_text(encoding="utf-8")
@@ -276,22 +276,22 @@ class QrAndReleaseTests(unittest.TestCase):
         readme = (root / "README.md").read_text(encoding="utf-8")
         readme_zh = (root / "README.zh-CN.md").read_text(encoding="utf-8")
 
-        self.assertEqual(release["tag"], "1.0.11")
-        self.assertEqual(release["version"], "1.0.11")
-        self.assertIn("${PANEL_IMAGE:-docker.io/cangnan88/waha-panel:1.0.11}", compose)
-        self.assertIn("${PANEL_VERSION:-1.0.11}", compose)
-        self.assertIn('os.environ.get("PANEL_VERSION", "1.0.11")', (root / "panel" / "app.py").read_text(encoding="utf-8"))
+        self.assertEqual(release["tag"], "1.0.12")
+        self.assertEqual(release["version"], "1.0.12")
+        self.assertIn("${PANEL_IMAGE:-docker.io/cangnan88/waha-panel:1.0.12}", compose)
+        self.assertIn("${PANEL_VERSION:-1.0.12}", compose)
+        self.assertIn('os.environ.get("PANEL_VERSION", "1.0.12")', (root / "panel" / "app.py").read_text(encoding="utf-8"))
         self.assertIn("mem_limit: 512m", compose)
         for installer in (env_example, install_sh, install_ps1):
-            self.assertIn("PANEL_IMAGE=docker.io/cangnan88/waha-panel:1.0.11", installer)
-            self.assertIn("PANEL_VERSION=1.0.11", installer)
+            self.assertIn("PANEL_IMAGE=docker.io/cangnan88/waha-panel:1.0.12", installer)
+            self.assertIn("PANEL_VERSION=1.0.12", installer)
             self.assertNotIn("PANEL_IMAGE=docker.io/cangnan88/waha-panel:1.0.2", installer)
             self.assertNotIn("PANEL_VERSION=1.0.2", installer)
-        self.assertIn("docker.io/cangnan88/waha-panel:1.0.11", install_docs)
+        self.assertIn("docker.io/cangnan88/waha-panel:1.0.12", install_docs)
         self.assertIn("1.0.2", release_plan)
         self.assertIn("1.0.2", release_design)
-        self.assertIn("docker.io/cangnan88/waha-panel:1.0.11", readme)
-        self.assertIn("docker.io/cangnan88/waha-panel:1.0.11", readme_zh)
+        self.assertIn("docker.io/cangnan88/waha-panel:1.0.12", readme)
+        self.assertIn("docker.io/cangnan88/waha-panel:1.0.12", readme_zh)
         self.assertIn("${WAHA_IMAGE:-devlikeapro/waha:latest-2026.9.1}", compose)
         self.assertIn("${WAHA_IMAGE_TAG:-latest-2026.9.1}", compose)
         self.assertIn("${WAHA_BIND_ADDRESS:-127.0.0.1}:${WAHA_PORT:-3002}:3000", compose)
@@ -300,8 +300,8 @@ class QrAndReleaseTests(unittest.TestCase):
         self.assertIn("(INSTALL.zh-CN.md)", readme)
         self.assertIn("(INSTALL.zh-CN.md)", readme_zh)
 
-    def test_update_service_defaults_to_panel_1_0_11(self):
-        self.assertEqual(UpdateService().current["panel"], "1.0.11")
+    def test_update_service_defaults_to_panel_1_0_12(self):
+        self.assertEqual(UpdateService().current["panel"], "1.0.12")
         self.assertEqual(UpdateService().current["waha"], "latest-2026.9.1")
 
 
@@ -375,6 +375,45 @@ class ChatPageRegressionTests(unittest.TestCase):
         for mode in ("AI", "FIXED"):
             self.assertIn(f'value="{mode}"', page)
         self.assertIn("当前总结", page)
+
+    def test_current_chat_machine_translation_and_separate_aliyun_settings_contract(self):
+        page = chat_management_page("default")
+        for token in (
+            'id="translationToggle"',
+            "translationEnabledByChat",
+            "translationAbort",
+            "translationRequestId",
+            "machine-translations",
+            "客户原文",
+            "中文翻译",
+            'id="aliyunTranslationEndpoint"',
+            'id="aliyunTranslationRegion"',
+            'id="aliyunAccessKeyId"',
+            'id="aliyunAccessKeySecret"',
+            "/api/translation/aliyun/settings",
+            "/api/translation/aliyun/test",
+        ):
+            self.assertIn(token, page)
+        self.assertIn('aria-pressed="false"', page)
+        self.assertNotIn("/api/translation/translate',", page[page.index("translationToggle"):])
+
+    def test_translation_and_takeover_controls_have_breathing_motion_contract(self):
+        page = chat_management_page("default")
+        self.assertIn("breathing-toggle", page)
+        self.assertIn("@keyframes toggle-breathe", page)
+        self.assertIn("prefers-reduced-motion", page)
+        self.assertIn("setTranslationToggle", page)
+        self.assertIn("aria-pressed", page)
+        self.assertIn("请先在翻译设置中配置阿里云机器翻译", page)
+        self.assertIn("if(!state.aliyunConfigured||!translationIsEnabled()", page)
+
+    def test_chat_list_refresh_restores_visible_anchor_and_scroll_offset(self):
+        page = chat_management_page("default")
+        self.assertIn("const previousScrollTop=list.scrollTop", page)
+        self.assertIn("const anchorRef", page)
+        self.assertIn("list.scrollTop=previousScrollTop", page)
+        self.assertIn("loadChats({resetScroll:true})", page)
+        self.assertIn("renderChats(Boolean(options.resetScroll))", page)
 
     def test_chat_engagement_script_has_state_aware_handlers(self):
         page = chat_management_page("default")

@@ -49,6 +49,8 @@ try:
     )
     from .chat_automation import ChatAutomationService
     from .chat_page import chat_management_page
+    from .customer_memory_service import CustomerMemoryService
+    from .aliyun_translation_service import AliyunTranslationError, AliyunTranslationService
     from .commerce import (
         CommerceConfig,
         CommerceError,
@@ -86,6 +88,8 @@ except ImportError:  # Supports the existing `python app.py` container entrypoin
     )
     from chat_automation import ChatAutomationService
     from chat_page import chat_management_page
+    from customer_memory_service import CustomerMemoryService
+    from aliyun_translation_service import AliyunTranslationError, AliyunTranslationService
     from commerce import (
         CommerceConfig,
         CommerceError,
@@ -121,6 +125,7 @@ DEFAULT_SETTINGS = {
     "ai_api_key": "",
     "theme": "daylight",
     "auto_reply_context_per_side": "5",
+    "customer_memory_enabled": "0",
     "auto_reply_media_types": json.dumps(
         {"image": False, "video": False, "audio": False, "file": False},
         ensure_ascii=False,
@@ -476,6 +481,25 @@ def init_db(path, seed_business=True):
         connection.executescript(chat_metadata_migration.read_text(encoding="utf-8"))
         engagement_migration = Path(__file__).with_name("migrations") / "007_chat_engagement.sql"
         connection.executescript(engagement_migration.read_text(encoding="utf-8"))
+        _add_column_if_missing(
+            connection,
+            "conversation_messages",
+            "origin TEXT NOT NULL DEFAULT 'unknown'",
+        )
+        memory_translation_migration = (
+            Path(__file__).with_name("migrations") / "008_customer_memory_translation.sql"
+        )
+        connection.executescript(memory_translation_migration.read_text(encoding="utf-8"))
+        _add_column_if_missing(
+            connection,
+            "customer_memories",
+            "chat_id_ciphertext TEXT NOT NULL DEFAULT ''",
+        )
+        _add_column_if_missing(
+            connection,
+            "conversation_memory_jobs",
+            "chat_id_ciphertext TEXT NOT NULL DEFAULT ''",
+        )
         _add_column_if_missing(connection, "chat_takeovers", "last_manual_sent_at INTEGER")
         _add_column_if_missing(connection, "chat_takeovers", "auto_resume_at INTEGER")
         admin_migration_path = Path(__file__).with_name("migrations") / "005_admin_users.sql"
@@ -797,7 +821,7 @@ class PanelState:
         self.admin_service = AdminService(self.database_path)
         self._admin_db_auth = as_bool(os.environ.get("PANEL_ADMIN_DB_AUTH", "0"))
         self._update_service = UpdateService(
-            current_panel=os.environ.get("PANEL_VERSION", "1.0.11"),
+            current_panel=os.environ.get("PANEL_VERSION", "1.0.12"),
             current_waha=os.environ.get("WAHA_IMAGE_TAG", "latest-2026.9.1"),
         )
         self.sleep_fn = sleep_fn or time.sleep
@@ -806,6 +830,8 @@ class PanelState:
         self.chat = None
         self.translation = None
         self.automation = None
+        self.memory = None
+        self.aliyun_translation = None
         self.data_cipher = None
         self.csrf_token = None
         self.chat_capability_error = "面板数据加密密钥未配置"
@@ -924,15 +950,40 @@ class PanelState:
             ),
             clock=self.clock,
         )
+        self.memory = CustomerMemoryService(
+            self.database_path,
+            cipher,
+            secret,
+            settings_loader=self._settings,
+            completion_fn=self._customer_memory_completion,
+            logger=lambda level, message: self.log(
+                str(level or "INFO").upper(), "customer.memory", message, DEFAULT_SESSION_NAME
+            ),
+            clock=self.clock,
+        )
+        self.aliyun_translation = AliyunTranslationService(
+            self.database_path,
+            cipher,
+            logger=lambda level, message: self.log(
+                str(level or "INFO").upper(), "aliyun.translation", message, DEFAULT_SESSION_NAME
+            ),
+            clock=self.clock,
+        )
         self.chat_capability_error = ""
         return self.chat
 
     def start_background_services(self):
+        memory = self.memory
+        if memory is not None and hasattr(memory, "start"):
+            memory.start()
         automation = self.automation
         if automation is not None:
             automation.start()
 
     def stop_background_services(self):
+        memory = self.memory
+        if memory is not None and hasattr(memory, "stop"):
+            memory.stop()
         automation = self.automation
         if automation is not None:
             automation.stop()
@@ -953,7 +1004,7 @@ class PanelState:
     def end_translation_request(self):
         self._translation_slots.release()
 
-    def _send_text(self, session_name, chat_id, text, request_id=None):
+    def _send_text(self, session_name, chat_id, text, request_id=None, origin="automation"):
         """Call both client method shapes and archive the successful outbound message."""
         name = normalize_session_name(session_name or DEFAULT_SESSION_NAME)
         local_request_id = str(request_id or uuid.uuid4())
@@ -981,6 +1032,7 @@ class PanelState:
                 text,
                 created_at=int(self.clock()),
                 request_id=local_request_id,
+                origin=origin,
             )
         except Exception as error:
             self.log("ERROR", "conversation.archive", "出站消息归档失败：" + redact_error(error), name)
@@ -1142,6 +1194,7 @@ class PanelState:
             "auto_reply_context_per_side": normalize_context_per_side(
                 values.get("auto_reply_context_per_side", CONTEXT_PER_SIDE_MIN)
             ),
+            "customer_memory_enabled": as_bool(values.get("customer_memory_enabled", "0")),
             "auto_reply_media_types": normalize_media_types(
                 values.get("auto_reply_media_types", DEFAULT_AUTO_REPLY_MEDIA_TYPES)
             ),
@@ -1167,6 +1220,10 @@ class PanelState:
                 normalize_media_types(payload["auto_reply_media_types"], strict=True),
                 ensure_ascii=False,
                 sort_keys=True,
+            )
+        if "customer_memory_enabled" in payload:
+            updates["customer_memory_enabled"] = (
+                "1" if as_bool(payload["customer_memory_enabled"]) else "0"
             )
         if "auto_reply_enabled" in payload:
             updates["auto_reply_enabled"] = "1" if as_bool(payload["auto_reply_enabled"]) else "0"
@@ -1566,7 +1623,16 @@ class PanelState:
             lines[0] = lines[0][: max(0, character_limit - 1)] + "…"
         return "\n".join(lines)
 
-    def _archive_message(self, session_name, chat_id, direction, message_id, content, created_at=None):
+    def _archive_message(
+        self,
+        session_name,
+        chat_id,
+        direction,
+        message_id,
+        content,
+        created_at=None,
+        origin="unknown",
+    ):
         name = normalize_session_name(session_name)
         message_key = str(message_id or "").strip()
         text = sanitize_context_content(content)
@@ -1581,18 +1647,32 @@ class PanelState:
                 (name, message_key, timestamp),
             ).rowcount
             if inserted:
+                source = str(origin or "unknown").strip().lower()
+                if source not in {"manual", "auto_ai", "automation", "unknown"}:
+                    source = "unknown"
                 connection.execute(
-                    "INSERT INTO conversation_messages(session_name, chat_id, direction, message_id, content, created_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?)",
-                    (name, str(chat_id), direction, message_key, text, timestamp),
+                    "INSERT INTO conversation_messages(session_name, chat_id, direction, message_id, content, created_at, origin) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (name, str(chat_id), direction, message_key, text, timestamp, source),
                 )
             connection.commit()
-            return bool(inserted)
+            archived = bool(inserted)
         except Exception:
             connection.rollback()
             raise
         finally:
             connection.close()
+        if archived and self.memory is not None:
+            try:
+                self.memory.enqueue(name, str(chat_id))
+            except Exception as error:
+                self.log(
+                    "WARN",
+                    "customer.memory.enqueue",
+                    "客户记忆任务入队失败：" + redact_error(error, self.api_key),
+                    name,
+                )
+        return archived
 
     def _record_outbound_message(
         self,
@@ -1602,6 +1682,7 @@ class PanelState:
         content,
         created_at=None,
         request_id=None,
+        origin="unknown",
     ):
         archive_id = str(message_id or "").strip()
         if not archive_id and request_id:
@@ -1613,6 +1694,7 @@ class PanelState:
             archive_id,
             content,
             created_at,
+            origin,
         )
 
     def _record_conversation_message(self, chat_id, direction, message_id, content, created_at=None,
@@ -1706,6 +1788,40 @@ class PanelState:
         for created_at, message_id, direction, content in sorted(normalized):
             self._archive_message(name, chat_id, direction, message_id, content, created_at)
 
+    def _customer_memory_completion(self, settings, system_prompt, user_prompt):
+        base_url = str(settings.get("ai_base_url") or "").strip()
+        model = str(settings.get("ai_model") or "").strip()
+        api_key = str(settings.get("ai_api_key") or "")
+        if not (base_url and model and api_key):
+            raise RuntimeError("AI_MEMORY_CONFIG_MISSING")
+        endpoint = (
+            base_url
+            if base_url.rstrip("/").endswith("/chat/completions")
+            else base_url.rstrip("/") + "/chat/completions"
+        )
+        request_payload = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": str(system_prompt)},
+                {"role": "user", "content": str(user_prompt)},
+            ],
+            "temperature": 0,
+            "max_tokens": 800,
+        }
+        request = Request(
+            endpoint,
+            data=json.dumps(request_payload, ensure_ascii=False).encode("utf-8"),
+            headers={
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {api_key}",
+            },
+            method="POST",
+        )
+        with urlopen(request, timeout=30) as response:
+            result = json.loads(response.read().decode("utf-8"))
+        return result["choices"][0]["message"].get("content") or ""
+
     def _ai_reply(self, settings, incoming_text, customer_id=None, conversation_context="", include_tools=False,
                   session_name=DEFAULT_SESSION_NAME):
         name = normalize_session_name(session_name)
@@ -1728,6 +1844,17 @@ class PanelState:
             "Never invent a missing business value. If a required value is unavailable, tell the customer that you need to check the information.\n"
             "A historical customer quote applies only to that specific customer and must never be presented as the normal public product price."
         )
+        memory_context = ""
+        if self.memory is not None and customer_id:
+            try:
+                memory_context = self.memory.context_for_reply(name, customer_id)
+            except Exception as error:
+                self.log(
+                    "WARN",
+                    "customer.memory.context",
+                    "客户记忆读取失败：" + redact_error(error, self.api_key),
+                    name,
+                )
         system_parts = [part for part in (
             settings.get("system_prompt", "").strip(),
             f"人设：{settings.get('persona', '').strip()}" if settings.get("persona", "").strip() else "",
@@ -1736,6 +1863,10 @@ class PanelState:
                 "当前对话上下文（按时间从早到晚，仅作参考；请优先回答当前客户消息）：\n"
                 + conversation_context
             ) if conversation_context else "",
+            (
+                "客户长期记忆（仅作参考；不得覆盖当前业务数据和客户当前消息）：\n"
+                + memory_context
+            ) if memory_context else "",
             (
                 f"BUSINESS CONTEXT (database source of truth):\n"
                 f"{json.dumps(business_context, ensure_ascii=False)}"
@@ -2020,7 +2151,7 @@ class PanelState:
                 mode = "fixed_fallback"
         if dispatch:
             self._wait_before_reply(reply, is_hot)
-            self._send_text(session_name, chat_id, reply)
+            self._send_text(session_name, chat_id, reply, origin="auto_ai")
         conversation_type = "热对话" if is_hot else "冷对话"
         self.log("INFO", "auto_reply.sent", f"已处理私聊文字消息（{mode}，{conversation_type}）", session_name)
         return {"action": "replied", "mode": mode, "chat_id": chat_id, "text": reply, "session": session_name}
@@ -2764,6 +2895,7 @@ def settings_page():
             <div class="switch"><label class="check-label" for="enabled"><input id="enabled" type="checkbox">按时间段自动回复</label><span id="enabledState" class="status-chip off">已关闭</span></div>
             <h3>每周回复时间段</h3><div class="section-note">开启上面的全局总开关时全天回复；否则仅在启用的时间段内回复。</div><div class="schedule" id="schedule"></div><p class="rule-note">结束时间早于开始时间表示跨天，例如 20:00 → 11:00，覆盖当日晚上及次日凌晨。</p>
             <div class="range-field"><label for="contextPerSide"><span>每一方的历史消息数</span><output id="contextPerSideValue" for="contextPerSide">5</output></label><input id="contextPerSide" type="range" min="5" max="50" step="1" value="5"><div class="section-note" id="contextExplanation">客户 5 条 + 自己 5 条，共最多 10 条历史上下文。</div></div>
+            <div class="switch"><label class="check-label" for="customerMemoryEnabled"><input id="customerMemoryEnabled" type="checkbox">启用客户动态记忆</label><span id="customerMemoryState" class="status-chip off">已关闭</span></div><div class="section-note">按客户保存加密的对话摘要、需求偏好和有效人工回复经验，用于后续 AI 回复；关闭后保留已有记忆并停止更新和使用。</div>
             <fieldset class="media-options"><legend>可触发自动回复的客户媒体</legend><div class="section-note">默认关闭；仅处理私聊客户消息，开启后才会处理对应媒体类型。</div><label for="autoReplyMedia_image"><input id="autoReplyMedia_image" type="checkbox">图片</label><label for="autoReplyMedia_video"><input id="autoReplyMedia_video" type="checkbox">视频</label><label for="autoReplyMedia_audio"><input id="autoReplyMedia_audio" type="checkbox">音频</label><label for="autoReplyMedia_file"><input id="autoReplyMedia_file" type="checkbox">文件</label></fieldset>
             <label for="defaultText">默认固定回复文案</label><textarea id="defaultText" maxlength="4000"></textarea>
             <label for="persona">人设</label><textarea id="persona" maxlength="4000"></textarea>
@@ -2805,19 +2937,19 @@ def settings_page():
     function renderContextCount() { const count = Math.max(5, Math.min(50, Number($('contextPerSide').value) || 5)); $('contextPerSide').value = String(count); $('contextPerSideValue').textContent = String(count); $('contextExplanation').textContent = `客户 ${count} 条 + 自己 ${count} 条，共最多 ${count * 2} 条历史上下文。`; }
     function collectMediaTypes() { return Object.fromEntries(mediaTypeNames.map((name) => [name, $('autoReplyMedia_' + name).checked])); }
     function setChip(id, checked) { $(id).textContent = checked ? '已开启' : '已关闭'; $(id).className = 'status-chip' + (checked ? '' : ' off'); }
-    function setEnabledState() { setChip('enabledState', $('enabled').checked); setChip('allDayState', $('allDay').checked); }
+    function setEnabledState() { setChip('enabledState', $('enabled').checked); setChip('allDayState', $('allDay').checked); setChip('customerMemoryState', $('customerMemoryEnabled').checked); }
     function applyTheme(theme) { const selected = ['daylight','night','paper'].includes(theme) ? theme : 'daylight'; document.documentElement.dataset.theme = selected; $('themeSelect').value = selected; localStorage.setItem('waha-panel-theme', selected); }
     async function ensureCsrf() { if (csrfToken) return csrfToken; const response = await fetch('/api/security/csrf', {cache:'no-store', credentials:'same-origin'}); const data = await response.json(); if (!response.ok) throw new Error(data.message || '安全校验不可用'); csrfToken = data.csrf_token || ''; return csrfToken; }
     async function mutateFetch(url, options={}) { const headers = new Headers(options.headers || {}); try { await ensureCsrf(); } catch (_) {} if (csrfToken) headers.set('X-CSRF-Token', csrfToken); return fetch(url, {...options, headers, credentials:'same-origin', cache:'no-store'}); }
     async function saveTheme(theme) { applyTheme(theme); try { const response = await mutateFetch('/api/settings' + sessionQuery, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({theme})}); if (!response.ok) { const data = await response.json(); throw new Error(data.message || '主题保存失败'); } } catch (error) { $('settingsNotice').textContent = error.message; } }
-    async function loadSettings() { const response = await fetch('/api/settings' + sessionQuery, {cache:'no-store'}); const data = await response.json(); if (!response.ok) throw new Error(data.message || '读取设置失败'); $('enabled').checked = data.auto_reply_enabled; $('allDay').checked = data.auto_reply_all_day; setEnabledState(); renderSchedule(data.weekly_reply_windows); $('contextPerSide').value = String(data.auto_reply_context_per_side ?? 5); renderContextCount(); for (const name of mediaTypeNames) $('autoReplyMedia_' + name).checked = Boolean(data.auto_reply_media_types?.[name]); $('defaultText').value = data.default_reply_text || ''; $('persona').value = data.persona || ''; $('systemPrompt').value = data.system_prompt || ''; $('aiBaseUrl').value = data.ai_base_url || ''; $('aiModel').value = data.ai_model || ''; $('keyState').textContent = data.ai_api_key_configured ? 'APIKey：已配置（隐藏）' : 'APIKey：未配置'; applyTheme(data.theme); }
-    async function saveSettings(event) { event.preventDefault(); const button = $('saveButton'); button.disabled = true; $('settingsNotice').textContent = ''; renderContextCount(); try { const body = {auto_reply_enabled:$('enabled').checked,auto_reply_all_day:$('allDay').checked,weekly_reply_windows:collectWindows(),auto_reply_context_per_side:Number($('contextPerSide').value),auto_reply_media_types:collectMediaTypes(),default_reply_text:$('defaultText').value,persona:$('persona').value,system_prompt:$('systemPrompt').value,ai_base_url:$('aiBaseUrl').value,ai_model:$('aiModel').value,ai_api_key:$('aiKey').value,clear_ai_api_key:$('clearKey').checked,theme:$('themeSelect').value}; const response = await mutateFetch('/api/settings' + sessionQuery, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}); const data = await response.json(); if (!response.ok) throw new Error(data.message || '保存失败'); $('aiKey').value = ''; $('clearKey').checked = false; $('keyState').textContent = data.ai_api_key_configured ? 'APIKey：已配置（隐藏）' : 'APIKey：未配置'; $('settingsNotice').className = 'notice success'; $('settingsNotice').textContent = '设置已保存'; } catch (error) { $('settingsNotice').className = 'notice'; $('settingsNotice').textContent = error.message; } finally { button.disabled = false; } }
+    async function loadSettings() { const response = await fetch('/api/settings' + sessionQuery, {cache:'no-store'}); const data = await response.json(); if (!response.ok) throw new Error(data.message || '读取设置失败'); $('enabled').checked = data.auto_reply_enabled; $('allDay').checked = data.auto_reply_all_day; $('customerMemoryEnabled').checked = Boolean(data.customer_memory_enabled); setEnabledState(); renderSchedule(data.weekly_reply_windows); $('contextPerSide').value = String(data.auto_reply_context_per_side ?? 5); renderContextCount(); for (const name of mediaTypeNames) $('autoReplyMedia_' + name).checked = Boolean(data.auto_reply_media_types?.[name]); $('defaultText').value = data.default_reply_text || ''; $('persona').value = data.persona || ''; $('systemPrompt').value = data.system_prompt || ''; $('aiBaseUrl').value = data.ai_base_url || ''; $('aiModel').value = data.ai_model || ''; $('keyState').textContent = data.ai_api_key_configured ? 'APIKey：已配置（隐藏）' : 'APIKey：未配置'; applyTheme(data.theme); }
+    async function saveSettings(event) { event.preventDefault(); const button = $('saveButton'); button.disabled = true; $('settingsNotice').textContent = ''; renderContextCount(); try { const body = {auto_reply_enabled:$('enabled').checked,auto_reply_all_day:$('allDay').checked,customer_memory_enabled:$('customerMemoryEnabled').checked,weekly_reply_windows:collectWindows(),auto_reply_context_per_side:Number($('contextPerSide').value),auto_reply_media_types:collectMediaTypes(),default_reply_text:$('defaultText').value,persona:$('persona').value,system_prompt:$('systemPrompt').value,ai_base_url:$('aiBaseUrl').value,ai_model:$('aiModel').value,ai_api_key:$('aiKey').value,clear_ai_api_key:$('clearKey').checked,theme:$('themeSelect').value}; const response = await mutateFetch('/api/settings' + sessionQuery, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}); const data = await response.json(); if (!response.ok) throw new Error(data.message || '保存失败'); $('aiKey').value = ''; $('clearKey').checked = false; $('keyState').textContent = data.ai_api_key_configured ? 'APIKey：已配置（隐藏）' : 'APIKey：未配置'; $('settingsNotice').className = 'notice success'; $('settingsNotice').textContent = '设置已保存'; } catch (error) { $('settingsNotice').className = 'notice'; $('settingsNotice').textContent = error.message; } finally { button.disabled = false; } }
     async function addKnowledge(name, content) { $('knowledgeNotice').textContent = ''; const response = await mutateFetch('/api/knowledge' + sessionQuery, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({file_name:name,content})}); const data = await response.json(); if (!response.ok) throw new Error(data.message || '资料保存失败'); $('knowledgeText').value = ''; await loadKnowledge(); }
     async function loadKnowledge() { const response = await fetch('/api/knowledge' + sessionQuery, {cache:'no-store'}); const data = await response.json(); if (!response.ok) throw new Error(data.message || '资料读取失败'); $('knowledgeList').innerHTML = data.items.length ? data.items.map(item => `<div class="knowledge-item"><div><div class="knowledge-name">${esc(item.file_name)}</div><div class="knowledge-meta">${item.characters} 字符 · ${new Date(item.created_at * 1000).toLocaleString()}</div></div><div class="knowledge-actions"><button type="button" data-view="${item.id}">查看</button><button type="button" class="danger" data-delete="${item.id}">删除</button></div></div>`).join('') : '<div class="muted">暂无资料</div>'; document.querySelectorAll('[data-view]').forEach(button => button.addEventListener('click', () => viewKnowledge(button.dataset.view))); document.querySelectorAll('[data-delete]').forEach(button => button.addEventListener('click', () => deleteKnowledge(button.dataset.delete))); }
     async function viewKnowledge(id) { const response = await fetch('/api/knowledge/' + id + sessionQuery, {cache:'no-store'}); const data = await response.json(); if (!response.ok) throw new Error(data.message || '资料读取失败'); $('knowledgePreview').hidden = false; $('knowledgePreview').textContent = data.content; }
     async function deleteKnowledge(id) { if (!window.confirm('确认删除这份资料？')) return; const response = await mutateFetch('/api/knowledge/' + id + sessionQuery, {method:'DELETE'}); const data = await response.json(); if (!response.ok) throw new Error(data.message || '删除失败'); $('knowledgePreview').hidden = true; await loadKnowledge(); }
     $('contextPerSide').addEventListener('input', renderContextCount); renderContextCount();
-    const storedTheme = localStorage.getItem('waha-panel-theme'); if (storedTheme) applyTheme(storedTheme); $('themeSelect').addEventListener('change', (event) => saveTheme(event.target.value)); $('enabled').addEventListener('change', setEnabledState); $('allDay').addEventListener('change', setEnabledState); $('settingsForm').addEventListener('submit', saveSettings); $('addKnowledge').addEventListener('click', async () => { try { await addKnowledge($('knowledgeName').value || '粘贴文字', $('knowledgeText').value); } catch (error) { $('knowledgeNotice').textContent = error.message; } }); $('knowledgeFile').addEventListener('change', () => { const file = $('knowledgeFile').files[0]; if (!file) return; if (!/[.]txt$|[.]md$/i.test(file.name)) { $('knowledgeNotice').textContent = '仅支持 .txt 或 .md 文件'; return; } const reader = new FileReader(); reader.onload = async () => { try { await addKnowledge(file.name, reader.result); $('knowledgeFile').value = ''; } catch (error) { $('knowledgeNotice').textContent = error.message; } }; reader.readAsText(file); });
+    const storedTheme = localStorage.getItem('waha-panel-theme'); if (storedTheme) applyTheme(storedTheme); $('themeSelect').addEventListener('change', (event) => saveTheme(event.target.value)); $('enabled').addEventListener('change', setEnabledState); $('allDay').addEventListener('change', setEnabledState); $('customerMemoryEnabled').addEventListener('change', setEnabledState); $('settingsForm').addEventListener('submit', saveSettings); $('addKnowledge').addEventListener('click', async () => { try { await addKnowledge($('knowledgeName').value || '粘贴文字', $('knowledgeText').value); } catch (error) { $('knowledgeNotice').textContent = error.message; } }); $('knowledgeFile').addEventListener('change', () => { const file = $('knowledgeFile').files[0]; if (!file) return; if (!/[.]txt$|[.]md$/i.test(file.name)) { $('knowledgeNotice').textContent = '仅支持 .txt 或 .md 文件'; return; } const reader = new FileReader(); reader.onload = async () => { try { await addKnowledge(file.name, reader.result); $('knowledgeFile').value = ''; } catch (error) { $('knowledgeNotice').textContent = error.message; } }; reader.readAsText(file); });
     loadSettings().catch(error => { $('settingsNotice').textContent = error.message; }); loadKnowledge().catch(error => { $('knowledgeNotice').textContent = error.message; });
   </script>
 </body>
@@ -3055,6 +3187,16 @@ class PanelHandler(BaseHTTPRequestHandler):
             raise TranslationError("TRANSLATION_UNAVAILABLE", "翻译功能暂不可用，请检查面板加密密钥")
         return self.state.translation
 
+    def require_memory_service(self):
+        if self.state.memory is None:
+            raise ChatServiceError("客户记忆功能暂不可用，请检查面板加密密钥", "MEMORY_UNAVAILABLE")
+        return self.state.memory
+
+    def require_aliyun_translation_service(self):
+        if self.state.aliyun_translation is None:
+            raise AliyunTranslationError("ALIYUN_TRANSLATION_UNAVAILABLE", "阿里云机器翻译暂不可用")
+        return self.state.aliyun_translation
+
     def require_waha_session(self, session_name, connected=False):
         name = normalize_session_name(session_name)
         sessions = self.state.client.get_sessions()
@@ -3082,7 +3224,8 @@ class PanelHandler(BaseHTTPRequestHandler):
         allowed = {
             "overview", "messages", "media", "avatar", "events",
             "send-text", "send-image", "takeover", "resume-ai", "note",
-            "follow-ups", "labels", "summary",
+            "follow-ups", "labels", "summary", "memory", "memory/rebuild",
+            "machine-translations",
         }
         if action not in allowed and not (
             len(parts) == 4 and parts[1] == "follow-ups" and parts[2] and parts[3] == "cancel"
@@ -3145,6 +3288,13 @@ class PanelHandler(BaseHTTPRequestHandler):
             if not chat_ref:
                 raise ValueError("缺少聊天引用")
             self.send_json(chat.current_summary(name, chat_ref))
+            return
+        if action == "memory":
+            if not chat_ref:
+                raise ValueError("缺少聊天引用")
+            memory = self.require_memory_service()
+            chat_id = chat._decode_chat(name, chat_ref)
+            self.send_json(memory.get(name, chat_id))
             return
         if action == "overview":
             self.send_json(chat.overview(
@@ -3261,6 +3411,39 @@ class PanelHandler(BaseHTTPRequestHandler):
             summary.pop("ai_labels", None)
             self.send_json(chat.save_summary_and_ai_labels(name, chat_ref, summary, ai_labels))
             return
+        if action == "memory/rebuild":
+            payload = self.read_api_json()
+            chat_ref = payload.get("chat_ref")
+            if not chat_ref:
+                raise ValueError("缺少聊天引用")
+            memory = self.require_memory_service()
+            chat_id = chat._decode_chat(name, chat_ref)
+            self.send_json(memory.rebuild(name, chat_id))
+            return
+        if action == "machine-translations":
+            payload = self.read_api_json()
+            chat_ref = payload.get("chat_ref")
+            items = payload.get("items")
+            if not chat_ref or not isinstance(items, list):
+                raise ValueError("缺少聊天引用或翻译消息")
+            if len(items) > 30:
+                raise ValueError("每批最多翻译 30 条消息")
+            chat_id = chat._decode_chat(name, chat_ref)
+            chat_key = chat._chat_key(name, chat_id)
+            safe_items = []
+            for item in items:
+                if not isinstance(item, dict):
+                    raise ValueError("翻译消息格式无效")
+                message_ref = str(item.get("message_ref") or "")
+                if not message_ref:
+                    raise ValueError("翻译消息缺少引用")
+                message_chat, _message_id = chat._decode_message(name, message_ref)
+                if not hmac.compare_digest(str(message_chat), str(chat_id)):
+                    raise ChatAccessError("消息不属于当前聊天")
+                safe_items.append({"message_ref": message_ref, "text": str(item.get("text") or "")})
+            translation = self.require_aliyun_translation_service()
+            self.send_json(translation.translate_batch(name, chat_key, safe_items))
+            return
         if action == "send-image":
             form = self.read_image_form()
             image = form["image"]
@@ -3286,6 +3469,21 @@ class PanelHandler(BaseHTTPRequestHandler):
         chat.broker.publish(name, {"type": "refresh", "reason": action})
         self.state.log("INFO", "chat." + action, "聊天管理操作已完成", name)
         self.send_json(result)
+
+    def send_chat_memory_delete(self, route):
+        self.require_csrf()
+        chat = self.require_chat_service()
+        name, action = self.chat_route(route)
+        if action != "memory":
+            raise ValueError("不支持的客户记忆删除操作")
+        self.require_waha_session(name)
+        query = parse_qs(urlparse(self.path).query)
+        chat_ref = query.get("chat_ref", [""])[0]
+        if not chat_ref:
+            raise ValueError("缺少聊天引用")
+        memory = self.require_memory_service()
+        chat_id = chat._decode_chat(name, chat_ref)
+        self.send_json(memory.clear(name, chat_id))
 
     def send_chat_labels_write(self, route, method):
         self.require_csrf()
@@ -3319,6 +3517,9 @@ class PanelHandler(BaseHTTPRequestHandler):
 
     def send_translation_get(self, route):
         self.require_admin_auth()
+        if route == "/api/translation/aliyun/settings":
+            self.send_json(self.require_aliyun_translation_service().settings_payload())
+            return
         translation = self.require_translation_service()
         if route != "/api/translation/settings":
             raise ValueError("不支持的翻译查询操作")
@@ -3326,6 +3527,18 @@ class PanelHandler(BaseHTTPRequestHandler):
 
     def send_translation_write(self, route, method):
         self.require_csrf()
+        if route.startswith("/api/translation/aliyun/"):
+            translation = self.require_aliyun_translation_service()
+            if route == "/api/translation/aliyun/settings" and method == "PUT":
+                self.send_json(translation.save_settings(self.read_api_json()))
+                return
+            if route == "/api/translation/aliyun/test" and method == "POST":
+                self.send_json(translation.test_connection())
+                return
+            if route == "/api/translation/aliyun/cache" and method == "DELETE":
+                self.send_json(translation.clear_cache())
+                return
+            raise ValueError("不支持的阿里云翻译操作")
         translation = self.require_translation_service()
         if route == "/api/translation/settings" and method == "PUT":
             self.send_json(translation.save_settings(self.read_api_json()))
@@ -3415,11 +3628,11 @@ class PanelHandler(BaseHTTPRequestHandler):
             status = HTTPStatus.SERVICE_UNAVAILABLE
         elif isinstance(error, (AdminConflictError, LastActiveAdministratorError)):
             status = HTTPStatus.CONFLICT
-        elif code in {"CHAT_CAPABILITY_UNAVAILABLE", "TRANSLATION_UNAVAILABLE"}:
+        elif code in {"CHAT_CAPABILITY_UNAVAILABLE", "TRANSLATION_UNAVAILABLE", "MEMORY_UNAVAILABLE", "ALIYUN_TRANSLATION_UNAVAILABLE"}:
             status = HTTPStatus.SERVICE_UNAVAILABLE
-        elif code in {"SESSION_NOT_CONNECTED", "TRANSLATION_NOT_CONFIGURED"}:
+        elif code in {"SESSION_NOT_CONNECTED", "TRANSLATION_NOT_CONFIGURED", "ALIYUN_CONFIG_MISSING"}:
             status = HTTPStatus.CONFLICT
-        elif code in {"AI_RATE_LIMIT", "AI_BUSY"}:
+        elif code in {"AI_RATE_LIMIT", "AI_BUSY", "ALIYUN_RATE_LIMIT", "ALIYUN_BUSY"}:
             status = HTTPStatus.TOO_MANY_REQUESTS
         elif code in {"AI_CONNECTION_ERROR", "AI_UPSTREAM_ERROR", "AI_RESPONSE_INVALID"}:
             status = HTTPStatus.BAD_GATEWAY
@@ -3918,7 +4131,11 @@ class PanelHandler(BaseHTTPRequestHandler):
             return
         if route.startswith("/api/chat/sessions/"):
             try:
-                self.send_chat_labels_write(route, "DELETE")
+                _name, action = self.chat_route(route)
+                if action == "memory":
+                    self.send_chat_memory_delete(route)
+                else:
+                    self.send_chat_labels_write(route, "DELETE")
             except (ChatServiceError, TranslationError, RequestTooLarge, UnsupportedRequestMedia) as error:
                 self.send_service_error(error)
             except AdminAuthError as error:
@@ -3932,7 +4149,7 @@ class PanelHandler(BaseHTTPRequestHandler):
                 self.state.log("ERROR", "chat.labels", str(error))
                 self.send_json({"message": "标签操作失败，请查看系统记录"}, HTTPStatus.INTERNAL_SERVER_ERROR)
             return
-        if route == "/api/translation/cache":
+        if route in {"/api/translation/cache", "/api/translation/aliyun/cache"}:
             try:
                 self.send_translation_write(route, "DELETE")
             except (ChatServiceError, TranslationError, RequestTooLarge, UnsupportedRequestMedia) as error:

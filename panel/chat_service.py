@@ -169,18 +169,20 @@ class ChatService:
         self._avatar_cache = OrderedDict()
         self._avatar_slots = threading.BoundedSemaphore(4)
 
-    def _notify_outbound(self, session, chat_id, message_id, content, request_id):
+    def _notify_outbound(self, session, chat_id, message_id, content, request_id, origin="unknown"):
         if not self.outbound_recorder:
             return
         try:
-            self.outbound_recorder(
-                session,
-                chat_id,
-                message_id,
-                content,
-                created_at=int(self.clock()),
-                request_id=request_id,
-            )
+            payload = {
+                "created_at": int(self.clock()),
+                "request_id": request_id,
+                "origin": origin,
+            }
+            try:
+                self.outbound_recorder(session, chat_id, message_id, content, **payload)
+            except TypeError:
+                payload.pop("origin", None)
+                self.outbound_recorder(session, chat_id, message_id, content, **payload)
         except Exception as error:
             if self.logger:
                 self.logger("ERROR", "出站消息归档失败：" + sanitize_context_content(error, 300))
@@ -792,7 +794,7 @@ class ChatService:
             response = self.client.send_text(name, chat_id, message)
             message_id = _value_id(response.get("id") if isinstance(response, dict) else response)
             self._finish_send(request_id, "SENT", message_id or None, session=name, chat_id=chat_id)
-            self._notify_outbound(name, chat_id, message_id, message, request_id)
+            self._notify_outbound(name, chat_id, message_id, message, request_id, origin="manual")
             result = {"request_id": request_id, "state": "SENT", "kind": "text"}
             if message_id:
                 result["message_ref"] = self._encode_message(name, chat_id, message_id)
@@ -851,7 +853,7 @@ class ChatService:
             try:
                 connection.execute("UPDATE automated_send_requests SET state='SENT',waha_message_id=?,updated_at=? WHERE client_request_id=?", (message_id or None,int(self.clock()),request_id)); connection.commit()
             finally: connection.close()
-            self._notify_outbound(name, chat_id, message_id, message, request_id)
+            self._notify_outbound(name, chat_id, message_id, message, request_id, origin="automation")
             return result
         except Exception as error:
             state, code = self._error_state(error)
@@ -1084,6 +1086,7 @@ class ChatService:
                     caption=safe_caption,
                 ),
                 request_id,
+                origin="manual",
             )
             result = {"request_id": request_id, "state": "SENT", "kind": "image"}
             if message_id:
