@@ -376,6 +376,41 @@ class ChatPageRegressionTests(unittest.TestCase):
             self.assertIn(f'value="{mode}"', page)
         self.assertIn("当前总结", page)
 
+    def test_current_chat_machine_translation_and_separate_aliyun_settings_contract(self):
+        page = chat_management_page("default")
+        for token in (
+            'id="translationToggle"',
+            "translationEnabledByChat",
+            "translationAbort",
+            "translationRequestId",
+            "machine-translations",
+            "客户原文",
+            "中文翻译",
+            'id="aliyunTranslationEndpoint"',
+            'id="aliyunTranslationRegion"',
+            'id="aliyunAccessKeyId"',
+            'id="aliyunAccessKeySecret"',
+            "/api/translation/aliyun/settings",
+            "/api/translation/aliyun/test",
+        ):
+            self.assertIn(token, page)
+        self.assertIn('aria-pressed="false"', page)
+        self.assertNotIn("/api/translation/translate',", page[page.index("translationToggle"):])
+
+    def test_translation_and_takeover_controls_have_breathing_motion_contract(self):
+        page = chat_management_page("default")
+        self.assertIn("breathing-toggle", page)
+        self.assertIn("@keyframes toggle-breathe", page)
+        self.assertIn("prefers-reduced-motion", page)
+        self.assertIn("setTranslationToggle", page)
+        self.assertIn("aria-pressed", page)
+
+    def test_chat_list_refresh_restores_visible_anchor_and_scroll_offset(self):
+        page = chat_management_page("default")
+        self.assertIn("const previousScrollTop=list.scrollTop", page)
+        self.assertIn("const anchorRef", page)
+        self.assertIn("list.scrollTop=previousScrollTop", page)
+
     def test_chat_engagement_script_has_state_aware_handlers(self):
         page = chat_management_page("default")
         for function_name in ("loadLabels", "saveManualLabel", "loadSummary", "generateSummary", "loadFollowUps", "createFollowUp", "cancelFollowUp"):
