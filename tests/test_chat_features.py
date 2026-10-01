@@ -404,6 +404,8 @@ class ChatPageRegressionTests(unittest.TestCase):
         self.assertIn("prefers-reduced-motion", page)
         self.assertIn("setTranslationToggle", page)
         self.assertIn("aria-pressed", page)
+        self.assertIn("请先在翻译设置中配置阿里云机器翻译", page)
+        self.assertIn("if(!state.aliyunConfigured||!translationIsEnabled()", page)
 
     def test_chat_list_refresh_restores_visible_anchor_and_scroll_offset(self):
         page = chat_management_page("default")

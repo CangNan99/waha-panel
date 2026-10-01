@@ -333,7 +333,9 @@ def chat_management_page(session_name):
   function setTranslationToggle(){const enabled=translationIsEnabled();const button=$('translationToggle');button.disabled=!state.selected;button.classList.toggle('active',enabled);button.setAttribute('aria-pressed',String(enabled));button.textContent='全局翻译：'+(enabled?'开启':'关闭')}
   function stopMachineTranslation(){state.translationRequestId++;state.translationAbort?.abort();state.translationAbort=null}
   function toggleTranslation(){
-    if(!state.selected)return;const enabled=!translationIsEnabled();state.translationEnabledByChat.set(state.selected.chat_ref,enabled);stopMachineTranslation();setTranslationToggle();refreshTranslationLines();if(enabled)translateCurrentChat().catch(()=>{});
+    if(!state.selected)return;
+    if(!state.aliyunConfigured){toast('请先在翻译设置中配置阿里云机器翻译');openDialogWithMotion($('aliyunTranslationDialog'));return}
+    const enabled=!translationIsEnabled();state.translationEnabledByChat.set(state.selected.chat_ref,enabled);stopMachineTranslation();setTranslationToggle();refreshTranslationLines();if(enabled)translateCurrentChat().catch(()=>{});
   }
   function textNeedsTranslation(text){return [...String(text||'')].some(character=>/[\p{L}\p{M}]/u.test(character)&&!/[\p{Script=Han}]/u.test(character))}
   function syncMachineTranslationLine(message,row){
@@ -356,7 +358,7 @@ def chat_management_page(session_name):
     if(nearBottom)setMessageScrollTop(area.scrollHeight);else if(anchor)setMessageScrollTop(previousTop+anchor.getBoundingClientRect().top-bounds.top-offset);
   }
   async function translateCurrentChat(){
-    if(!translationIsEnabled()||!isCurrentChatVisible()||state.translationAbort)return;
+    if(!state.aliyunConfigured||!translationIsEnabled()||!isCurrentChatVisible()||state.translationAbort)return;
     const requestedChatRef=state.selected.chat_ref;
     const pending=state.messages.filter(message=>{const text=String(message.body||message.caption||'').trim();const saved=state.translationByMessage.get(translationKey(message));return message.message_ref&&textNeedsTranslation(text)&&(!saved||saved.source!==text||saved.status==='PENDING')});
     if(!pending.length)return;
