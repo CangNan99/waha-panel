@@ -8,7 +8,7 @@ from pathlib import Path
 from cryptography.fernet import Fernet
 
 from panel.app import init_db
-from panel.chat_security import DataCipher
+from panel.chat_security import DataCipher, ReferenceCodec
 from panel.aliyun_translation_service import AliyunTranslationService, is_pure_chinese
 
 
@@ -97,6 +97,50 @@ class AliyunTranslationTests(unittest.TestCase):
         self.assertEqual(len(ciphertexts), 2)
         self.assertNotIn("你好", ciphertexts[0][0])
         self.assertEqual(self.cipher.decrypt_json(ciphertexts[0][0])["translation"], "你好")
+
+    def test_cached_batch_reads_completed_translation_without_configuration_or_sdk_call(self):
+        self.configure()
+        self.assertEqual(self.translate("Hello", "cached-message")["status"], "READY")
+        self.client.requests.clear()
+        self.service.save_settings({"clear_credentials": True})
+
+        result = self.service.get_cached_batch(
+            "default",
+            "a" * 64,
+            [
+                {"message_ref": "cached-message", "text": "Hello"},
+                {"message_ref": "not-cached", "text": "New message"},
+            ],
+        )
+
+        self.assertEqual(result["items"][0]["status"], "READY")
+        self.assertEqual(result["items"][0]["translation"], "你好")
+        self.assertEqual(result["items"][1]["status"], "MISS")
+        self.assertEqual(self.client.requests, [])
+
+    def test_old_cached_translation_survives_expired_message_reference(self):
+        self.configure()
+        codec = ReferenceCodec(self.cipher, clock=lambda: 1)
+        value = json.dumps({"chat_id": "chat-1", "message_id": "m-1"})
+        old_ref = codec.encode("message", "default", value, ttl=1)
+        self.service.translate_batch("default", "a" * 64, [{"message_ref": old_ref, "text": "Hello"}])
+        # Older releases used the encrypted message reference as the database key.
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.execute(
+                "UPDATE machine_message_translations SET message_ref=?, message_id=''",
+                (old_ref,),
+            )
+            connection.commit()
+        new_ref = ReferenceCodec(self.cipher).encode("message", "default", value, ttl=60)
+        self.service.save_settings({"clear_credentials": True})
+        self.client.requests.clear()
+        result = self.service.get_cached_batch("default", "a" * 64, [
+            {"message_ref": new_ref, "message_id": "m-1", "text": "Hello"},
+        ])["items"][0]
+        self.assertEqual(result["status"], "READY")
+        self.assertEqual(result["message_ref"], new_ref)
+        self.assertEqual(result["translation"], "你好")
+        self.assertEqual(self.client.requests, [])
 
     def test_oversized_text_is_rejected_before_sdk(self):
         self.configure()

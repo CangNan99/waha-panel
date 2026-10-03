@@ -490,6 +490,11 @@ def init_db(path, seed_business=True):
             Path(__file__).with_name("migrations") / "008_customer_memory_translation.sql"
         )
         connection.executescript(memory_translation_migration.read_text(encoding="utf-8"))
+        translation_identity_migration = (
+            Path(__file__).with_name("migrations") / "009_translation_message_identity.sql"
+        )
+        if "message_id" not in _table_columns(connection, "machine_message_translations"):
+            connection.executescript(translation_identity_migration.read_text(encoding="utf-8"))
         _add_column_if_missing(
             connection,
             "customer_memories",
@@ -3225,7 +3230,7 @@ class PanelHandler(BaseHTTPRequestHandler):
             "overview", "messages", "media", "avatar", "events",
             "send-text", "send-image", "takeover", "resume-ai", "note",
             "follow-ups", "labels", "summary", "memory", "memory/rebuild",
-            "machine-translations",
+            "machine-translations", "machine-translations/cache",
         }
         if action not in allowed and not (
             len(parts) == 4 and parts[1] == "follow-ups" and parts[2] and parts[3] == "cancel"
@@ -3420,7 +3425,7 @@ class PanelHandler(BaseHTTPRequestHandler):
             chat_id = chat._decode_chat(name, chat_ref)
             self.send_json(memory.rebuild(name, chat_id))
             return
-        if action == "machine-translations":
+        if action in {"machine-translations", "machine-translations/cache"}:
             payload = self.read_api_json()
             chat_ref = payload.get("chat_ref")
             items = payload.get("items")
@@ -3437,12 +3442,19 @@ class PanelHandler(BaseHTTPRequestHandler):
                 message_ref = str(item.get("message_ref") or "")
                 if not message_ref:
                     raise ValueError("翻译消息缺少引用")
-                message_chat, _message_id = chat._decode_message(name, message_ref)
+                message_chat, message_id = chat._decode_message(name, message_ref)
                 if not hmac.compare_digest(str(message_chat), str(chat_id)):
                     raise ChatAccessError("消息不属于当前聊天")
-                safe_items.append({"message_ref": message_ref, "text": str(item.get("text") or "")})
+                safe_items.append({
+                    "message_ref": message_ref,
+                    "message_id": message_id,
+                    "text": str(item.get("text") or ""),
+                })
             translation = self.require_aliyun_translation_service()
-            self.send_json(translation.translate_batch(name, chat_key, safe_items))
+            if action == "machine-translations/cache":
+                self.send_json(translation.get_cached_batch(name, chat_key, safe_items))
+            else:
+                self.send_json(translation.translate_batch(name, chat_key, safe_items))
             return
         if action == "send-image":
             form = self.read_image_form()

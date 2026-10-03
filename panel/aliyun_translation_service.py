@@ -1,4 +1,5 @@
 import hashlib
+import json
 import re
 import sqlite3
 import threading
@@ -130,6 +131,58 @@ class AliyunTranslationService:
         return {"message_ref": message_ref, "status": status, "translation": translation,
                 "detected_language": detected_language, "error_code": error_code}
 
+    def _legacy_message_matches(self, stored_reference, message_id):
+        """Match a legacy encrypted message reference to its stable message ID."""
+        if not stored_reference or not message_id:
+            return False
+        try:
+            payload = self.cipher.decrypt_json(stored_reference)
+            value = json.loads(str(payload.get("value") or ""))
+            return str(value.get("message_id") or "") == str(message_id)
+        except (DataCipherError, TypeError, ValueError, json.JSONDecodeError):
+            return False
+
+    def _cached_row(self, session_name, chat_key, reference, message_id, fingerprint, now):
+        """Find a READY row by stable identity, with legacy-reference fallback."""
+        with closing(self._connect()) as connection:
+            row = None
+            if message_id:
+                row = connection.execute(
+                    "SELECT rowid, * FROM machine_message_translations "
+                    "WHERE session_name=? AND chat_key_hmac=? AND message_id=? "
+                    "AND source_fingerprint=? AND target_language='zh' AND status='READY' AND updated_at>=? "
+                    "ORDER BY updated_at DESC LIMIT 1",
+                    (str(session_name), str(chat_key), str(message_id), fingerprint, now - CACHE_TTL_SECONDS),
+                ).fetchone()
+            if row is None:
+                row = connection.execute(
+                    "SELECT rowid, * FROM machine_message_translations "
+                    "WHERE session_name=? AND chat_key_hmac=? AND message_ref=? "
+                    "AND source_fingerprint=? AND target_language='zh' AND status='READY' AND updated_at>=? "
+                    "ORDER BY updated_at DESC LIMIT 1",
+                    (str(session_name), str(chat_key), str(reference), fingerprint, now - CACHE_TTL_SECONDS),
+                ).fetchone()
+            if row is None and message_id:
+                candidates = connection.execute(
+                    "SELECT rowid, * FROM machine_message_translations "
+                    "WHERE session_name=? AND chat_key_hmac=? AND source_fingerprint=? "
+                    "AND target_language='zh' AND status='READY' AND updated_at>=? "
+                    "ORDER BY updated_at DESC",
+                    (str(session_name), str(chat_key), fingerprint, now - CACHE_TTL_SECONDS),
+                ).fetchall()
+                row = next(
+                    (candidate for candidate in candidates
+                     if self._legacy_message_matches(candidate["message_ref"], message_id)),
+                    None,
+                )
+            if row is not None and message_id and not row["message_id"]:
+                connection.execute(
+                    "UPDATE machine_message_translations SET message_id=?, message_ref=? WHERE rowid=?",
+                    (str(message_id), str(reference), row["rowid"]),
+                )
+                connection.commit()
+            return row
+
     def _sdk_request(self, text, settings):
         try:
             from alibabacloud_alimt20181012.client import Client
@@ -178,21 +231,19 @@ class AliyunTranslationService:
 
     def _translate_one(self, session_name, chat_key, item):
         reference = str(item.get("message_ref") or "")
+        message_id = str(item.get("message_id") or "")
         text = str(item.get("text") or "").strip()
         if len(text) > MAX_TRANSLATION_CHARS:
             return self._result(reference, "FAILED", error_code="TEXT_TOO_LONG")
         if is_pure_chinese(text):
             return self._result(reference, "SKIPPED", detected_language="zh")
         fingerprint = hashlib.sha256(text.encode("utf-8")).hexdigest()
-        identity = (session_name, chat_key, reference, fingerprint)
+        cache_message_id = message_id or reference
         lock = self._cache_locks[int(fingerprint[:8], 16) % len(self._cache_locks)]
         with lock:
-            with closing(self._connect()) as connection:
-                row = connection.execute(
-                    "SELECT * FROM machine_message_translations WHERE session_name=? AND chat_key_hmac=? "
-                    "AND message_ref=? AND source_fingerprint=? AND target_language='zh' AND status='READY' "
-                    "AND updated_at>=?", (*identity, int(self.clock()) - CACHE_TTL_SECONDS),
-                ).fetchone()
+            row = self._cached_row(
+                session_name, chat_key, reference, cache_message_id, fingerprint, int(self.clock())
+            )
             if row and row["translation_ciphertext"]:
                 try:
                     cached = self.cipher.decrypt_json(row["translation_ciphertext"])
@@ -218,13 +269,14 @@ class AliyunTranslationService:
             with closing(self._connect()) as connection:
                 connection.execute(
                     "INSERT INTO machine_message_translations "
-                    "(session_name,chat_key_hmac,message_ref,source_fingerprint,source_language,target_language,"
+                    "(session_name,chat_key_hmac,message_ref,message_id,source_fingerprint,source_language,target_language,"
                     "translation_ciphertext,detected_language,status,last_error_code,created_at,updated_at) "
-                    "VALUES (?,?,?,?,'auto','zh',?,?,'READY',NULL,?,?) "
+                    "VALUES (?,?,?,?,?,'auto','zh',?,?,'READY',NULL,?,?) "
                     "ON CONFLICT(session_name,chat_key_hmac,message_ref,source_fingerprint,target_language) "
                     "DO UPDATE SET translation_ciphertext=excluded.translation_ciphertext,"
-                    "detected_language=excluded.detected_language,status='READY',last_error_code=NULL,updated_at=excluded.updated_at",
-                    (*identity, encrypted, language, now, now),
+                    "message_id=excluded.message_id,detected_language=excluded.detected_language,status='READY',"
+                    "last_error_code=NULL,updated_at=excluded.updated_at",
+                    (session_name, chat_key, reference, cache_message_id, fingerprint, encrypted, language, now, now),
                 )
                 connection.execute("DELETE FROM machine_message_translations WHERE updated_at<?", (now - CACHE_TTL_SECONDS,))
                 connection.commit()
@@ -240,6 +292,50 @@ class AliyunTranslationService:
             raise AliyunTranslationError("BATCH_TOO_LONG", "本批翻译文本过长")
         with ThreadPoolExecutor(max_workers=5, thread_name_prefix="aliyun-translation") as executor:
             results = list(executor.map(lambda item: self._translate_one(str(session_name), str(chat_ref), item), items))
+        return {"items": results}
+
+    def get_cached_batch(self, session_name, chat_ref, items):
+        """Return completed cached translations without contacting Alibaba.
+
+        This endpoint is intentionally read-only: a missing or expired entry is
+        reported as ``MISS`` so the browser can keep the translation toggle off
+        until the operator explicitly enables it.
+        """
+        if not isinstance(items, list) or len(items) > MAX_BATCH_ITEMS:
+            raise AliyunTranslationError("INVALID_BATCH", "每批最多翻译 30 条消息")
+        if any(not isinstance(item, dict) or not str(item.get("message_ref") or "") for item in items):
+            raise AliyunTranslationError("INVALID_BATCH", "翻译消息格式无效")
+        if sum(len(str(item.get("text") or "")) for item in items) > MAX_BATCH_CHARS:
+            raise AliyunTranslationError("BATCH_TOO_LONG", "本批翻译文本过长")
+
+        results = []
+        now = int(self.clock())
+        for item in items:
+            reference = str(item.get("message_ref") or "")
+            message_id = str(item.get("message_id") or "")
+            text = str(item.get("text") or "").strip()
+            if len(text) > MAX_TRANSLATION_CHARS:
+                results.append(self._result(reference, "FAILED", error_code="TEXT_TOO_LONG"))
+                continue
+            if is_pure_chinese(text):
+                results.append(self._result(reference, "SKIPPED", detected_language="zh"))
+                continue
+            fingerprint = hashlib.sha256(text.encode("utf-8")).hexdigest()
+            lock = self._cache_locks[int(fingerprint[:8], 16) % len(self._cache_locks)]
+            cached_result = None
+            with lock:
+                row = self._cached_row(
+                    session_name, chat_ref, reference, message_id, fingerprint, now
+                )
+                if row and row["translation_ciphertext"]:
+                    try:
+                        cached = self.cipher.decrypt_json(row["translation_ciphertext"])
+                        cached_result = self._result(
+                            reference, "READY", cached["translation"], row["detected_language"]
+                        )
+                    except (DataCipherError, KeyError, TypeError):
+                        cached_result = None
+            results.append(cached_result or self._result(reference, "MISS"))
         return {"items": results}
 
     def test_connection(self):

@@ -458,6 +458,55 @@ class MemoryAndTranslationRouteTests(UpgradeTestCase):
         handler.send_chat_post("/api/chat/sessions/default/machine-translations")
         self.assertEqual(handler.responses[0][0]["items"][0]["translation"], "你好")
         self.assertEqual(calls[0][0], "default")
+        self.assertEqual(calls[0][2][0]["message_id"], "m-1")
+
+    def test_machine_translation_cache_route_only_reads_completed_items(self):
+        message_ref = self.state.chat._encode_message("default", "chat-1@c.us", "m-cache")
+        calls = []
+
+        class TranslationStub:
+            def get_cached_batch(self, session_name, chat_key, items):
+                calls.append((session_name, chat_key, items))
+                return {"items": [{"message_ref": items[0]["message_ref"], "status": "READY", "translation": "你好"}]}
+
+            def translate_batch(self, *_args):
+                raise AssertionError("cache restore must not call Alibaba translation")
+
+        self.state.aliyun_translation = TranslationStub()
+        handler = self.handler(
+            {"chat_ref": self.chat_ref, "items": [{"message_ref": message_ref, "text": "Hello"}]}
+        )
+        handler.send_chat_post("/api/chat/sessions/default/machine-translations/cache")
+        self.assertEqual(handler.responses[0][0]["items"][0]["status"], "READY")
+        self.assertEqual(calls[0][0], "default")
+
+    def test_completed_translation_is_restored_after_secure_references_rotate(self):
+        service = self.state.aliyun_translation
+        service.save_settings({"access_key_id": "test-id", "access_key_secret": "test-secret"})
+        first_ref = self.state.chat._encode_message("default", "chat-1@c.us", "m-cached")
+        with patch.object(service, "_sdk_request", return_value=("你好", "en")) as sdk:
+            writer = self.handler({"chat_ref": self.chat_ref, "items": [{"message_ref": first_ref, "text": "Hello"}]})
+            writer.send_chat_post("/api/chat/sessions/default/machine-translations")
+            self.assertEqual(writer.responses[0][0]["items"][0]["status"], "READY")
+
+            # A restarted service issues fresh encrypted references for the same IDs.
+            self.state.chat._chat_reference_cache.clear()
+            self.state.chat._message_reference_cache.clear()
+            new_chat_ref = self.state.chat._encode_chat("default", "chat-1@c.us")
+            new_message_ref = self.state.chat._encode_message("default", "chat-1@c.us", "m-cached")
+            other_ref = self.state.chat._encode_message("default", "chat-1@c.us", "m-not-translated")
+            self.assertNotEqual(new_message_ref, first_ref)
+            reader = self.handler({"chat_ref": new_chat_ref, "items": [
+                {"message_ref": new_message_ref, "text": "Hello"},
+                {"message_ref": other_ref, "text": "Hello"},
+            ]})
+            reader.send_chat_post("/api/chat/sessions/default/machine-translations/cache")
+            results = reader.responses[0][0]["items"]
+            self.assertEqual(results[0]["status"], "READY")
+            self.assertEqual(results[0]["message_ref"], new_message_ref)
+            self.assertEqual(results[0]["translation"], "你好")
+            self.assertEqual(results[1]["status"], "MISS")
+            sdk.assert_called_once()
 
     def test_machine_translation_route_rejects_message_from_another_chat(self):
         message_ref = self.state.chat._encode_message("default", "other@c.us", "m-2")
