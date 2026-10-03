@@ -259,7 +259,7 @@ def chat_management_page(session_name):
       state.messages=nextMessages;state.messageOffset=nextOffset;state.messageHasMore=nextHasMore;state.messageCache.set(requestedChatRef,{messages:nextMessages.slice(),offset:nextOffset,hasMore:nextHasMore,takeover:nextTakeover});setTakeover(nextTakeover.state||state.selected.takeover_state);
       if(changed||!hasVisible||document.querySelector('#messageStack .message-skeleton'))renderMessages();
       if(newerMessage&&!wasAtBottom&&!older)showLatestMessageNotice(true);
-      loadFollowUps().catch(()=>{});translateCurrentChat().catch(()=>{});
+      loadFollowUps().catch(()=>{});loadCachedTranslations().catch(()=>{});
        requestAnimationFrame(()=>{if(state.selected?.chat_ref!==requestedChatRef||requestId!==state.messageRequestId)return;const scrollChanged=scrollGeneration!==messageScrollGeneration;if(older&&!scrollChanged)setMessageScrollTop(Math.max(0,area.scrollHeight-previousHeight));else if(open&&!scrollChanged)scrollToBottom();else if(wasAtBottom&&!scrollChanged)scrollToBottom();else if(!newerMessage&&!scrollChanged)setMessageScrollTop(previousScrollTop)});
     }catch(error){if(error.name==='AbortError'||state.selected?.chat_ref!==requestedChatRef||requestId!==state.messageRequestId)return;if(older)toast(error.message,true);else if(!hasVisible)renderMessageError(error.message);else toast('消息更新失败：'+error.message,true)}
     finally{if(requestId===state.messageRequestId){state.messageLoading=false;state.messageLoadingChatRef='';setMessageLoading(false);if(state.messageAbort===controller)state.messageAbort=null;if(state.messageReloadQueued){state.messageReloadQueued=false;loadMessages().catch(()=>{})}}}
@@ -334,14 +334,15 @@ def chat_management_page(session_name):
   function stopMachineTranslation(){state.translationRequestId++;state.translationAbort?.abort();state.translationAbort=null}
   function toggleTranslation(){
     if(!state.selected)return;
-    if(!state.aliyunConfigured){toast('请先在翻译设置中配置阿里云机器翻译');openDialogWithMotion($('aliyunTranslationDialog'));return}
-    const enabled=!translationIsEnabled();state.translationEnabledByChat.set(state.selected.chat_ref,enabled);stopMachineTranslation();setTranslationToggle();refreshTranslationLines();if(enabled)translateCurrentChat().catch(()=>{});
+    const enabled=!translationIsEnabled();if(enabled&&!state.aliyunConfigured){toast('请先在翻译设置中配置阿里云机器翻译');openDialogWithMotion($('aliyunTranslationDialog'));return}
+    if(enabled)state.translationEnabledByChat.set(state.selected.chat_ref,true);else state.translationEnabledByChat.delete(state.selected.chat_ref);stopMachineTranslation();setTranslationToggle();refreshTranslationLines();if(enabled)translateCurrentChat().catch(()=>{});
   }
   function textNeedsTranslation(text){return [...String(text||'')].some(character=>/[\p{L}\p{M}]/u.test(character)&&!/[\p{Script=Han}]/u.test(character))}
   function syncMachineTranslationLine(message,row){
     if(!row)return;row.querySelector('.message-translation')?.remove();const text=String(message.body||message.caption||'').trim();
-    if(!translationIsEnabled()||!isCurrentChatVisible()||!textNeedsTranslation(text))return;
+    if(!isCurrentChatVisible()||!textNeedsTranslation(text))return;
     const saved=state.translationByMessage.get(translationKey(message));if(saved&&saved.source!==text)return;
+    if(!translationIsEnabled()&&saved?.status!=='READY')return;
     if(saved?.status==='SKIPPED')return;
     const line=element('div','message-translation'+(saved?.status==='READY'?'':' pending'));
     line.setAttribute('aria-label','中文翻译');
@@ -349,6 +350,27 @@ def chat_management_page(session_name):
     else if(saved?.status==='FAILED'){line.append(document.createTextNode(saved.error_code==='ALIYUN_CONFIG_MISSING'?'阿里云机器翻译未配置 · ':'中文翻译暂不可用 · '));const retry=element('button','text-action','重试');retry.type='button';retry.addEventListener('click',()=>translateMessage(message));line.append(retry)}
     else line.textContent='正在翻译为中文…';
     row.querySelector('.message-copy')?.append(line);
+  }
+  async function loadCachedTranslations(){
+    if(!state.selected||!isCurrentChatVisible())return;
+    const requestedChatRef=state.selected.chat_ref;
+    const items=state.messages.map(message=>({message_ref:message.message_ref,text:String(message.body||message.caption||'').trim()})).filter(item=>item.message_ref&&textNeedsTranslation(item.text));
+    if(!items.length)return;
+    try{
+      for(let offset=0;offset<items.length;offset+=30){
+        if(state.selected?.chat_ref!==requestedChatRef)return;
+        const batch=items.slice(offset,offset+30);
+        const data=await request(apiBase+'/machine-translations/cache',{method:'POST',mutate:true,json:{chat_ref:requestedChatRef,items:batch.map(item=>({message_ref:item.message_ref,text:item.text}))}});
+        if(state.selected?.chat_ref!==requestedChatRef)return;
+        for(const item of data.items||[]){
+          if(item.status!=='READY')continue;
+          const source=batch.find(input=>input.message_ref===item.message_ref)?.text;
+          if(source)state.translationByMessage.set(requestedChatRef+'::'+item.message_ref,{...item,source});
+        }
+      }
+      refreshTranslationLines();
+      if(translationIsEnabled())translateCurrentChat().catch(()=>{});
+    }catch(_error){refreshTranslationLines()}
   }
   function refreshTranslationLines(){
     const area=$('messageArea');const nearBottom=isMessageNearBottom(area);const previousTop=area.scrollTop;
@@ -396,7 +418,7 @@ def chat_management_page(session_name):
    $('clearAliyunTranslationCache').addEventListener('click',clearAliyunTranslationCache);
    $('closeAliyunTranslationDialog').addEventListener('click',()=>closeWithMotion($('aliyunTranslationDialog')));
    $('openAssistantSettings').addEventListener('click',()=>{closeWithMotion($('aliyunTranslationDialog'));setTimeout(()=>{openDialogWithMotion($('translationDialog'));loadTranslationSettings().catch(()=>{})},230)});
-   document.addEventListener('visibilitychange',()=>{if(document.hidden)stopMachineTranslation();refreshTranslationLines();if(!document.hidden)translateCurrentChat().catch(()=>{})});
+   document.addEventListener('visibilitychange',()=>{if(document.hidden)stopMachineTranslation();refreshTranslationLines();if(!document.hidden)loadCachedTranslations().catch(()=>{})});
    window.addEventListener('beforeunload',stopMachineTranslation);
    initialize();
 })();

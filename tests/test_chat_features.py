@@ -407,6 +407,25 @@ class ChatPageRegressionTests(unittest.TestCase):
         self.assertIn("请先在翻译设置中配置阿里云机器翻译", page)
         self.assertIn("if(!state.aliyunConfigured||!translationIsEnabled()", page)
 
+    def test_window_reload_restores_completed_translations_without_persisting_toggle(self):
+        page = chat_management_page("default")
+        self.assertIn("machine-translations/cache", page)
+        self.assertIn("function loadCachedTranslations", page)
+        self.assertIn("loadCachedTranslations().catch(()=>{})", page)
+        self.assertIn("offset+=30", page)
+        self.assertIn("loadFollowUps().catch(()=>{});loadCachedTranslations().catch(()=>{});", page)
+        self.assertNotIn("loadFollowUps().catch(()=>{});translateCurrentChat().catch(()=>{});", page)
+        self.assertIn("saved?.status==='READY'", page)
+        self.assertNotIn("translationPreferenceKey", page)
+        self.assertNotIn("loadTranslationPreferences", page)
+        self.assertNotIn("persistTranslationPreference", page)
+        self.assertNotIn("localStorage.setItem(translationPreferenceKey", page)
+
+    def test_cached_translation_remains_visible_when_toggle_is_off(self):
+        page = chat_management_page("default")
+        self.assertIn("if(!translationIsEnabled()&&saved?.status!=='READY')return;", page)
+        self.assertIn("const enabled=!translationIsEnabled();if(enabled&&!state.aliyunConfigured)", page)
+
     def test_chat_list_refresh_restores_visible_anchor_and_scroll_offset(self):
         page = chat_management_page("default")
         self.assertIn("const previousScrollTop=list.scrollTop", page)
