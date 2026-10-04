@@ -109,7 +109,7 @@ IN_PROGRESS_STATES = {"STARTING", "SCAN_QR_CODE", "AUTHENTICATING"}
 SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 DEFAULT_REPLY_TEXT = "您好，我现在暂时无法及时回复，稍后回复您。"
 WEEKDAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
-THEMES = ("daylight", "night", "paper")
+THEMES = ("daylight", "night")
 SESSION_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 DEFAULT_SESSION_NAME = "default"
 DEFAULT_SESSION_DISPLAY_NAME = "默认会话"
@@ -826,7 +826,7 @@ class PanelState:
         self.admin_service = AdminService(self.database_path)
         self._admin_db_auth = as_bool(os.environ.get("PANEL_ADMIN_DB_AUTH", "0"))
         self._update_service = UpdateService(
-            current_panel=os.environ.get("PANEL_VERSION", "1.0.13"),
+            current_panel=os.environ.get("PANEL_VERSION", "1.0.14"),
             current_waha=os.environ.get("WAHA_IMAGE_TAG", "latest-2026.9.1"),
         )
         self.sleep_fn = sleep_fn or time.sleep
@@ -2517,11 +2517,10 @@ def html_page():
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>WhatsAPP AI管理面板</title>
   <style>
-    :root { color-scheme:light; --ink:#17212b; --muted:#62707c; --paper:#f4f7fb; --surface:#fff; --surface-2:#edf3f8; --line:#d5dfe8; --good:#147d55; --good-bg:#e5f5ed; --warn:#a15c00; --warn-bg:#fff2dd; --bad:#b42318; --bad-bg:#ffebe9; --blue:#1d4ed8; --blue-bg:#e9f0ff; }
-    html[data-theme="night"] { color-scheme:dark; --ink:#edf5f7; --muted:#a8bac1; --paper:#10171c; --surface:#18232a; --surface-2:#223139; --line:#33464f; --good:#62d7a0; --good-bg:#17382f; --warn:#f1c56d; --warn-bg:#40341c; --bad:#ff9a91; --bad-bg:#472522; --blue:#62c8d4; --blue-bg:#19383e; }
-    html[data-theme="paper"] { --ink:#302c27; --muted:#756b60; --paper:#f3eee6; --surface:#fffaf3; --surface-2:#f2e8da; --line:#d8c8b5; --good:#2f7658; --good-bg:#e3f0e7; --warn:#986323; --warn-bg:#f7e8ca; --bad:#a64236; --bad-bg:#f5dfd9; --blue:#a34a2d; --blue-bg:#f4e0d6; }
+    :root { color-scheme:light; --ink:#17212b; --muted:#62707c; --canvas:#f4f7fb; --surface:#fff; --surface-2:#edf3f8; --line:#d5dfe8; --good:#147d55; --good-bg:#e5f5ed; --warn:#a15c00; --warn-bg:#fff2dd; --bad:#b42318; --bad-bg:#ffebe9; --blue:#1d4ed8; --blue-bg:#e9f0ff; }
+    html[data-theme="night"] { color-scheme:dark; --ink:#edf5f7; --muted:#a8bac1; --canvas:#10171c; --surface:#18232a; --surface-2:#223139; --line:#33464f; --good:#62d7a0; --good-bg:#17382f; --warn:#f1c56d; --warn-bg:#40341c; --bad:#ff9a91; --bad-bg:#472522; --blue:#62c8d4; --blue-bg:#19383e; }
     * { box-sizing:border-box; }
-    body { margin:0; min-width:320px; background:var(--paper); color:var(--ink); font:15px/1.5 "Segoe UI", system-ui, sans-serif; }
+    body { margin:0; min-width:320px; background:var(--canvas); color:var(--ink); font:15px/1.5 "Segoe UI", system-ui, sans-serif; }
     button { min-height:44px; border:1px solid var(--line); border-radius:7px; padding:0 16px; background:var(--surface); color:var(--ink); font:inherit; font-weight:600; cursor:pointer; transition:background .18s, border-color .18s, transform .18s; touch-action:manipulation; }
     button:hover { border-color:var(--blue); background:var(--surface-2); } button:active { transform:translateY(1px); } button:focus-visible { outline:3px solid var(--blue); outline-offset:2px; }
     button.primary { border-color:var(--blue); background:var(--blue); color:#fff; } button.primary:hover { filter:brightness(.9); } button:disabled { cursor:wait; opacity:.65; transform:none; }
@@ -2548,8 +2547,8 @@ def html_page():
 <body>
   <div class="shell">
     <header>
-      <div><div class="eyebrow">LOCAL OPERATIONS CONSOLE</div><h1>WhatsAPP AI管理面板</h1><p>WAHA 服务状态与会话入口。</p></div>
-      <div class="header-actions"><label class="theme-control" for="themeSelect"><span>主题</span><select id="themeSelect" aria-label="选择主题"><option value="daylight">白天</option><option value="night">夜间</option><option value="paper">纸张</option></select></label><a class="nav-link" href="/settings">自动回复设置</a><div class="db-pill" id="dbState"><span class="dot" aria-hidden="true"></span><span>数据库检查中</span></div></div>
+      <div><div class="eyebrow">本地运营工作台</div><h1>WhatsAPP AI管理面板</h1><p>WAHA 服务状态与会话入口。</p></div>
+      <div class="header-actions"><label class="theme-control" for="themeSelect"><span>主题</span><select id="themeSelect" aria-label="选择主题"><option value="daylight">白天</option><option value="night">夜间</option></select></label><a class="nav-link" href="/settings">自动回复设置</a><div class="db-pill" id="dbState"><span class="dot" aria-hidden="true"></span><span>数据库检查中</span></div></div>
     </header>
     <main id="main">
       <section class="metrics" aria-label="系统状态">
@@ -2585,7 +2584,7 @@ def html_page():
     const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
     const stateText = (state) => ({'NOT_CREATED':'未创建','CREATED':'已创建','STARTING':'启动中','SCAN_QR_CODE':'等待扫码','AUTHENTICATING':'认证中','WORKING':'已连接','CONNECTED':'已连接','STOPPED':'已停止','FAILED':'失败'}[state] || state || '未知');
     const stateTone = (state) => ['WORKING','CONNECTED'].includes(state) ? 'good' : ['FAILED','STOPPED'].includes(state) ? 'bad' : 'warn';
-    const themeNames = {daylight:'白天', night:'夜间', paper:'纸张'};
+    const themeNames = {daylight:'白天', night:'夜间'};
     function applyTheme(theme) { const selected = Object.prototype.hasOwnProperty.call(themeNames, theme) ? theme : 'daylight'; document.documentElement.dataset.theme = selected; $('themeSelect').value = selected; localStorage.setItem('waha-panel-theme', selected); }
     async function saveTheme(theme) { applyTheme(theme); try { const response = await fetch('/api/settings', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({theme})}); if (!response.ok) { const data = await response.json(); throw new Error(data.message || '主题保存失败'); } } catch (error) { $('notice').textContent = error.message; } }
     function renderLogs(logs, errors) {
@@ -2666,7 +2665,6 @@ def multi_session_html_page():
       --bad:#c9342d; --bad-soft:#ffebe9; --shadow:0 12px 38px rgba(31,35,41,.07);
     }
     html[data-theme="night"] { color-scheme:dark; --bg:#111214; --surface:#1c1d20; --surface-soft:#242529; --line:#37383d; --ink:#f5f5f7; --muted:#a1a1a6; --accent:#2997ff; --accent-soft:#183450; --good:#5dd58d; --good-soft:#173827; --warn:#f0bf6c; --warn-soft:#44351e; --bad:#ff8179; --bad-soft:#45211f; --shadow:0 16px 40px rgba(0,0,0,.22); }
-    html[data-theme="paper"] { --bg:#f4efe8; --surface:#fffaf4; --surface-soft:#f8f0e7; --line:#e4d8ca; --ink:#2b2825; --muted:#766e66; --accent:#b55332; --accent-soft:#f7e6de; --good:#397653; --good-soft:#e6f1e8; --warn:#99631f; --warn-soft:#faebd2; --bad:#a94439; --bad-soft:#f5e3de; --shadow:0 12px 34px rgba(83,60,43,.09); }
     * { box-sizing:border-box; }
     body { margin:0; min-width:320px; background:var(--bg); color:var(--ink); font:15px/1.45 -apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",system-ui,sans-serif; }
     button, input, select { font:inherit; }
@@ -2726,18 +2724,109 @@ def multi_session_html_page():
     @media (prefers-reduced-motion:reduce) { .qr-image-layer img,.qr-ghost,.qr-frosted { transition:opacity 160ms ease-out; transform:none; } .qr-frosted::after { animation:none; opacity:.42; } }
     @media (prefers-reduced-transparency:reduce) { .qr-frosted,.qr-frosted-copy { background:#FAFAFA; -webkit-backdrop-filter:none; backdrop-filter:none; } .qr-decoration { opacity:.12; } }
     @supports not ((backdrop-filter:blur(1px)) or (-webkit-backdrop-filter:blur(1px))) { .qr-frosted,.qr-frosted-copy { background:#FAFAFA; } .qr-decoration { opacity:.12; } }
-  </style>
+
+
+    /* Bento visual system: multi-session dashboard */
+    :root {
+      color-scheme: light;
+      --bg:#F4F7F5; --surface:#FFFFFF; --surface-soft:#EDF2EF; --line:#D9E3DD;
+      --ink:#192D24; --muted:#5F7168; --accent:#146C54; --accent-soft:#E2F3EB;
+      --good:#216E4E; --good-soft:#E6F4EC; --warn:#925400; --warn-soft:#FFF4DB;
+      --bad:#B42318; --bad-soft:#FFF0EE; --shadow:0 1px 2px rgba(25,45,36,.04);
+      --focus:#2255A4;
+    }
+    html[data-theme="night"] {
+      color-scheme: dark;
+      --bg:#17251F; --surface:#203129; --surface-soft:#1B2D25; --line:#3C5548;
+      --ink:#F0F6F2; --muted:#9AAEA0; --accent:#79D5AB; --accent-soft:#213F32;
+      --good:#8BDCAB; --good-soft:#203C2D; --warn:#F0CC86; --warn-soft:#3B3120;
+      --bad:#FFB4AB; --bad-soft:#462823; --shadow:0 1px 2px rgba(0,0,0,.18);
+      --focus:#ACC7FF;
+    }
+    body { background:var(--bg); color:var(--ink); font:14px/1.5 Inter,"Noto Sans SC","PingFang SC","Microsoft YaHei",system-ui,sans-serif; }
+    button, input, select, textarea { font:inherit; }
+    button, .nav-link { border-radius:10px; transition:background .18s,border-color .18s,color .18s,transform .18s,opacity .18s; }
+    button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible { outline:3px solid color-mix(in srgb,var(--focus) 28%,transparent); outline-offset:2px; border-color:var(--focus)!important; }
+    button.primary, a.primary { background:var(--accent)!important; border-color:var(--accent)!important; color:var(--bg)!important; }
+    button.primary:hover, a.primary:hover { background:var(--accent-strong,#0E5A44)!important; filter:none; }
+    .topbar { min-height:68px; padding:12px clamp(18px,4vw,52px); background:color-mix(in srgb,var(--bg) 90%,transparent); border-color:var(--line); }
+    .brand-mark { width:36px; height:36px; border-radius:11px; background:var(--ink); color:var(--bg); }
+    .brand-title { font-size:16px; letter-spacing:-.02em; }
+    .brand-subtitle { font-size:12px; color:var(--muted); }
+    .top-actions { gap:8px; }
+    .theme-select, .top-actions .nav-link, .top-actions button { min-height:40px; border-color:var(--line); background:var(--surface); color:var(--ink); }
+    .theme-select:hover, .top-actions .nav-link:hover, .top-actions button:hover { background:var(--surface-soft); border-color:var(--accent); }
+    .service-pill { min-height:40px; padding:0 12px; background:var(--surface); border-color:var(--line); color:var(--muted); }
+    .service-pill.good { background:var(--good-soft); border-color:color-mix(in srgb,var(--good) 30%,var(--line)); color:var(--good); }
+    .layout { width:min(1360px,100%); padding:24px clamp(14px,4vw,52px) 48px; grid-template-columns:264px minmax(0,1fr); gap:16px; }
+    .sidebar, .card { border:1px solid var(--line); border-radius:14px; box-shadow:var(--shadow); }
+    .sidebar { top:92px; }
+    .side-head { padding:16px; border-color:var(--line); }
+    .side-title { font-size:16px; }
+    .side-count { color:var(--muted); }
+    .session-list { padding:8px; max-height:calc(100dvh - 176px); }
+    .session-item { min-height:78px; border-radius:11px; padding:12px; }
+    .session-item:hover { background:var(--surface-soft); border-color:var(--line); }
+    .session-item.selected { background:var(--accent-soft); border-color:color-mix(in srgb,var(--accent) 42%,var(--line)); box-shadow:inset 3px 0 var(--accent); }
+    .session-display { font-weight:720; }
+    .session-tech { color:var(--muted); }
+    .session-meta { color:var(--muted); }
+    .main { min-width:0; }
+    .hero { margin:0 0 18px; }
+    .eyebrow { color:var(--accent); font:650 12px/1.2 var(--font-mono,ui-monospace),Consolas,monospace; letter-spacing:.02em; }
+    h1 { margin:6px 0 5px; font-size:clamp(28px,3.4vw,40px); line-height:1.1; letter-spacing:-.04em; }
+    .hero p { color:var(--muted); }
+    .hero-actions { gap:8px; }
+    .hero-actions button, .hero-actions .nav-link { min-height:40px; }
+    .status-banner { margin-bottom:16px; padding:16px 18px; border:1px solid var(--line); border-radius:14px; background:var(--surface); box-shadow:var(--shadow); }
+    .status-label, .status-note { color:var(--muted); }
+    .status-value { font-size:20px; letter-spacing:-.02em; }
+    .status-badge { padding:7px 11px; }
+    .detail-grid { grid-template-columns:minmax(0,1.28fr) minmax(320px,.72fr); gap:16px; }
+    .detail-grid > section { display:grid; gap:16px; align-content:start; }
+    .card { padding:20px; }
+    .card-head { margin-bottom:16px; }
+    .card-title { font-size:17px; letter-spacing:-.015em; }
+    .card-note { color:var(--muted); }
+    .identity { padding:14px; border-radius:12px; background:var(--surface-soft); border-color:var(--line); }
+    .identity-icon { width:42px; height:42px; border-radius:12px; background:var(--accent-soft); color:var(--accent); }
+    .identity-name { font-size:18px; }
+    .identity-tech { color:var(--muted); }
+    .action-row { gap:8px; margin-top:16px; }
+    .action-row button { min-height:40px; }
+    .summary-grid { gap:10px; margin-top:16px; }
+    .summary { padding:12px; border-radius:11px; background:var(--surface-soft); border-color:var(--line); }
+    .summary-label { color:var(--muted); }
+    .summary-value { margin-top:5px; }
+    .qr-wrap { min-height:320px; border:1px dashed var(--line); border-radius:13px; background:var(--surface-soft); }
+    .qr-frosted { border-radius:13px; }
+    .qr-frosted-copy { border-color:var(--line); background:color-mix(in srgb,var(--surface) 92%,transparent); box-shadow:0 8px 24px rgba(25,45,36,.08); }
+    .qr-frosted-title { color:var(--ink); }
+    .qr-frosted-detail, .qr-caption { color:var(--muted); }
+    .pairing { margin-top:20px; padding-top:18px; border-color:var(--line); }
+    .pairing-note { color:var(--muted); }
+    .pairing-form input { border-radius:10px; background:var(--surface); border-color:var(--line); }
+    .logs { max-height:390px; }
+    .log { border-color:var(--line); padding:12px 0; }
+    .log-meta { color:var(--muted); }
+    .notice { color:var(--bad); }
+    dialog { border-color:var(--line); border-radius:18px; background:var(--surface); color:var(--ink); box-shadow:0 20px 70px rgba(25,45,36,.2); }
+    dialog::backdrop { background:rgba(25,45,36,.32); backdrop-filter:blur(4px); }
+    @media (max-width:1279px) { .layout { grid-template-columns:232px minmax(0,1fr); } .detail-grid { grid-template-columns:1fr; } }
+    @media (max-width:759px) { .topbar { display:block; padding:14px; } .top-actions { justify-content:flex-start; margin-top:12px; } .layout { display:block; padding:14px 12px 32px; } .sidebar { position:static; margin-bottom:14px; } .session-list { display:flex; gap:8px; max-height:none; overflow-x:auto; } .session-item { flex:0 0 220px; } .hero { display:block; } .hero-actions { margin-top:14px; justify-content:flex-start; } .status-banner { align-items:flex-start; flex-direction:column; gap:10px; } .detail-grid { display:block; } .detail-grid > section + section { margin-top:16px; } .summary-grid { grid-template-columns:1fr; } .pairing-form { grid-template-columns:1fr; } }
+    @media (prefers-reduced-motion:reduce) { *,*::before,*::after { transition-duration:.01ms!important; animation-duration:.01ms!important; } }
+</style>
 </head>
 <body>
   <div class="app">
     <header class="topbar">
       <div class="brand"><div class="brand-mark" aria-hidden="true">W</div><div class="brand-copy"><div class="brand-title">WhatsAPP AI管理面板</div><div class="brand-subtitle">WAHA 本地多会话工作区</div></div></div>
-      <div class="top-actions"><select id="themeSelect" class="theme-select" aria-label="选择界面主题"><option value="daylight">白天</option><option value="night">夜间</option><option value="paper">纸张</option></select><a class="subtle nav-link" href="/settings" style="display:inline-flex;align-items:center;min-height:42px;border:1px solid var(--line);border-radius:11px;padding:0 13px;color:var(--ink);text-decoration:none;font-weight:650;">自动回复设置</a><button class="subtle" id="updateButton" type="button">检查更新</button><button class="subtle" id="adminButton" type="button">管理员</button><div class="service-pill" id="servicePill"><span class="service-dot" aria-hidden="true"></span><span>WAHA 检查中</span></div></div>
+      <div class="top-actions"><select id="themeSelect" class="theme-select" aria-label="选择界面主题"><option value="daylight">白天</option><option value="night">夜间</option></select><a class="subtle nav-link" href="/settings" style="display:inline-flex;align-items:center;min-height:42px;border:1px solid var(--line);border-radius:11px;padding:0 13px;color:var(--ink);text-decoration:none;font-weight:650;">自动回复设置</a><button class="subtle" id="updateButton" type="button">检查更新</button><button class="subtle" id="adminButton" type="button">管理员</button><div class="service-pill" id="servicePill"><span class="service-dot" aria-hidden="true"></span><span>WAHA 检查中</span></div></div>
     </header>
     <div class="layout">
       <aside class="sidebar" aria-label="会话列表"><div class="side-head"><div><div class="side-title">会话</div><div class="side-count" id="sessionCount">读取中</div></div><button class="primary" id="newSessionButton" type="button">新建</button></div><div class="session-list" id="sessionList"><div class="empty">正在读取会话...</div></div><!-- SPONSOR_SLOT --></aside>
       <main class="main">
-        <div class="hero"><div><div class="eyebrow">SESSION WORKSPACE</div><h1 id="pageTitle">会话详情</h1><p id="pageSubtitle">选择一个会话开始管理。</p></div><div class="hero-actions"><button id="refreshButton" type="button">刷新状态</button><button id="deleteButton" class="danger" type="button">删除会话</button><a id="chatLink" class="primary nav-link" href="#" style="display:inline-flex;align-items:center;min-height:42px;border:1px solid var(--accent);border-radius:11px;padding:0 14px;background:var(--accent);color:#fff;text-decoration:none;font-weight:700;">聊天管理</a><a id="settingsLink" class="subtle nav-link" href="/settings" style="display:inline-flex;align-items:center;min-height:42px;border:1px solid var(--line);border-radius:11px;padding:0 14px;color:var(--ink);text-decoration:none;font-weight:650;">设置此会话</a></div></div>
+        <div class="hero"><div><div class="eyebrow">当前会话</div><h1 id="pageTitle">会话详情</h1><p id="pageSubtitle">选择一个会话开始管理。</p></div><div class="hero-actions"><button id="refreshButton" type="button">刷新状态</button><button id="deleteButton" class="danger" type="button">删除会话</button><a id="chatLink" class="primary nav-link" href="#" style="display:inline-flex;align-items:center;min-height:42px;border:1px solid var(--accent);border-radius:11px;padding:0 14px;background:var(--accent);color:#fff;text-decoration:none;font-weight:700;">聊天管理</a><a id="settingsLink" class="subtle nav-link" href="/settings" style="display:inline-flex;align-items:center;min-height:42px;border:1px solid var(--line);border-radius:11px;padding:0 14px;color:var(--ink);text-decoration:none;font-weight:650;">设置此会话</a></div></div>
         <div class="status-banner"><div class="status-copy"><div class="status-label">当前会话</div><div class="status-value" id="currentSessionLabel">—</div><div class="status-note" id="currentSessionTech">—</div></div><div class="status-badge warn" id="currentBadge"><span class="service-dot" aria-hidden="true"></span><span>读取中</span></div></div>
         <div class="detail-grid">
           <section>
@@ -2798,7 +2887,7 @@ def multi_session_html_page():
     const $ = (id) => document.getElementById(id);
     const stateText = (state) => ({NOT_CREATED:'未创建',CREATED:'已创建',STARTING:'启动中',SCAN_QR_CODE:'等待扫码',AUTHENTICATING:'认证中',WORKING:'已连接',CONNECTED:'已连接',STOPPED:'已停止',FAILED:'失败'}[state] || state || '未知');
     const stateTone = (state) => ['WORKING','CONNECTED'].includes(state) ? 'good' : ['FAILED','STOPPED'].includes(state) ? 'bad' : 'warn';
-    const themeNames = {daylight:'白天',night:'夜间',paper:'纸张'};
+    const themeNames = {daylight:'白天',night:'夜间'};
     let selected = new URLSearchParams(location.search).get('session') || 'default';
     let statusData = null;
     let csrfToken = '';
@@ -2870,10 +2959,9 @@ def settings_page():
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>自动回复设置 · WhatsAPP AI管理面板</title>
   <style>
-    :root { color-scheme:light; --ink:#17212b; --muted:#62707c; --paper:#f5f7f8; --surface:#fff; --surface-2:#f2f5f7; --line:#dce2e6; --blue:#175cd3; --blue-bg:#e9f0ff; --good:#147d55; --good-bg:#e5f5ed; --bad:#b42318; --bad-bg:#ffebe9; }
-    html[data-theme="night"] { color-scheme:dark; --ink:#edf5f7; --muted:#a8bac1; --paper:#10171c; --surface:#18232a; --surface-2:#223139; --line:#33464f; --blue:#62c8d4; --blue-bg:#19383e; --good:#62d7a0; --good-bg:#17382f; --bad:#ff9a91; --bad-bg:#472522; }
-    html[data-theme="paper"] { --ink:#302c27; --muted:#756b60; --paper:#f3eee6; --surface:#fffaf3; --surface-2:#f2e8da; --line:#d8c8b5; --blue:#a34a2d; --blue-bg:#f4e0d6; --good:#2f7658; --good-bg:#e3f0e7; --bad:#a64236; --bad-bg:#f5dfd9; }
-    * { box-sizing:border-box; } body { margin:0; min-width:320px; background:var(--paper); color:var(--ink); font:15px/1.5 "Segoe UI", system-ui, sans-serif; }
+    :root { color-scheme:light; --ink:#17212b; --muted:#62707c; --canvas:#f5f7f8; --surface:#fff; --surface-2:#f2f5f7; --line:#dce2e6; --blue:#175cd3; --blue-bg:#e9f0ff; --good:#147d55; --good-bg:#e5f5ed; --bad:#b42318; --bad-bg:#ffebe9; }
+    html[data-theme="night"] { color-scheme:dark; --ink:#edf5f7; --muted:#a8bac1; --canvas:#10171c; --surface:#18232a; --surface-2:#223139; --line:#33464f; --blue:#62c8d4; --blue-bg:#19383e; --good:#62d7a0; --good-bg:#17382f; --bad:#ff9a91; --bad-bg:#472522; }
+    * { box-sizing:border-box; } body { margin:0; min-width:320px; background:var(--canvas); color:var(--ink); font:15px/1.5 "Segoe UI", system-ui, sans-serif; }
     .shell { max-width:1180px; margin:auto; padding:28px 24px 48px; } header { display:flex; justify-content:space-between; align-items:flex-start; gap:20px; border-bottom:1px solid var(--line); padding-bottom:22px; } h1 { margin:0 0 5px; font-size:32px; line-height:1.15; } header p,.muted { color:var(--muted); margin:0; } .eyebrow { color:var(--blue); font:600 12px/1.2 ui-monospace, Consolas, monospace; } .header-actions { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
     .theme-control { display:flex; align-items:center; gap:8px; min-height:44px; color:var(--muted); font-weight:700; } .theme-control select { min-height:44px; border:1px solid var(--line); border-radius:7px; padding:0 28px 0 10px; color:var(--ink); background:var(--surface); font:inherit; }
     .nav-link { display:inline-flex; align-items:center; min-height:44px; border:1px solid var(--line); border-radius:7px; padding:0 14px; color:var(--ink); background:var(--surface); font-weight:700; text-decoration:none; } .nav-link:hover { background:var(--surface-2); border-color:var(--blue); }
@@ -2886,11 +2974,67 @@ def settings_page():
      @media (max-width:780px) { .shell { padding:20px 14px 36px; } header { display:block; } .header-actions { margin-top:16px; } .grid { grid-template-columns:1fr; } .day-row { grid-template-columns:58px 28px minmax(0,1fr) minmax(0,1fr); gap:6px; } }
      @media (max-width:420px) { .media-options { grid-template-columns:1fr; } }
     @media (prefers-reduced-motion:reduce) { *,*::before,*::after { transition-duration:.01ms!important; animation-duration:.01ms!important; } }
-  </style>
+
+
+    /* Bento visual system: automation settings */
+    :root { color-scheme:light; --ink:#192D24; --muted:#5F7168; --canvas:#F4F7F5; --surface:#FFFFFF; --surface-2:#EDF2EF; --line:#D9E3DD; --blue:#146C54; --blue-bg:#E2F3EB; --good:#216E4E; --good-bg:#E6F4EC; --bad:#B42318; --bad-bg:#FFF0EE; --focus:#2255A4; }
+    html[data-theme="night"] { color-scheme:dark; --ink:#F0F6F2; --muted:#9AAEA0; --canvas:#17251F; --surface:#203129; --surface-2:#1B2D25; --line:#3C5548; --blue:#79D5AB; --blue-bg:#213F32; --good:#8BDCAB; --good-bg:#203C2D; --bad:#FFB4AB; --bad-bg:#462823; --focus:#ACC7FF; }
+    body { background:var(--canvas); color:var(--ink); font:14px/1.5 Inter,"Noto Sans SC","PingFang SC","Microsoft YaHei",system-ui,sans-serif; }
+    .shell { width:min(1240px,100%); max-width:none; padding:32px clamp(16px,4vw,48px) 56px; }
+    header { align-items:flex-end; border-bottom:0; padding-bottom:0; }
+    .eyebrow { color:var(--blue); font:650 12px/1.2 ui-monospace,Consolas,monospace; letter-spacing:.02em; }
+    h1 { margin:7px 0 5px; font-size:clamp(28px,3.4vw,40px); line-height:1.1; letter-spacing:-.04em; }
+    header p, .section-note, .muted { color:var(--muted); }
+    .header-actions { gap:8px; }
+    .theme-control select, .nav-link { min-height:40px; border-radius:10px; border-color:var(--line); background:var(--surface); color:var(--ink); }
+    .nav-link:hover, .theme-control select:hover { background:var(--surface-2); border-color:var(--blue); }
+    main { padding-top:24px; }
+    .grid { grid-template-columns:minmax(0,7fr) minmax(320px,5fr); gap:16px; }
+    .grid > section { min-width:0; }
+    .panel { padding:20px; border:1px solid var(--line); border-radius:14px; background:var(--surface); box-shadow:0 1px 2px rgba(25,45,36,.04); }
+    .panel + .panel { margin-top:16px; }
+    .panel-head { margin-bottom:18px; }
+    h2 { font-size:18px; letter-spacing:-.015em; }
+    h3 { font-size:15px; margin:24px 0 10px; }
+    .switch { border-radius:12px; padding:11px 13px; background:var(--surface-2); border-color:var(--line); }
+    .switch + .switch { margin-top:8px; }
+    .status-chip { padding:5px 9px; background:var(--good-bg); color:var(--good); }
+    .status-chip.off { background:var(--surface-2); color:var(--muted); }
+    label { margin:15px 0 7px; font-weight:650; }
+    .check-label { min-height:42px; }
+    input[type=text], input[type=password], input[type=url], input[type=tel], input[type=time], textarea, select { min-height:42px; border-radius:10px; border-color:var(--line); background:var(--surface); color:var(--ink); }
+    input:focus, textarea:focus, select:focus { outline:3px solid color-mix(in srgb,var(--focus) 24%,transparent); border-color:var(--focus); }
+    input[type=checkbox] { accent-color:var(--blue); }
+    .schedule { gap:7px; }
+    .day-row { min-height:48px; gap:8px; }
+    .day-row input[type=time]:disabled { background:var(--surface-2); }
+    .rule-note { color:var(--muted); }
+    .range-field { margin-top:22px; padding-top:18px; border-color:var(--line); }
+    .range-field output { color:var(--blue); }
+    .range-field input[type=range] { accent-color:var(--blue); }
+    .media-options { margin-top:20px; padding:14px; border-radius:12px; border-color:var(--line); background:var(--surface-2); }
+    .actions { gap:8px; margin-top:18px; }
+    button { min-height:40px; border-radius:10px; border-color:var(--line); background:var(--surface); color:var(--ink); transition:background .18s,border-color .18s,color .18s,transform .18s,opacity .18s; }
+    button:hover { background:var(--surface-2); border-color:var(--blue); }
+    button:focus-visible { outline:3px solid color-mix(in srgb,var(--focus) 24%,transparent); outline-offset:2px; }
+    button.primary { background:var(--blue); border-color:var(--blue); color:var(--canvas); }
+    button.primary:hover { filter:none; background:color-mix(in srgb,var(--blue) 86%,#0E5A44); }
+    button:disabled { opacity:.55; cursor:not-allowed; }
+    .knowledge-list { margin-top:14px; border-color:var(--line); }
+    .knowledge-item { padding:13px 0; border-color:var(--line); }
+    .knowledge-meta { color:var(--muted); }
+    .preview { border-radius:10px; background:var(--surface-2); border-color:var(--line); }
+    .notice { min-height:24px; color:var(--bad); }
+    .success { color:var(--good); }
+    @media (max-width:1023px) { .grid { grid-template-columns:1fr; } }
+    @media (max-width:760px) { .shell { padding:22px 14px 36px; } header { display:block; } .header-actions { margin-top:16px; } .grid { gap:14px; } .panel { padding:16px; } .day-row { grid-template-columns:58px 28px minmax(0,1fr) minmax(0,1fr); gap:6px; } }
+    @media (max-width:420px) { .media-options { grid-template-columns:1fr; } .day-row { grid-template-columns:52px 26px minmax(0,1fr); } .day-row input[type=time] { grid-column:3; } .day-row input[type=time] + input[type=time] { grid-column:3; } }
+    @media (prefers-reduced-motion:reduce) { *,*::before,*::after { transition-duration:.01ms!important; animation-duration:.01ms!important; } }
+</style>
 </head>
 <body>
   <div class="shell">
-    <header><div><div class="eyebrow">AUTOMATION SETTINGS</div><h1>WhatsAPP AI管理面板 · 自动回复设置</h1><p>回复时间按 Asia/Shanghai 计算。</p></div><div class="header-actions"><label class="theme-control" for="themeSelect"><span>主题</span><select id="themeSelect" aria-label="选择主题"><option value="daylight">白天</option><option value="night">夜间</option><option value="paper">纸张</option></select></label><a class="nav-link" id="backLink" href="/">返回状态面板</a></div></header>
+    <header><div><div class="eyebrow">自动化设置</div><h1>WhatsAPP AI管理面板 · 自动回复设置</h1><p>回复时间按 Asia/Shanghai 计算。</p></div><div class="header-actions"><label class="theme-control" for="themeSelect"><span>主题</span><select id="themeSelect" aria-label="选择主题"><option value="daylight">白天</option><option value="night">夜间</option></select></label><a class="nav-link" id="backLink" href="/">返回状态面板</a></div></header>
     <main>
       <form id="settingsForm" class="grid">
         <section>
@@ -2943,7 +3087,7 @@ def settings_page():
     function collectMediaTypes() { return Object.fromEntries(mediaTypeNames.map((name) => [name, $('autoReplyMedia_' + name).checked])); }
     function setChip(id, checked) { $(id).textContent = checked ? '已开启' : '已关闭'; $(id).className = 'status-chip' + (checked ? '' : ' off'); }
     function setEnabledState() { setChip('enabledState', $('enabled').checked); setChip('allDayState', $('allDay').checked); setChip('customerMemoryState', $('customerMemoryEnabled').checked); }
-    function applyTheme(theme) { const selected = ['daylight','night','paper'].includes(theme) ? theme : 'daylight'; document.documentElement.dataset.theme = selected; $('themeSelect').value = selected; localStorage.setItem('waha-panel-theme', selected); }
+    function applyTheme(theme) { const selected = ['daylight','night'].includes(theme) ? theme : 'daylight'; document.documentElement.dataset.theme = selected; $('themeSelect').value = selected; localStorage.setItem('waha-panel-theme', selected); }
     async function ensureCsrf() { if (csrfToken) return csrfToken; const response = await fetch('/api/security/csrf', {cache:'no-store', credentials:'same-origin'}); const data = await response.json(); if (!response.ok) throw new Error(data.message || '安全校验不可用'); csrfToken = data.csrf_token || ''; return csrfToken; }
     async function mutateFetch(url, options={}) { const headers = new Headers(options.headers || {}); try { await ensureCsrf(); } catch (_) {} if (csrfToken) headers.set('X-CSRF-Token', csrfToken); return fetch(url, {...options, headers, credentials:'same-origin', cache:'no-store'}); }
     async function saveTheme(theme) { applyTheme(theme); try { const response = await mutateFetch('/api/settings' + sessionQuery, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({theme})}); if (!response.ok) { const data = await response.json(); throw new Error(data.message || '主题保存失败'); } } catch (error) { $('settingsNotice').textContent = error.message; } }

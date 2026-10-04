@@ -79,6 +79,7 @@ pwsh -File .\update.ps1 -Component waha
 
 | 版本 | 更新内容 | 详细说明 |
 | --- | --- | --- |
+| 1.0.14 | 按 Bento Grid 视觉规范重构状态、设置和聊天页面；主题收敛为白天与夜间，不改变业务功能。 | [docs/releases/1.0.14.md](docs/releases/1.0.14.md) |
 | 1.0.13 | 修复全局翻译开关重新打开窗口后默认关闭但保留已完成译文；增加稳定消息身份缓存和旧缓存迁移，避免服务重启或安全引用轮换后重复翻译。 | [docs/releases/1.0.13.md](docs/releases/1.0.13.md) |
 | 1.0.12 | 增加按客户动态记忆、阿里云当前聊天双行翻译、最近聊天滚动位置保持和翻译/人工接管状态呼吸动画。 | [docs/releases/1.0.12.md](docs/releases/1.0.12.md) |
 | 1.0.11 | 过滤无内容空消息气泡；打开聊天定位最新消息并在底部跟随新消息；增加固定 7 天管理员登录状态、退出和会话撤销。 | [docs/releases/1.0.11.md](docs/releases/1.0.11.md) |
@@ -113,6 +114,6 @@ pwsh -File .\backup.ps1
 当前镜像版本：
 
 - `devlikeapro/waha:latest-2026.9.1`
-- `docker.io/cangnan88/waha-panel:1.0.13`
+- `docker.io/cangnan88/waha-panel:1.0.14`
 
 如需域名访问，只反代到面板端口 `127.0.0.1:3003`。WAHA API 端口 `3002` 默认不应公开。请在反向代理层启用 HTTPS，并确保代理不会记录 `Authorization`、APIKey 或密码字段。

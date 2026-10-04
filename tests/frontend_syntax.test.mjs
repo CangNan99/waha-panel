@@ -190,7 +190,7 @@ test('chat list renders note first and caps labels at four', () => {
 
 test('mobile primary takeover actions remain visible', () => {
   assert.match(chatSource, /人工接管/);
-  assert.match(chatSource, /恢复 AI 回复/);
+  assert.match(chatSource, /人工接管：开启/);
   assert.doesNotMatch(chatSource, /takeover-actions \.state-pill\{display:none/);
 });
 
@@ -198,7 +198,7 @@ test('mobile conversation hides only the global header and keeps the recent-chat
   assert.match(chatSource, /\.app\.has-chat > \.topbar\{display:none/);
   assert.match(chatSource, /\.app\.has-chat\{grid-template-rows:minmax\(0,1fr\)/);
   assert.match(chatSource, /\.app:not\(\.has-chat\) \.chat-pane\.mobile-view-layer/);
-  assert.match(chatSource, /function setMobileView\(view\).*app\.classList/);
+  assert.match(chatSource, /function setMobileView\(view\)\s*\{[\s\S]*?app\.classList/);
 });
 
 test('chat avatars are reused across metadata refreshes instead of being rebuilt', () => {
@@ -218,7 +218,7 @@ test('session control uses a protected current-account avatar proxy', () => {
 });
 
 test('translation cards identify the message speaker and send role to the API', () => {
-  assert.match(chatSource, /role:message\.from_me\?'agent':'customer'/);
+  assert.match(chatSource, /message\.from_me\?'agent':'customer'/);
   assert.match(chatSource, /消息来源/);
   assert.match(chatSource, /speaker_intent_zh/);
   assert.match(chatSource, /客服表达目的/);
@@ -241,6 +241,23 @@ test('settings page exposes bounded context slider and four media switches', () 
   }
   assert.match(appSource, /auto_reply_context_per_side/);
   assert.match(appSource, /auto_reply_media_types/);
+});
+
+test('visual theme contract keeps only daylight and night', () => {
+  assert.match(appSource, /THEMES = \("daylight", "night"\)/);
+  for (const source of [appSource, chatSource]) {
+    assert.doesNotMatch(source, /<option value="paper">|data-theme="paper"|--paper\b|var\(--paper\)/);
+    assert.match(source, /<option value="daylight">白天<\/option>/);
+    assert.match(source, /<option value="night">夜间<\/option>/);
+  }
+  assert.match(appSource, /const themeNames = \{daylight:'白天', ?night:'夜间'\}/);
+  assert.match(chatSource, /function applyTheme\(value\)\{const theme=\['daylight','night'\]\.includes\(value\)\?value:'daylight'/);
+});
+
+test('visual redesign keeps Bento overrides isolated to the page templates', () => {
+  assert.match(appSource, /Bento visual system: multi-session dashboard/);
+  assert.match(appSource, /Bento visual system: automation settings/);
+  assert.match(chatSource, /Bento visual system: chat workspace/);
 });
 
 test('QR reveal and pairing states are explicit and resource-safe', () => {
