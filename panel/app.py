@@ -25,6 +25,11 @@ from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
 
 try:
+    from .visual_theme import ICON_SPRITE, SHARED_CSS, DASHBOARD_CSS, SETTINGS_CSS
+except ImportError:
+    from visual_theme import ICON_SPRITE, SHARED_CSS, DASHBOARD_CSS, SETTINGS_CSS
+
+try:
     from .admin_service import (
         AdminAuthUnavailableError,
         AdminConflictError,
@@ -109,7 +114,7 @@ IN_PROGRESS_STATES = {"STARTING", "SCAN_QR_CODE", "AUTHENTICATING"}
 SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 DEFAULT_REPLY_TEXT = "您好，我现在暂时无法及时回复，稍后回复您。"
 WEEKDAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
-THEMES = ("daylight", "night", "paper")
+THEMES = ("daylight", "night")
 SESSION_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 DEFAULT_SESSION_NAME = "default"
 DEFAULT_SESSION_DISPLAY_NAME = "默认会话"
@@ -826,7 +831,7 @@ class PanelState:
         self.admin_service = AdminService(self.database_path)
         self._admin_db_auth = as_bool(os.environ.get("PANEL_ADMIN_DB_AUTH", "0"))
         self._update_service = UpdateService(
-            current_panel=os.environ.get("PANEL_VERSION", "1.0.13"),
+            current_panel=os.environ.get("PANEL_VERSION", "1.0.14"),
             current_waha=os.environ.get("WAHA_IMAGE_TAG", "latest-2026.9.1"),
         )
         self.sleep_fn = sleep_fn or time.sleep
@@ -2517,11 +2522,10 @@ def html_page():
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>WhatsAPP AI管理面板</title>
   <style>
-    :root { color-scheme:light; --ink:#17212b; --muted:#62707c; --paper:#f4f7fb; --surface:#fff; --surface-2:#edf3f8; --line:#d5dfe8; --good:#147d55; --good-bg:#e5f5ed; --warn:#a15c00; --warn-bg:#fff2dd; --bad:#b42318; --bad-bg:#ffebe9; --blue:#1d4ed8; --blue-bg:#e9f0ff; }
-    html[data-theme="night"] { color-scheme:dark; --ink:#edf5f7; --muted:#a8bac1; --paper:#10171c; --surface:#18232a; --surface-2:#223139; --line:#33464f; --good:#62d7a0; --good-bg:#17382f; --warn:#f1c56d; --warn-bg:#40341c; --bad:#ff9a91; --bad-bg:#472522; --blue:#62c8d4; --blue-bg:#19383e; }
-    html[data-theme="paper"] { --ink:#302c27; --muted:#756b60; --paper:#f3eee6; --surface:#fffaf3; --surface-2:#f2e8da; --line:#d8c8b5; --good:#2f7658; --good-bg:#e3f0e7; --warn:#986323; --warn-bg:#f7e8ca; --bad:#a64236; --bad-bg:#f5dfd9; --blue:#a34a2d; --blue-bg:#f4e0d6; }
+    :root { color-scheme:light; --ink:#17212b; --muted:#62707c; --canvas:#f4f7fb; --surface:#fff; --surface-2:#edf3f8; --line:#d5dfe8; --good:#147d55; --good-bg:#e5f5ed; --warn:#a15c00; --warn-bg:#fff2dd; --bad:#b42318; --bad-bg:#ffebe9; --blue:#1d4ed8; --blue-bg:#e9f0ff; }
+    html[data-theme="night"] { color-scheme:dark; --ink:#edf5f7; --muted:#a8bac1; --canvas:#10171c; --surface:#18232a; --surface-2:#223139; --line:#33464f; --good:#62d7a0; --good-bg:#17382f; --warn:#f1c56d; --warn-bg:#40341c; --bad:#ff9a91; --bad-bg:#472522; --blue:#62c8d4; --blue-bg:#19383e; }
     * { box-sizing:border-box; }
-    body { margin:0; min-width:320px; background:var(--paper); color:var(--ink); font:15px/1.5 "Segoe UI", system-ui, sans-serif; }
+    body { margin:0; min-width:320px; background:var(--canvas); color:var(--ink); font:15px/1.5 "Segoe UI", system-ui, sans-serif; }
     button { min-height:44px; border:1px solid var(--line); border-radius:7px; padding:0 16px; background:var(--surface); color:var(--ink); font:inherit; font-weight:600; cursor:pointer; transition:background .18s, border-color .18s, transform .18s; touch-action:manipulation; }
     button:hover { border-color:var(--blue); background:var(--surface-2); } button:active { transform:translateY(1px); } button:focus-visible { outline:3px solid var(--blue); outline-offset:2px; }
     button.primary { border-color:var(--blue); background:var(--blue); color:#fff; } button.primary:hover { filter:brightness(.9); } button:disabled { cursor:wait; opacity:.65; transform:none; }
@@ -2548,8 +2552,8 @@ def html_page():
 <body>
   <div class="shell">
     <header>
-      <div><div class="eyebrow">LOCAL OPERATIONS CONSOLE</div><h1>WhatsAPP AI管理面板</h1><p>WAHA 服务状态与会话入口。</p></div>
-      <div class="header-actions"><label class="theme-control" for="themeSelect"><span>主题</span><select id="themeSelect" aria-label="选择主题"><option value="daylight">白天</option><option value="night">夜间</option><option value="paper">纸张</option></select></label><a class="nav-link" href="/settings">自动回复设置</a><div class="db-pill" id="dbState"><span class="dot" aria-hidden="true"></span><span>数据库检查中</span></div></div>
+      <div><div class="eyebrow">本地运营工作台</div><h1>WhatsAPP AI管理面板</h1><p>WAHA 服务状态与会话入口。</p></div>
+      <div class="header-actions"><label class="theme-control" for="themeSelect"><span>主题</span><select id="themeSelect" aria-label="选择主题"><option value="daylight">白天</option><option value="night">夜间</option></select></label><a class="nav-link" href="/settings" aria-label="自动回复设置" title="自动回复设置">自动回复设置</a><div class="db-pill" id="dbState"><span class="dot" aria-hidden="true"></span><span>数据库检查中</span></div></div>
     </header>
     <main id="main">
       <section class="metrics" aria-label="系统状态">
@@ -2585,7 +2589,7 @@ def html_page():
     const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
     const stateText = (state) => ({'NOT_CREATED':'未创建','CREATED':'已创建','STARTING':'启动中','SCAN_QR_CODE':'等待扫码','AUTHENTICATING':'认证中','WORKING':'已连接','CONNECTED':'已连接','STOPPED':'已停止','FAILED':'失败'}[state] || state || '未知');
     const stateTone = (state) => ['WORKING','CONNECTED'].includes(state) ? 'good' : ['FAILED','STOPPED'].includes(state) ? 'bad' : 'warn';
-    const themeNames = {daylight:'白天', night:'夜间', paper:'纸张'};
+    const themeNames = {daylight:'白天', night:'夜间'};
     function applyTheme(theme) { const selected = Object.prototype.hasOwnProperty.call(themeNames, theme) ? theme : 'daylight'; document.documentElement.dataset.theme = selected; $('themeSelect').value = selected; localStorage.setItem('waha-panel-theme', selected); }
     async function saveTheme(theme) { applyTheme(theme); try { const response = await fetch('/api/settings', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({theme})}); if (!response.ok) { const data = await response.json(); throw new Error(data.message || '主题保存失败'); } } catch (error) { $('notice').textContent = error.message; } }
     function renderLogs(logs, errors) {
@@ -2666,7 +2670,6 @@ def multi_session_html_page():
       --bad:#c9342d; --bad-soft:#ffebe9; --shadow:0 12px 38px rgba(31,35,41,.07);
     }
     html[data-theme="night"] { color-scheme:dark; --bg:#111214; --surface:#1c1d20; --surface-soft:#242529; --line:#37383d; --ink:#f5f5f7; --muted:#a1a1a6; --accent:#2997ff; --accent-soft:#183450; --good:#5dd58d; --good-soft:#173827; --warn:#f0bf6c; --warn-soft:#44351e; --bad:#ff8179; --bad-soft:#45211f; --shadow:0 16px 40px rgba(0,0,0,.22); }
-    html[data-theme="paper"] { --bg:#f4efe8; --surface:#fffaf4; --surface-soft:#f8f0e7; --line:#e4d8ca; --ink:#2b2825; --muted:#766e66; --accent:#b55332; --accent-soft:#f7e6de; --good:#397653; --good-soft:#e6f1e8; --warn:#99631f; --warn-soft:#faebd2; --bad:#a94439; --bad-soft:#f5e3de; --shadow:0 12px 34px rgba(83,60,43,.09); }
     * { box-sizing:border-box; }
     body { margin:0; min-width:320px; background:var(--bg); color:var(--ink); font:15px/1.45 -apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",system-ui,sans-serif; }
     button, input, select { font:inherit; }
@@ -2726,27 +2729,37 @@ def multi_session_html_page():
     @media (prefers-reduced-motion:reduce) { .qr-image-layer img,.qr-ghost,.qr-frosted { transition:opacity 160ms ease-out; transform:none; } .qr-frosted::after { animation:none; opacity:.42; } }
     @media (prefers-reduced-transparency:reduce) { .qr-frosted,.qr-frosted-copy { background:#FAFAFA; -webkit-backdrop-filter:none; backdrop-filter:none; } .qr-decoration { opacity:.12; } }
     @supports not ((backdrop-filter:blur(1px)) or (-webkit-backdrop-filter:blur(1px))) { .qr-frosted,.qr-frosted-copy { background:#FAFAFA; } .qr-decoration { opacity:.12; } }
-  </style>
+
+
+    /* Bento visual system: multi-session dashboard — approved v2 */
+    __VISUAL_STYLE__
+</style>
 </head>
 <body>
-  <div class="app">
-    <header class="topbar">
-      <div class="brand"><div class="brand-mark" aria-hidden="true">W</div><div class="brand-copy"><div class="brand-title">WhatsAPP AI管理面板</div><div class="brand-subtitle">WAHA 本地多会话工作区</div></div></div>
-      <div class="top-actions"><select id="themeSelect" class="theme-select" aria-label="选择界面主题"><option value="daylight">白天</option><option value="night">夜间</option><option value="paper">纸张</option></select><a class="subtle nav-link" href="/settings" style="display:inline-flex;align-items:center;min-height:42px;border:1px solid var(--line);border-radius:11px;padding:0 13px;color:var(--ink);text-decoration:none;font-weight:650;">自动回复设置</a><button class="subtle" id="updateButton" type="button">检查更新</button><button class="subtle" id="adminButton" type="button">管理员</button><div class="service-pill" id="servicePill"><span class="service-dot" aria-hidden="true"></span><span>WAHA 检查中</span></div></div>
+  __VISUAL_ICONS__
+  <div class="app window" data-view="dashboard">
+    <header class="topbar dashboard-topbar">
+      <div class="brand"><div class="brand-mark" aria-hidden="true">W</div><div class="brand-copy"><div class="brand-title">WhatsApp AI 管理面板</div><div class="brand-subtitle">WAHA 本地多会话工作区</div></div></div>
+      <div class="top-actions"><select id="themeSelect" class="theme-select" aria-label="选择界面主题"><option value="daylight">白天</option><option value="night">夜间</option></select><a class="nav-link" href="/settings" aria-label="自动回复设置" title="自动回复设置"><svg class="icon" aria-hidden="true"><use href="#ui-robot"/></svg><span class="top-label">自动回复设置</span></a><button id="refreshButton" class="icon-button" type="button" aria-label="刷新状态" title="刷新状态"><svg class="icon" aria-hidden="true"><use href="#ui-refresh"/></svg></button><button id="updateButton" type="button" aria-label="检查更新" title="检查更新"><svg class="icon" aria-hidden="true"><use href="#ui-cloud"/></svg><span class="top-label">检查更新</span></button><button id="adminButton" type="button" aria-label="管理员" title="管理员"><svg class="icon" aria-hidden="true"><use href="#ui-admin"/></svg><span class="top-label">管理员</span></button><button id="deleteButton" class="icon-button danger" type="button" aria-label="删除当前会话" title="删除当前会话"><svg class="icon" aria-hidden="true"><use href="#ui-close"/></svg></button><div class="service-pill" id="servicePill"><span class="service-dot" aria-hidden="true"></span><span>WAHA 检查中</span></div></div>
     </header>
-    <div class="layout">
-      <aside class="sidebar" aria-label="会话列表"><div class="side-head"><div><div class="side-title">会话</div><div class="side-count" id="sessionCount">读取中</div></div><button class="primary" id="newSessionButton" type="button">新建</button></div><div class="session-list" id="sessionList"><div class="empty">正在读取会话...</div></div><!-- SPONSOR_SLOT --></aside>
-      <main class="main">
-        <div class="hero"><div><div class="eyebrow">SESSION WORKSPACE</div><h1 id="pageTitle">会话详情</h1><p id="pageSubtitle">选择一个会话开始管理。</p></div><div class="hero-actions"><button id="refreshButton" type="button">刷新状态</button><button id="deleteButton" class="danger" type="button">删除会话</button><a id="chatLink" class="primary nav-link" href="#" style="display:inline-flex;align-items:center;min-height:42px;border:1px solid var(--accent);border-radius:11px;padding:0 14px;background:var(--accent);color:#fff;text-decoration:none;font-weight:700;">聊天管理</a><a id="settingsLink" class="subtle nav-link" href="/settings" style="display:inline-flex;align-items:center;min-height:42px;border:1px solid var(--line);border-radius:11px;padding:0 14px;color:var(--ink);text-decoration:none;font-weight:650;">设置此会话</a></div></div>
-        <div class="status-banner"><div class="status-copy"><div class="status-label">当前会话</div><div class="status-value" id="currentSessionLabel">—</div><div class="status-note" id="currentSessionTech">—</div></div><div class="status-badge warn" id="currentBadge"><span class="service-dot" aria-hidden="true"></span><span>读取中</span></div></div>
-        <div class="detail-grid">
-          <section>
-            <article class="card"><div class="card-head"><div><div class="card-title">会话控制</div><div class="card-note">每个技术会话独立启动、停止与重启。</div></div><button id="renameButton" type="button">编辑名称</button></div><div class="identity"><div class="identity-icon" id="identityAvatar" aria-hidden="true">W</div><div class="identity-main"><div class="identity-name" id="identityName">—</div><div class="identity-tech" id="identityTech">—</div></div><div class="identity-actions"><span class="status-badge warn" id="identityBadge">未知</span></div></div><div class="action-row"><button class="primary" id="startButton" type="button">启动</button><button id="stopButton" type="button">停止</button><button class="subtle" id="restartButton" type="button">重启</button><button class="subtle" id="ensureButton" type="button">创建 / 启动</button></div><div class="summary-grid"><div class="summary"><div class="summary-label">自动回复</div><div class="summary-value" id="autoReplySummary">—</div></div><div class="summary"><div class="summary-label">AI 模型</div><div class="summary-value" id="aiSummary">—</div></div><div class="summary"><div class="summary-label">WAHA 状态</div><div class="summary-value" id="remoteStateSummary">—</div></div><div class="summary"><div class="summary-label">最后更新</div><div class="summary-value" id="updatedSummary">—</div></div></div><div class="notice" id="controlNotice" role="status" aria-live="polite"></div></article>
-            <article class="card"><div class="card-head"><div><div class="card-title">系统记录</div><div class="card-note">仅显示当前会话的处理记录与错误。</div></div><button id="refreshLogsButton" type="button">刷新记录</button></div><div class="logs" id="logs"><div class="empty">正在读取记录...</div></div></article>
-          </section>
-          <section>
-           <article class="card">
-             <div class="card-head"><div><div class="card-title">扫码连接</div><div class="card-note">二维码属于当前会话，不会把 WAHA 密钥交给浏览器。</div></div><button id="qrButton" type="button">刷新二维码</button></div>
+    <aside class="app-navigation" aria-label="主导航"><nav class="navigation"><a class="nav-item" href="/" aria-current="page" style="background:var(--selected);color:var(--accent)" aria-label="工作台" title="工作台"><svg class="icon" aria-hidden="true"><use href="#ui-home"/></svg><span class="nav-label">工作台</span></a><a class="nav-item" href="#" id="chatLink" aria-label="会话管理" title="会话管理"><svg class="icon" aria-hidden="true"><use href="#ui-chat"/></svg><span class="nav-label">会话管理</span></a><a class="nav-item" href="/settings" id="settingsLink" aria-label="自动回复" title="自动回复"><svg class="icon" aria-hidden="true"><use href="#ui-bolt"/></svg><span class="nav-label">自动回复</span></a><a class="nav-item" href="#sessionMetrics"  aria-label="状态概览" title="状态概览"><svg class="icon" aria-hidden="true"><use href="#ui-chart"/></svg><span class="nav-label">状态概览</span></a><a class="nav-item" href="#logsCard"  aria-label="系统日志" title="系统日志"><svg class="icon" aria-hidden="true"><use href="#ui-file"/></svg><span class="nav-label">系统日志</span></a><a class="nav-item" href="/settings"  aria-label="设置" title="设置"><svg class="icon" aria-hidden="true"><use href="#ui-settings"/></svg><span class="nav-label">设置</span></a></nav></aside>
+    <main class="main dashboard-workspace">
+      <section class="hero overview" aria-labelledby="pageTitle">
+  <div class="overview-identity"><div class="whatsapp-orbit" aria-hidden="true"><svg class="whatsapp-logo"><use href="#ui-wa-logo"/></svg></div><div class="hero-copy"><div class="status-badge warn" id="currentBadge">读取中</div><h1 id="pageTitle">会话详情</h1><p id="pageSubtitle">选择一个会话开始管理。</p><div class="overview-meta"><span class="technical" id="currentSessionTech">—</span><span id="dbSummary">正在检查数据存储</span></div><span id="currentSessionLabel" class="sr-only">—</span></div></div>
+  <div class="metrics" id="sessionMetrics" aria-label="会话状态概览">
+    <div class="metric"><svg class="icon" aria-hidden="true"><use href="#ui-chat"/></svg><div class="metric-label">会话总数</div><div class="metric-bottom"><strong class="metric-value" id="sessionTotalMetric">—</strong></div></div>
+    <div class="metric"><svg class="icon" aria-hidden="true"><use href="#ui-users"/></svg><div class="metric-label">已连接会话</div><div class="metric-bottom"><strong class="metric-value" id="connectedTotalMetric">—</strong></div></div>
+    <div class="metric"><svg class="icon" aria-hidden="true"><use href="#ui-activity"/></svg><div class="metric-label">WAHA 服务</div><div class="metric-value text-metric" id="wahaSummary">正在检查</div></div>
+    <div class="metric"><svg class="icon" aria-hidden="true"><use href="#ui-calendar"/></svg><div class="metric-label">最后更新</div><strong class="metric-value time-metric" id="overviewUpdatedMetric">—</strong></div>
+  </div>
+</section>
+      <div class="notice global-notice" id="globalNotice" role="status" aria-live="polite"></div>
+      <div class="detail-grid dashboard-grid">
+        <aside class="sidebar card sessions-card" aria-label="会话列表"><div class="side-head"><div class="side-heading"><svg class="icon" aria-hidden="true"><use href="#ui-users"/></svg><div class="side-title">会话列表</div><div class="side-count" id="sessionCount">读取中</div></div><button class="primary" id="newSessionButton" type="button"><svg class="icon" aria-hidden="true"><use href="#ui-plus"/></svg>新建会话</button></div><div class="session-list" id="sessionList"><div class="empty">正在读取会话…</div></div><!-- SPONSOR_SLOT --></aside>
+        <article class="card control-card"><div class="card-head"><div><div class="card-title">会话控制</div><div class="card-note">每个技术会话独立启动、停止与重启。</div></div><button id="renameButton" type="button"><svg class="icon" aria-hidden="true"><use href="#ui-edit"/></svg>编辑名称</button></div><div class="identity"><div class="identity-icon" id="identityAvatar" aria-hidden="true">W</div><div class="identity-main"><div class="identity-name" id="identityName">—</div><div class="identity-tech" id="identityTech">—</div></div><div class="identity-actions"><span class="status-badge warn" id="identityBadge">未知</span></div></div><div class="action-row"><button class="primary" id="startButton" type="button"><svg class="icon" aria-hidden="true"><use href="#ui-play"/></svg>启动</button><button id="stopButton" type="button"><svg class="icon" aria-hidden="true"><use href="#ui-stop"/></svg>停止</button><button class="subtle" id="restartButton" type="button"><svg class="icon" aria-hidden="true"><use href="#ui-refresh"/></svg>重启</button><button class="subtle" id="ensureButton" type="button"><svg class="icon" aria-hidden="true"><use href="#ui-send"/></svg>创建 / 启动</button></div><div class="summary-grid"><div class="summary"><div class="tile-icon"><svg class="icon" aria-hidden="true"><use href="#ui-settings"/></svg></div><div class="summary-copy"><div class="summary-label">自动回复</div><div class="summary-value" id="autoReplySummary">—</div></div></div><div class="summary"><div class="tile-icon"><svg class="icon" aria-hidden="true"><use href="#ui-database"/></svg></div><div class="summary-copy"><div class="summary-label">AI 模型</div><div class="summary-value" id="aiSummary">—</div></div></div><div class="summary"><div class="tile-icon violet"><svg class="icon" aria-hidden="true"><use href="#ui-activity"/></svg></div><div class="summary-copy"><div class="summary-label">WAHA 状态</div><div class="summary-value" id="remoteStateSummary">—</div></div></div><div class="summary"><div class="tile-icon violet"><svg class="icon" aria-hidden="true"><use href="#ui-clock"/></svg></div><div class="summary-copy"><div class="summary-label">最后更新</div><div class="summary-value" id="updatedSummary">—</div></div></div></div><div class="notice" id="controlNotice" role="status" aria-live="polite"></div></article>
+        <article class="card logs-card" id="logsCard"><div class="card-head"><div><div class="card-title"><svg class="icon" aria-hidden="true"><use href="#ui-robot"/></svg>系统记录</div><div class="card-note">仅显示当前会话的处理记录与错误。</div></div><button id="refreshLogsButton" type="button">刷新记录</button></div><div class="logs" id="logs"><div class="empty">正在读取记录...</div></div></article>
+        <article class="card qr-card">
+             <div class="card-head"><div><div class="card-title"><svg class="icon" aria-hidden="true"><use href="#ui-calendar"/></svg>二维码连接</div><div class="card-note">使用 WhatsApp 扫码关联当前会话。</div></div><button id="qrButton" type="button">刷新二维码</button></div>
              <div class="qr-wrap" id="qrWrap" data-state="idle" aria-live="polite" aria-busy="false">
                <div class="qr-image-layer" id="qrImageLayer"></div>
                <div class="qr-ghost" id="qrGhost" data-non-scannable="true" aria-hidden="true">
@@ -2781,13 +2794,11 @@ def multi_session_html_page():
                </div>
              </div>
              <div class="qr-caption">如果会话已连接，二维码可能暂不可用。</div>
-             <div class="pairing"><div class="pairing-title">手机号配对码</div><div class="pairing-note">填写包含国家/地区码的手机号，例如 8613812345678。</div><div class="pairing-form"><label class="sr-only" for="phoneNumber">手机号</label><input id="phoneNumber" type="tel" inputmode="numeric" autocomplete="tel" placeholder="8613812345678"><button class="primary" id="pairingButton" type="button">获取配对码</button></div><div id="pairingCode" class="pairing-code" hidden role="status" aria-live="polite" aria-busy="false"></div></div>
+             </article>
+        <article class="card pairing-card"><div class="pairing"><div class="pairing-title"><svg class="icon" aria-hidden="true"><use href="#ui-phone-device"/></svg>手机号配对码</div><div class="pairing-note">填写包含国家/地区码的手机号，例如 8613812345678。</div><div class="pairing-form"><label class="sr-only" for="phoneNumber">手机号</label><input id="phoneNumber" type="tel" inputmode="numeric" autocomplete="tel" placeholder="8613812345678"><button class="primary" id="pairingButton" type="button">获取配对码</button></div><div id="pairingCode" class="pairing-code" hidden role="status" aria-live="polite" aria-busy="false"></div></div>
            </article>
-            <article class="card"><div class="card-head"><div><div class="card-title">服务概况</div><div class="card-note">面板每 10 秒自动刷新。</div></div></div><div class="summary-grid"><div class="summary"><div class="summary-label">WAHA 服务</div><div class="summary-value" id="wahaSummary">检查中</div></div><div class="summary"><div class="summary-label">数据库</div><div class="summary-value" id="dbSummary">检查中</div></div></div><div class="notice" id="globalNotice" role="status" aria-live="polite"></div></article>
-          </section>
-        </div>
-      </main>
-    </div>
+      </div>
+    </main>
   </div>
   <dialog id="newDialog"><form method="dialog" class="dialog-body" id="newForm"><div class="dialog-head"><div><div class="dialog-title">新建会话</div><div class="dialog-note">技术名称创建后保持不变；显示名称可以随时编辑。</div></div><button class="close-button" value="cancel" aria-label="关闭">×</button></div><div class="field"><label for="newName">技术名称</label><input id="newName" type="text" required maxlength="64" pattern="[A-Za-z0-9][A-Za-z0-9._-]{0,63}" placeholder="例如 sales"><div class="field-help">仅支持字母、数字、点、下划线和短横线。</div></div><div class="field"><label for="newDisplayName">显示名称</label><input id="newDisplayName" type="text" maxlength="80" placeholder="例如 销售账号"></div><div class="field"><label><input id="newStart" type="checkbox" style="width:18px;height:18px;vertical-align:-4px;margin-right:7px;accent-color:var(--accent);">创建后立即启动</label></div><div class="notice" id="newNotice" role="status" aria-live="polite"></div><div class="dialog-actions"><button value="cancel" type="button" id="newCancel">取消</button><button class="primary" type="submit" id="newSubmit">创建会话</button></div></form></dialog>
   <dialog id="renameDialog"><form method="dialog" class="dialog-body" id="renameForm"><div class="dialog-head"><div><div class="dialog-title">编辑显示名称</div><div class="dialog-note">不会修改 WAHA 技术名称，也不会使当前会话掉线。</div></div><button class="close-button" value="cancel" aria-label="关闭">×</button></div><div class="field"><label for="renameInput">显示名称</label><input id="renameInput" type="text" required maxlength="80"></div><div class="notice" id="renameNotice" role="status" aria-live="polite"></div><div class="dialog-actions"><button value="cancel" type="button" id="renameCancel">取消</button><button class="primary" type="submit" id="renameSubmit">保存名称</button></div></form></dialog>
@@ -2798,7 +2809,7 @@ def multi_session_html_page():
     const $ = (id) => document.getElementById(id);
     const stateText = (state) => ({NOT_CREATED:'未创建',CREATED:'已创建',STARTING:'启动中',SCAN_QR_CODE:'等待扫码',AUTHENTICATING:'认证中',WORKING:'已连接',CONNECTED:'已连接',STOPPED:'已停止',FAILED:'失败'}[state] || state || '未知');
     const stateTone = (state) => ['WORKING','CONNECTED'].includes(state) ? 'good' : ['FAILED','STOPPED'].includes(state) ? 'bad' : 'warn';
-    const themeNames = {daylight:'白天',night:'夜间',paper:'纸张'};
+    const themeNames = {daylight:'白天',night:'夜间'};
     let selected = new URLSearchParams(location.search).get('session') || 'default';
     let statusData = null;
     let csrfToken = '';
@@ -2816,13 +2827,24 @@ def multi_session_html_page():
      function initials(value) { const text = String(value || 'W').trim(); return Array.from(text)[0]?.toUpperCase() || 'W'; }
      function renderIdentityAvatar(item) { const node = $('identityAvatar'); const rawUrl = String(item?.avatar_url || ''); const avatarUrl = rawUrl.startsWith('/api/sessions/') ? rawUrl : ''; const fallback = initials(item?.display_name || item?.name); const currentImage = node.querySelector('img'); const sameUrl = node.dataset.avatarUrl === avatarUrl; const sameFallback = node.dataset.avatarFallback === fallback; if (sameUrl && sameFallback && ((avatarUrl && (currentImage || node.dataset.avatarFailed === '1')) || (!avatarUrl && !currentImage))) return; if (!sameUrl) node.dataset.avatarFailed = ''; node.dataset.avatarUrl = avatarUrl; node.dataset.avatarFallback = fallback; if (!avatarUrl || node.dataset.avatarFailed === '1') { node.replaceChildren(); node.textContent = fallback; return; } if (currentImage?.dataset.avatarUrl === avatarUrl) return; const image = document.createElement('img'); image.alt = ''; image.loading = 'lazy'; image.decoding = 'async'; image.dataset.avatarUrl = avatarUrl; image.src = avatarUrl; image.addEventListener('error', () => { if (node.dataset.avatarUrl !== avatarUrl) return; node.dataset.avatarFailed = '1'; node.replaceChildren(); node.textContent = fallback; }); node.replaceChildren(image); }
     function currentItem() { return (statusData?.sessions || []).find(item => item.name === selected) || null; }
-    function renderSessions() { const items = statusData?.sessions || []; $('sessionCount').textContent = `${items.length} 个会话`; $('sessionList').innerHTML = items.length ? items.map(item => `<button class="session-item ${item.name === selected ? 'selected' : ''}" data-session="${esc(item.name)}" type="button"><div class="session-name-row"><span class="session-display">${esc(item.display_name || item.name)}</span><span class="mini-status ${stateTone(item.state)}"><span class="service-dot"></span>${esc(stateText(item.state))}</span></div><div class="session-tech">${esc(item.name)}</div><div class="session-meta"><span>${item.auto_reply?.all_day ? '全时段自动回复' : item.auto_reply?.enabled ? '按时段自动回复' : '自动回复关闭'}</span><span>${item.auto_reply?.ai_configured ? 'AI 已配置' : '固定文案'}</span></div></button>`).join('') : '<div class="empty">WAHA 尚未返回会话。</div>'; document.querySelectorAll('[data-session]').forEach(button => button.addEventListener('click', () => selectSession(button.dataset.session))); }
-     function renderDetail() { const item = currentItem(); if (!item) { $('pageTitle').textContent = '没有可用会话'; $('pageSubtitle').textContent = '请先新建或让 WAHA 返回一个会话。'; $('deleteButton').disabled = true; return; } $('pageTitle').textContent = item.display_name || item.name; $('pageSubtitle').textContent = '独立管理连接状态、二维码、聊天、日志和自动回复。'; $('currentSessionLabel').textContent = item.display_name || item.name; $('currentSessionTech').textContent = item.name; $('identityName').textContent = item.display_name || item.name; $('identityTech').textContent = 'WAHA / ' + item.name; renderIdentityAvatar(item); badge($('currentBadge'), item.state); badge($('identityBadge'), item.state); $('autoReplySummary').textContent = item.auto_reply?.all_day ? '全时段开启' : item.auto_reply?.enabled ? '按时段开启' : '已关闭'; $('aiSummary').textContent = item.auto_reply?.ai_configured ? '已配置（密钥隐藏）' : '未配置，使用固定文案'; $('remoteStateSummary').textContent = stateText(item.state); $('updatedSummary').textContent = formatTime(item.updated_at); $('chatLink').href = '/sessions/' + encodeURIComponent(item.name) + '/chats'; $('settingsLink').href = '/settings?session=' + encodeURIComponent(item.name); $('startButton').disabled = ['WORKING','CONNECTED','STARTING','AUTHENTICATING','SCAN_QR_CODE'].includes(item.state); $('stopButton').disabled = item.state === 'STOPPED' || item.state === 'NOT_CREATED'; $('restartButton').disabled = item.state === 'NOT_CREATED'; $('deleteButton').disabled = (statusData?.sessions || []).length <= 1; }
+    function renderSessions() { const items = statusData?.sessions || []; $('sessionCount').textContent = `${items.length} 个会话`; $('sessionList').innerHTML = items.length ? items.map(item => `<button class="session-item ${item.name === selected ? 'selected' : ''}" data-session="${esc(item.name)}" type="button"><div class="session-avatar" aria-hidden="true">${esc(initials(item.display_name || item.name))}</div><div class="session-body"><div class="session-name-row"><span class="session-display">${esc(item.display_name || item.name)}</span><span class="mini-status ${stateTone(item.state)}"><span class="service-dot"></span>${esc(stateText(item.state))}</span></div><div class="session-tech">${esc(item.name)}</div><div class="session-meta"><span>${item.auto_reply?.all_day ? '全时段自动回复' : item.auto_reply?.enabled ? '按时段自动回复' : '自动回复关闭'}</span><span>${item.auto_reply?.ai_configured ? 'AI 已配置' : '固定文案'}</span></div></div><svg class="icon" aria-hidden="true"><use href="#ui-chevron"/></svg></button>`).join('') : '<div class="empty">WAHA 尚未返回会话。</div>'; document.querySelectorAll('[data-session]').forEach(button => button.addEventListener('click', () => selectSession(button.dataset.session))); }
+     function syncConnectionPresentation() { const item = currentItem(); const connected = ['WORKING','CONNECTED'].includes(item?.state); if (connected) { qrRequestGeneration += 1; releaseQrObjectUrl(); $('qrImageLayer').replaceChildren(); setQrState('connected', '已连接，无需二维码', '当前会话已连接；停止后可重新扫码。'); $('qrButton').disabled = true; return; } if ($('qrWrap').dataset.state === 'connected') setQrState('idle', '二维码待刷新', '点击“刷新二维码”获取当前会话的登录二维码。'); $('qrButton').disabled = $('qrWrap').dataset.state === 'loading'; }
+     function renderDetail() { const item = currentItem(); if (!item) { $('pageTitle').textContent = '没有可用会话'; $('pageSubtitle').textContent = '请先新建或让 WAHA 返回一个会话。'; $('deleteButton').disabled = true; syncConnectionPresentation(); return; } $('pageTitle').textContent = item.display_name || item.name; $('pageSubtitle').textContent = '独立管理连接状态、二维码、聊天、日志和自动回复。'; $('currentSessionLabel').textContent = item.display_name || item.name; $('currentSessionTech').textContent = item.name; $('identityName').textContent = item.display_name || item.name; $('identityTech').textContent = 'WAHA / ' + item.name; renderIdentityAvatar(item); badge($('currentBadge'), item.state); badge($('identityBadge'), item.state); $('autoReplySummary').textContent = item.auto_reply?.all_day ? '全时段开启' : item.auto_reply?.enabled ? '按时段开启' : '已关闭'; $('aiSummary').textContent = item.auto_reply?.ai_configured ? '已配置（密钥隐藏）' : '未配置，使用固定文案'; $('remoteStateSummary').textContent = stateText(item.state); $('updatedSummary').textContent = formatTime(item.updated_at); $('chatLink').href = '/sessions/' + encodeURIComponent(item.name) + '/chats'; $('settingsLink').href = '/settings?session=' + encodeURIComponent(item.name); $('startButton').disabled = ['WORKING','CONNECTED','STARTING','AUTHENTICATING','SCAN_QR_CODE'].includes(item.state); $('stopButton').disabled = item.state === 'STOPPED' || item.state === 'NOT_CREATED'; $('restartButton').disabled = item.state === 'NOT_CREATED'; $('deleteButton').disabled = (statusData?.sessions || []).length <= 1; syncConnectionPresentation(); }
     function renderGlobal() { const waha = statusData?.waha || {}; $('wahaSummary').textContent = waha.running ? (waha.version ? '运行中 · ' + waha.version : '运行中') : '不可用'; $('dbSummary').textContent = statusData?.database?.ok ? '数据库正常' : '数据库异常'; $('servicePill').className = 'service-pill ' + (waha.running ? 'good' : ''); $('servicePill').innerHTML = `<span class="service-dot" aria-hidden="true"></span><span>${waha.running ? 'WAHA 运行中' : 'WAHA 不可用'}</span>`; $('globalNotice').textContent = statusData?.errors?.length ? statusData.errors.join('；') : ''; }
     function renderLogs(logs, errors) { const all = [...(errors || []).map(message => ({level:'ERROR',event:'当前检查',message,created_at:Date.now()/1000})), ...(logs || [])]; $('logs').innerHTML = all.length ? all.map(log => `<div class="log ${log.level === 'ERROR' ? 'error' : ''}"><div class="log-meta"><span>${esc(log.level)} / ${esc(log.event)}</span><span>${esc(formatTime(log.created_at))}</span></div><div class="log-message">${esc(log.message)}</div></div>`).join('') : '<div class="empty">暂无当前会话记录</div>'; }
     async function refreshLogs() { if (!selected) return; try { const response = await fetch(apiSession('/logs'), {cache:'no-store'}); const data = await response.json(); if (!response.ok) throw new Error(data.message || '读取记录失败'); renderLogs(data.logs, []); } catch (error) { $('logs').innerHTML = `<div class="empty">${esc(error.message)}</div>`; } }
-    function render(data) { statusData = data; const names = (data.sessions || []).map(item => item.name); if (!names.includes(selected)) setSelectedSession(data.selected_session || names[0] || 'default'); renderSessions(); renderDetail(); renderGlobal(); const item = currentItem(); renderLogs(data.logs, data.errors); if (item && data.auto_reply?.theme) applyTheme(data.auto_reply.theme); const url = new URL(location.href); url.searchParams.set('session', selected); history.replaceState(null,'',url); }
+    function render(data) { statusData = data; const names = (data.sessions || []).map(item => item.name); if (!names.includes(selected)) setSelectedSession(data.selected_session || names[0] || 'default'); renderSessions(); renderDetail(); renderGlobal(); renderOverviewMetrics(); const item = currentItem(); renderLogs(data.logs, data.errors); if (item && data.auto_reply?.theme) applyTheme(data.auto_reply.theme); const url = new URL(location.href); url.searchParams.set('session', selected); history.replaceState(null,'',url); }
     async function refresh() { try { const response = await fetch('/api/status?session=' + encodeURIComponent(selected), {cache:'no-store'}); const data = await response.json(); if (!response.ok) throw new Error(data.message || '读取状态失败'); render(data); } catch (error) { $('globalNotice').textContent = error.message; } }
+    function renderOverviewMetrics() {
+      const sessions = Array.isArray(statusData?.sessions) ? statusData.sessions : [];
+      $('sessionTotalMetric').textContent = String(sessions.length);
+      $('connectedTotalMetric').textContent = String(sessions.filter(item => ['WORKING','CONNECTED'].includes(item.state)).length);
+      const item = currentItem();
+      $('overviewUpdatedMetric').textContent = formatTime(item?.updated_at);
+      $('chatLink').href = item ? '/sessions/' + encodeURIComponent(item.name) + '/chats' : '#';
+      $('settingsLink').href = item ? '/settings?session=' + encodeURIComponent(item.name) : '#';
+      ['chatLink','settingsLink'].forEach(id => $(id).setAttribute('aria-disabled', String(!item)));
+    }
      function releaseQrObjectUrl(url = qrObjectUrl) { if (url) URL.revokeObjectURL(url); if (url === qrObjectUrl) qrObjectUrl = ''; }
      function setQrState(state, title, detail) { const wrap = $('qrWrap'); wrap.dataset.state = state; wrap.setAttribute('aria-busy', state === 'loading' ? 'true' : 'false'); $('qrFrosted').dataset.state = state; $('qrTitle').textContent = title; $('qrDetail').textContent = detail; if (state !== 'ready') { releaseQrObjectUrl(); $('qrImageLayer').replaceChildren(); } }
      async function revealQrImage(blob, ownsRequest) { const objectUrl = URL.createObjectURL(blob); const image = document.createElement('img'); image.alt = '当前 WhatsApp 会话二维码'; image.src = objectUrl; try { await image.decode(); } catch (error) { releaseQrObjectUrl(objectUrl); throw error; } if (!ownsRequest()) { releaseQrObjectUrl(objectUrl); return false; } releaseQrObjectUrl(); qrObjectUrl = objectUrl; $('qrImageLayer').replaceChildren(image); requestAnimationFrame(() => { if (ownsRequest()) setQrState('ready', '二维码已生成', '请使用手机 WhatsApp 扫描。'); }); return true; }
@@ -2831,7 +2853,7 @@ def multi_session_html_page():
     async function selectSession(name) { setSelectedSession(name); $('globalNotice').textContent = ''; $('logs').innerHTML = '<div class="empty">正在读取记录...</div>'; await refresh(); }
      async function operation(action) { const button = $(action + 'Button'); if (button) { button.disabled = true; } $('controlNotice').textContent = ''; try { const response = await mutateFetch(apiSession('/' + action), {method:'POST'}); const data = await response.json(); if (!response.ok) throw new Error(data.message || '会话操作失败'); $('controlNotice').className = 'notice success'; $('controlNotice').textContent = '操作已提交，状态正在更新。'; await refresh(); } catch (error) { $('controlNotice').className = 'notice'; $('controlNotice').textContent = error.message; } finally { renderDetail(); } }
      async function deleteSelected() { const item = currentItem(); if (!item || (statusData?.sessions || []).length <= 1) return; if (!window.confirm('确认删除会话“' + (item.display_name || item.name) + '”？这会同时删除 WAHA 会话和面板中的关联数据。')) return; const button = $('deleteButton'); button.disabled = true; $('controlNotice').textContent = ''; try { const response = await mutateFetch('/api/sessions/' + encodeURIComponent(item.name), {method:'DELETE'}); const data = await response.json(); if (!response.ok) throw new Error(data.message || '删除会话失败'); const remaining = (statusData?.sessions || []).filter(entry => entry.name !== item.name); setSelectedSession(remaining[0]?.name || 'default'); $('controlNotice').className = 'notice success'; $('controlNotice').textContent = '会话已删除。'; await refresh(); } catch (error) { $('controlNotice').className = 'notice'; $('controlNotice').textContent = error.message; } finally { renderDetail(); } }
-     async function loadQr() { const requestedSession = selected; const requestGeneration = ++qrRequestGeneration; const ownsRequest = () => selected === requestedSession && qrRequestGeneration === requestGeneration; setQrState('loading', '正在获取二维码', '请稍候，获取完成后会自动显示。'); $('qrButton').disabled = true; try { const response = await fetch('/api/sessions/' + encodeURIComponent(requestedSession) + '/qr?ts=' + Date.now(), {cache:'no-store'}); const type = response.headers.get('content-type') || ''; if (!response.ok || !type.startsWith('image/')) { const data = type.includes('json') ? await response.json() : {}; throw new Error(data.message || '二维码暂不可用'); } await revealQrImage(await response.blob(), ownsRequest); } catch (error) { if (ownsRequest()) setQrState('error', '二维码获取失败', error.message || '请启动会话，然后点击“刷新二维码”重试。'); } finally { if (ownsRequest()) $('qrButton').disabled = false; } }
+     async function loadQr() { const item = currentItem(); if (['WORKING','CONNECTED'].includes(item?.state)) { syncConnectionPresentation(); return; } const requestedSession = selected; const requestGeneration = ++qrRequestGeneration; const ownsRequest = () => selected === requestedSession && qrRequestGeneration === requestGeneration; setQrState('loading', '正在获取二维码', '请稍候，获取完成后会自动显示。'); $('qrButton').disabled = true; try { const response = await fetch('/api/sessions/' + encodeURIComponent(requestedSession) + '/qr?ts=' + Date.now(), {cache:'no-store'}); const type = response.headers.get('content-type') || ''; if (!response.ok || !type.startsWith('image/')) { const data = type.includes('json') ? await response.json() : {}; throw new Error(data.message || '二维码暂不可用'); } await revealQrImage(await response.blob(), ownsRequest); } catch (error) { if (ownsRequest()) setQrState('error', '二维码获取失败', error.message || '请启动会话，然后点击“刷新二维码”重试。'); } finally { if (ownsRequest()) $('qrButton').disabled = false; } }
      function makeElement(tag, className, text) { const node = document.createElement(tag); node.className = className || ''; node.textContent = text || ''; return node; }
      function setPairingState(state, data = {}) { const region = $('pairingCode'); region.dataset.state = state; region.hidden = state === 'idle'; region.setAttribute('aria-busy', state === 'loading' ? 'true' : 'false'); if (state === 'loading') region.replaceChildren(makeElement('span', 'pairing-wait', '正在请求配对码，请稍候')); if (state === 'ready') region.replaceChildren(makeElement('span', '', '请在手机 WhatsApp 中输入'), makeElement('strong', '', String(data.code || ''))); if (state === 'error') region.replaceChildren(makeElement('span', 'pairing-error', data.message || '配对码获取失败，请重试')); }
      async function requestPairingCode() { const response = await mutateFetch(apiSession('/pairing-code'), {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({phone_number:$('phoneNumber').value})}); const data = await response.json(); if (!response.ok) throw new Error(data.message || '配对码获取失败'); return data; }
@@ -2854,6 +2876,7 @@ def multi_session_html_page():
   </script>
 </body>
 </html>"""
+    page = page.replace("__VISUAL_STYLE__", SHARED_CSS + DASHBOARD_CSS).replace("__VISUAL_ICONS__", ICON_SPRITE)
     sponsor_slot, sponsor_dialog, sponsor_script = _sponsor_markup()
     return (
         page.replace("<!-- SPONSOR_SLOT -->", sponsor_slot)
@@ -2863,17 +2886,16 @@ def multi_session_html_page():
 
 
 def settings_page():
-    return """<!doctype html>
+    page = """<!doctype html>
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>自动回复设置 · WhatsAPP AI管理面板</title>
   <style>
-    :root { color-scheme:light; --ink:#17212b; --muted:#62707c; --paper:#f5f7f8; --surface:#fff; --surface-2:#f2f5f7; --line:#dce2e6; --blue:#175cd3; --blue-bg:#e9f0ff; --good:#147d55; --good-bg:#e5f5ed; --bad:#b42318; --bad-bg:#ffebe9; }
-    html[data-theme="night"] { color-scheme:dark; --ink:#edf5f7; --muted:#a8bac1; --paper:#10171c; --surface:#18232a; --surface-2:#223139; --line:#33464f; --blue:#62c8d4; --blue-bg:#19383e; --good:#62d7a0; --good-bg:#17382f; --bad:#ff9a91; --bad-bg:#472522; }
-    html[data-theme="paper"] { --ink:#302c27; --muted:#756b60; --paper:#f3eee6; --surface:#fffaf3; --surface-2:#f2e8da; --line:#d8c8b5; --blue:#a34a2d; --blue-bg:#f4e0d6; --good:#2f7658; --good-bg:#e3f0e7; --bad:#a64236; --bad-bg:#f5dfd9; }
-    * { box-sizing:border-box; } body { margin:0; min-width:320px; background:var(--paper); color:var(--ink); font:15px/1.5 "Segoe UI", system-ui, sans-serif; }
+    :root { color-scheme:light; --ink:#17212b; --muted:#62707c; --canvas:#f5f7f8; --surface:#fff; --surface-2:#f2f5f7; --line:#dce2e6; --blue:#175cd3; --blue-bg:#e9f0ff; --good:#147d55; --good-bg:#e5f5ed; --bad:#b42318; --bad-bg:#ffebe9; }
+    html[data-theme="night"] { color-scheme:dark; --ink:#edf5f7; --muted:#a8bac1; --canvas:#10171c; --surface:#18232a; --surface-2:#223139; --line:#33464f; --blue:#62c8d4; --blue-bg:#19383e; --good:#62d7a0; --good-bg:#17382f; --bad:#ff9a91; --bad-bg:#472522; }
+    * { box-sizing:border-box; } body { margin:0; min-width:320px; background:var(--canvas); color:var(--ink); font:15px/1.5 "Segoe UI", system-ui, sans-serif; }
     .shell { max-width:1180px; margin:auto; padding:28px 24px 48px; } header { display:flex; justify-content:space-between; align-items:flex-start; gap:20px; border-bottom:1px solid var(--line); padding-bottom:22px; } h1 { margin:0 0 5px; font-size:32px; line-height:1.15; } header p,.muted { color:var(--muted); margin:0; } .eyebrow { color:var(--blue); font:600 12px/1.2 ui-monospace, Consolas, monospace; } .header-actions { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
     .theme-control { display:flex; align-items:center; gap:8px; min-height:44px; color:var(--muted); font-weight:700; } .theme-control select { min-height:44px; border:1px solid var(--line); border-radius:7px; padding:0 28px 0 10px; color:var(--ink); background:var(--surface); font:inherit; }
     .nav-link { display:inline-flex; align-items:center; min-height:44px; border:1px solid var(--line); border-radius:7px; padding:0 14px; color:var(--ink); background:var(--surface); font-weight:700; text-decoration:none; } .nav-link:hover { background:var(--surface-2); border-color:var(--blue); }
@@ -2886,11 +2908,15 @@ def settings_page():
      @media (max-width:780px) { .shell { padding:20px 14px 36px; } header { display:block; } .header-actions { margin-top:16px; } .grid { grid-template-columns:1fr; } .day-row { grid-template-columns:58px 28px minmax(0,1fr) minmax(0,1fr); gap:6px; } }
      @media (max-width:420px) { .media-options { grid-template-columns:1fr; } }
     @media (prefers-reduced-motion:reduce) { *,*::before,*::after { transition-duration:.01ms!important; animation-duration:.01ms!important; } }
-  </style>
+
+
+    /* Bento visual system: automation settings — approved v2 */
+    __VISUAL_STYLE__
+</style>
 </head>
 <body>
   <div class="shell">
-    <header><div><div class="eyebrow">AUTOMATION SETTINGS</div><h1>WhatsAPP AI管理面板 · 自动回复设置</h1><p>回复时间按 Asia/Shanghai 计算。</p></div><div class="header-actions"><label class="theme-control" for="themeSelect"><span>主题</span><select id="themeSelect" aria-label="选择主题"><option value="daylight">白天</option><option value="night">夜间</option><option value="paper">纸张</option></select></label><a class="nav-link" id="backLink" href="/">返回状态面板</a></div></header>
+    <header><div><div class="eyebrow">自动化设置</div><h1>WhatsAPP AI管理面板 · 自动回复设置</h1><p>回复时间按 Asia/Shanghai 计算。</p></div><div class="header-actions"><label class="theme-control" for="themeSelect"><span>主题</span><select id="themeSelect" aria-label="选择主题"><option value="daylight">白天</option><option value="night">夜间</option></select></label><a class="nav-link" id="backLink" href="/">返回状态面板</a></div></header>
     <main>
       <form id="settingsForm" class="grid">
         <section>
@@ -2943,7 +2969,7 @@ def settings_page():
     function collectMediaTypes() { return Object.fromEntries(mediaTypeNames.map((name) => [name, $('autoReplyMedia_' + name).checked])); }
     function setChip(id, checked) { $(id).textContent = checked ? '已开启' : '已关闭'; $(id).className = 'status-chip' + (checked ? '' : ' off'); }
     function setEnabledState() { setChip('enabledState', $('enabled').checked); setChip('allDayState', $('allDay').checked); setChip('customerMemoryState', $('customerMemoryEnabled').checked); }
-    function applyTheme(theme) { const selected = ['daylight','night','paper'].includes(theme) ? theme : 'daylight'; document.documentElement.dataset.theme = selected; $('themeSelect').value = selected; localStorage.setItem('waha-panel-theme', selected); }
+    function applyTheme(theme) { const selected = ['daylight','night'].includes(theme) ? theme : 'daylight'; document.documentElement.dataset.theme = selected; $('themeSelect').value = selected; localStorage.setItem('waha-panel-theme', selected); }
     async function ensureCsrf() { if (csrfToken) return csrfToken; const response = await fetch('/api/security/csrf', {cache:'no-store', credentials:'same-origin'}); const data = await response.json(); if (!response.ok) throw new Error(data.message || '安全校验不可用'); csrfToken = data.csrf_token || ''; return csrfToken; }
     async function mutateFetch(url, options={}) { const headers = new Headers(options.headers || {}); try { await ensureCsrf(); } catch (_) {} if (csrfToken) headers.set('X-CSRF-Token', csrfToken); return fetch(url, {...options, headers, credentials:'same-origin', cache:'no-store'}); }
     async function saveTheme(theme) { applyTheme(theme); try { const response = await mutateFetch('/api/settings' + sessionQuery, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({theme})}); if (!response.ok) { const data = await response.json(); throw new Error(data.message || '主题保存失败'); } } catch (error) { $('settingsNotice').textContent = error.message; } }
@@ -2959,6 +2985,8 @@ def settings_page():
   </script>
 </body>
 </html>"""
+
+    return page.replace("__VISUAL_STYLE__", SHARED_CSS + SETTINGS_CSS)
 
 
 class PanelHandler(BaseHTTPRequestHandler):
