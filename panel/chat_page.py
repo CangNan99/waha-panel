@@ -1,6 +1,11 @@
 import html
 import re
 
+try:
+    from .visual_theme import ICON_SPRITE, SHARED_CSS, CHAT_CSS
+except ImportError:
+    from visual_theme import ICON_SPRITE, SHARED_CSS, CHAT_CSS
+
 
 SESSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
@@ -42,33 +47,23 @@ def chat_management_page(session_name):
     .message-time{display:flex;align-items:center;gap:6px;margin-top:5px;color:var(--muted);font-size:12px}
     .breathing-toggle{--breathe-color:var(--muted);animation-duration:4s}.breathing-toggle.active{--breathe-color:var(--accent);animation-duration:2.8s}.state-pill.breathing-toggle{--breathe-color:var(--good)}.state-pill.human,.breathing-toggle#resumeButton{--breathe-color:var(--warn);color:var(--warn);background:var(--warn-soft);border-color:color-mix(in srgb,var(--warn) 45%,var(--line))}
     @keyframes toggle-breathe{0%,100%{box-shadow:0 0 0 0 color-mix(in srgb,var(--breathe-color) 0%,transparent)}50%{box-shadow:0 0 0 4px color-mix(in srgb,var(--breathe-color) 12%,transparent)}}
-
-
-    /* Bento visual system: chat workspace */
-    :root{color-scheme:light;--bg:#F4F7F5;--surface:#FFFFFF;--solid:#FFFFFF;--soft:#EDF2EF;--soft-2:#E2F3EB;--line:#D9E3DD;--ink:#192D24;--muted:#5F7168;--accent:#146C54;--accent-soft:#E2F3EB;--good:#216E4E;--good-soft:#E6F4EC;--warn:#925400;--warn-soft:#FFF4DB;--bad:#B42318;--bad-soft:#FFF0EE;--info:#2255A4;--bubble-in:#FFFFFF;--bubble-out:#E2F3EB;--shadow:0 1px 2px rgba(25,45,36,.04);--focus:0 0 0 3px rgba(34,85,164,.24)}
-    html[data-theme="night"]{color-scheme:dark;--bg:#17251F;--surface:#203129;--solid:#203129;--soft:#1B2D25;--soft-2:#213F32;--line:#3C5548;--ink:#F0F6F2;--muted:#9AAEA0;--accent:#79D5AB;--accent-soft:#213F32;--good:#8BDCAB;--good-soft:#203C2D;--warn:#F0CC86;--warn-soft:#3B3120;--bad:#FFB4AB;--bad-soft:#462823;--info:#ACC7FF;--bubble-in:#263D33;--bubble-out:#213F32;--shadow:0 1px 2px rgba(0,0,0,.18);--focus:0 0 0 3px rgba(172,199,255,.3)}
-    html,body{background:var(--bg);color:var(--ink);font:14px/1.5 Inter,"Noto Sans SC","PingFang SC","Microsoft YaHei",system-ui,sans-serif}
-    button,a,input,textarea,select{outline:none}button:focus-visible,a:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-visible{box-shadow:var(--focus);border-color:var(--focus)!important}
-    button{border-radius:10px;border-color:var(--line);background:var(--solid);color:var(--ink);transition:background .18s,border-color .18s,color .18s,transform .18s,opacity .18s}button:hover{background:var(--soft);border-color:var(--accent)}.primary{background:var(--accent);border-color:var(--accent);color:var(--bg)}.primary:hover{background:var(--accent-strong,#0E5A44);border-color:transparent}
-    .app{background:var(--bg)}.topbar{min-height:68px;padding:12px clamp(14px,3vw,32px);background:color-mix(in srgb,var(--bg) 90%,transparent);border-color:var(--line);backdrop-filter:blur(16px)}.brand-mark{width:36px;height:36px;border-radius:11px;background:var(--ink);color:var(--bg)}.brand-title{font-size:16px;letter-spacing:-.02em}.brand-subtitle{color:var(--muted)}.top-actions{gap:7px}.top-status{min-height:32px;padding:0 9px;background:var(--soft);border-color:var(--line);color:var(--muted)}.top-status.good{background:var(--good-soft);color:var(--good)}.top-status.warn{background:var(--warn-soft);color:var(--warn)}.top-status.bad{background:var(--bad-soft);color:var(--bad)}.theme-select,.nav-link{min-height:40px;border-radius:10px;border-color:var(--line);background:var(--solid);color:var(--ink)}.theme-select:hover,.nav-link:hover{background:var(--soft);border-color:var(--accent)}
-    .workspace{grid-template-columns:288px minmax(0,1fr);gap:16px;padding:16px;max-width:1440px;margin:0 auto}.pane{border:1px solid var(--line);border-radius:18px;box-shadow:var(--shadow);background:var(--surface)}.chat-pane{min-width:0}.pane-head{padding:18px 18px 12px}.pane-title{font-size:20px;letter-spacing:-.03em}.count{background:var(--soft);color:var(--muted)}.search input{background:var(--soft);border-color:transparent;color:var(--ink)}.chat-filters{padding-bottom:12px}.filter-button.active{background:var(--accent-soft);border-color:color-mix(in srgb,var(--accent) 34%,var(--line));color:var(--accent)}.chat-item{min-height:82px;border-radius:12px}.chat-item:hover{background:var(--soft)}.chat-item.active{background:var(--accent-soft)}.avatar{background:var(--soft-2);border-color:var(--line);color:var(--accent)}.chat-id,.chat-preview,.chat-meta{color:var(--muted)}
-    .conversation-head{min-height:74px;padding:12px 18px;border-color:var(--line);background:var(--surface)}.conversation-name{font-size:16px}.conversation-meta{color:var(--muted)}.state-pill{background:var(--good-soft);color:var(--good)}.state-pill.human{background:var(--warn-soft);color:var(--warn)}.breathing-toggle{animation:toggle-breathe 2.8s ease-in-out infinite}.breathing-toggle.active{background:var(--accent-soft);color:var(--accent);border-color:color-mix(in srgb,var(--accent) 55%,var(--line))}
-    .message-area{background:var(--bg);padding:24px clamp(16px,4vw,64px)}.message-stack{max-width:920px;gap:16px}.bubble{max-width:min(72%,760px);border-radius:16px 16px 16px 6px;padding:11px 13px;background:var(--bubble-in);border-color:var(--line);box-shadow:none}.out .bubble{border-radius:16px 16px 6px 16px;background:var(--bubble-out);border-color:color-mix(in srgb,var(--accent) 20%,var(--line))}.message-time{color:var(--muted);font-size:11px}.message-translation{color:var(--info);border-color:var(--line)}.message-translation.pending{color:var(--muted)}.assistant-card{border-radius:14px;background:var(--surface);border-color:color-mix(in srgb,var(--accent) 34%,var(--line));box-shadow:none}.assistant-kicker{color:var(--accent)}.assistant-card textarea,.assistant-card select{background:var(--soft);border-color:var(--line)}.empty-state strong,.error-state strong{color:var(--ink)}
-    .composer-wrap{padding:12px 16px calc(12px + env(safe-area-inset-bottom));background:var(--surface);border-color:var(--line);backdrop-filter:blur(16px)}.composer{max-width:920px}.composer textarea{background:var(--soft);border-color:var(--line)}.compose-assist-button{background:var(--accent-soft);color:var(--accent);border-color:color-mix(in srgb,var(--accent) 30%,var(--line))}.composer-note{color:var(--muted)}.composer-note.error{color:var(--bad)}.image-preview{background:var(--soft);border-color:var(--line)}
-    dialog{border-color:var(--line);border-radius:18px;background:var(--surface);color:var(--ink);box-shadow:0 20px 70px rgba(25,45,36,.2)}dialog::backdrop{background:rgba(25,45,36,.32);backdrop-filter:blur(4px)}.field input,.field textarea,.field select{background:var(--surface);border-color:var(--line);color:var(--ink)}
-    @media(max-width:1100px){.workspace{grid-template-columns:248px minmax(0,1fr)}}
-    @media(max-width:820px){.workspace{padding:0;max-width:none}.pane{border:0;border-radius:0;box-shadow:none}.topbar{padding:10px 13px}.message-area{padding:18px 14px}.bubble{max-width:88%}.composer-wrap{padding-left:10px;padding-right:10px}.composer{max-width:none}.conversation-head{padding:10px 12px}}
-    @media(max-width:420px){.top-actions .nav-link,.top-actions button,.theme-select{padding-left:9px;padding-right:9px}.message-area{padding:16px 12px}.conversation-name{max-width:150px}.bubble{max-width:92%}}
-    @media(prefers-reduced-motion:reduce){.breathing-toggle{animation:none}.loading-spinner,.skeleton-bubble{animation:none!important}*,*::before,*::after{transition-duration:.01ms!important;animation-duration:.01ms!important}}
+    /* Bento visual system: chat workspace — approved v2 */
+    __VISUAL_STYLE__
 </style>
 </head>
 <body data-session="__SESSION__">
-<div class="app" id="app">
-  <header class="topbar">
-    <div class="brand"><div class="brand-mark" aria-hidden="true"><svg class="icon" viewBox="0 0 24 24"><path d="M8 9h8M8 13h5"/><path d="M21 12a8.8 8.8 0 0 1-9 9 9.7 9.7 0 0 1-4-.9L3 21l1.2-4A9 9 0 1 1 21 12Z"/></svg></div><div class="brand-copy"><div class="brand-title">WhatsAPP AI管理面板</div><div class="brand-subtitle" id="sessionLabel">WAHA / __SESSION__</div></div></div>
-    <div class="top-actions"><div class="status-group" aria-live="polite"><span class="top-status" id="sessionStatus"><span class="status-dot"></span><span class="status-label">检查会话</span></span><span class="top-status" id="realtimeStatus"><span class="status-dot"></span><span class="status-label">实时更新连接中</span></span><span class="top-status" id="translationServiceStatus"><span class="status-dot"></span><span class="status-label">翻译未配置</span></span></div><label class="sr-only" for="sessionSelect">切换 WhatsApp 会话</label><select class="theme-select" id="sessionSelect" aria-label="切换 WhatsApp 会话"><option value="">读取会话…</option></select><select class="theme-select" id="themeSelect" aria-label="选择界面主题"><option value="daylight">白天</option><option value="night">夜间</option></select><button type="button" id="translationSettingsButton" aria-label="阿里云机器翻译设置"><svg class="icon" viewBox="0 0 24 24"><path d="m5 8 6 6M4 14l6-7 2-3M2 5h12M7 2v3M22 22l-5-10-5 10M14 18h6"/></svg><span class="settings-label">翻译设置</span></button><a class="nav-link" href="/" aria-label="返回多会话面板"><svg class="icon" viewBox="0 0 24 24"><path d="m15 18-6-6 6-6"/></svg><span>多会话面板</span></a></div>
-  </header>
-  <main class="workspace">
+__VISUAL_ICONS__
+<div class="app window" id="app" data-view="chat">
+  <aside class="topbar app-navigation" aria-label="主导航">
+    <div class="brand side-brand"><div class="brand-mark" aria-hidden="true"><svg class="icon" viewBox="0 0 24 24"><path d="M8 9h8M8 13h5"/><path d="M21 12a8.8 8.8 0 0 1-9 9 9.7 9.7 0 0 1-4-.9L3 21l1.2-4A9 9 0 1 1 21 12Z"/></svg></div><div class="brand-copy"><div class="brand-title">WhatsAPP AI管理面板</div><div class="brand-subtitle" id="sessionLabel">WAHA / __SESSION__</div></div></div>
+    <nav class="navigation"><a class="nav-item" href="/"  aria-label="工作台" title="工作台"><svg class="icon" aria-hidden="true"><use href="#ui-home"/></svg><span class="nav-label">工作台</span></a><a class="nav-item active" href="/sessions/__SESSION__/chats" aria-current="page" aria-label="聊天" title="聊天"><svg class="icon" aria-hidden="true"><use href="#ui-chat"/></svg><span class="nav-label">聊天</span><span class="nav-count" id="navChatCount">0</span></a><a class="nav-item" href="#chatListTitle"  aria-label="客户" title="客户"><svg class="icon" aria-hidden="true"><use href="#ui-users"/></svg><span class="nav-label">客户</span></a><a class="nav-item" href="/settings?session=__SESSION__"  aria-label="自动回复" title="自动回复"><svg class="icon" aria-hidden="true"><use href="#ui-bolt"/></svg><span class="nav-label">自动回复</span></a><button class="nav-item sidebar-button" type="button" data-inspector-action="openAssistantSettings" aria-label="AI 设置" title="AI 设置"><svg class="icon" aria-hidden="true"><use href="#ui-settings"/></svg><span class="nav-label">AI 设置</span></button><a class="nav-item" href="/settings?session=__SESSION__"  aria-label="系统设置" title="系统设置"><svg class="icon" aria-hidden="true"><use href="#ui-settings"/></svg><span class="nav-label">系统设置</span></a></nav>
+    <div class="side-bottom">
+      <div class="sidebar-status-card"><div class="status-group" aria-live="polite"><span class="top-status" id="sessionStatus"><span class="status-dot"></span><span class="status-label">检查会话</span></span><span class="top-status" id="realtimeStatus"><span class="status-dot"></span><span class="status-label">实时更新连接中</span></span><span class="top-status" id="translationServiceStatus"><span class="status-dot"></span><span class="status-label">翻译未配置</span></span></div></div>
+      <div class="sidebar-controls"><label class="sr-only" for="sessionSelect">切换 WhatsApp 会话</label><select class="theme-select" id="sessionSelect" aria-label="切换 WhatsApp 会话"><option value="">读取会话…</option></select><select class="theme-select" id="themeSelect" aria-label="选择界面主题"><option value="daylight">白天</option><option value="night">夜间</option></select></div>
+      <div class="sidebar-tools"><button type="button" id="translationSettingsButton" aria-label="阿里云机器翻译设置"><svg class="icon" viewBox="0 0 24 24"><path d="m5 8 6 6M4 14l6-7 2-3M2 5h12M7 2v3M22 22l-5-10-5 10M14 18h6"/></svg><span class="settings-label">翻译设置</span></button><a href="/" aria-label="返回多会话面板"><svg class="icon" aria-hidden="true"><use href="#ui-back"/></svg><span>多会话面板</span></a></div>
+    </div>
+  </aside>
+  <main class="workspace chat-grid">
     <section class="pane chat-pane mobile-view-layer" aria-labelledby="chatListTitle"><div class="pane-head"><div class="pane-title-row"><h1 class="pane-title" id="chatListTitle">最近聊天</h1><span class="count" id="chatCount">0</span></div></div><label class="search"><span class="sr-only">搜索聊天</span><svg class="icon" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.8-3.8"/></svg><input id="chatSearch" type="search" placeholder="搜索姓名、号码或消息" autocomplete="off"></label><div class="chat-filters" aria-label="聊天筛选"><button class="filter-button active" id="allFilter" type="button" aria-pressed="true">全部</button><button class="filter-button" id="unreadFilter" type="button" aria-pressed="false">只看未读</button></div><div class="chat-list" id="chatList"><div class="loading-line">正在读取聊天…</div></div></section>
      <section class="pane conversation-pane mobile-view-layer" aria-label="聊天详情">
        <header class="conversation-head">
@@ -81,7 +76,7 @@ def chat_management_page(session_name):
              <div class="chat-labels" id="conversationLabels" aria-label="客户标签"></div>
            </div>
          </div>
-         <div class="conversation-primary-actions">
+         <div class="conversation-tools"><div class="conversation-primary-actions">
            <span class="state-pill" id="takeoverPill"><span class="state-dot"></span><span>AI 可回复</span></span>
            <button class="breathing-toggle" id="translationToggle" type="button" aria-pressed="false" disabled>全局翻译：关闭</button>
            <button class="breathing-toggle" id="takeoverButton" type="button" aria-pressed="false">人工接管：关闭</button>
@@ -89,17 +84,14 @@ def chat_management_page(session_name):
          </div>
          <div class="conversation-more-actions">
            <button class="icon-button" id="moreButton" type="button" aria-haspopup="dialog" aria-label="更多客户操作" title="更多客户操作"><svg class="icon" aria-hidden="true" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></svg></button>
-           <div class="desktop-secondary-actions">
-             <button id="noteButton" type="button">客户备注</button>
-             <button id="labelButton" type="button">标签</button>
-             <button id="summaryButton" type="button">当前总结</button>
-             <button id="followUpButton" type="button">跟进</button>
-           </div>
+
+         </div>
          </div>
        </header>
        <dialog id="conversationMoreDialog" aria-labelledby="conversationMoreTitle">
          <div class="dialog-body" tabindex="-1">
-           <div class="dialog-head"><div class="dialog-title" id="conversationMoreTitle">客户操作</div></div>
+           <div class="dialog-head"><div class="dialog-title" id="conversationMoreTitle">客户信息与操作</div></div>
+           <div class="customer-mobile-info"><div class="inspector-name" data-customer-field="name">请选择聊天</div><div class="inspector-identifier" data-customer-field="identifier">—</div><dl class="inspector-grid"><div class="inspector-row"><dt>类型</dt><dd data-customer-field="kind">—</dd></div><div class="inspector-row"><dt>回复模式</dt><dd data-customer-field="reply">—</dd></div><div class="inspector-row"><dt>翻译</dt><dd data-customer-field="translation">—</dd></div></dl><div class="inspector-labels" data-customer-labels>暂无标签</div><div class="inspector-note" data-customer-field="note">暂无备注</div></div>
            <button type="button" data-mobile-action="note">客户备注</button>
            <button type="button" data-mobile-action="labels">标签</button>
            <button type="button" data-mobile-action="summary">当前总结</button>
@@ -107,10 +99,24 @@ def chat_management_page(session_name):
            <button type="button" id="closeConversationMore">关闭</button>
          </div>
        </dialog>
-      <div class="message-area" id="messageArea" aria-busy="false"><div class="message-loading" id="messageLoading" hidden role="status" aria-live="polite"><span class="loading-spinner" aria-hidden="true"></span><span>正在更新消息…</span></div><button class="primary" id="latestMessageButton" type="button" hidden aria-label="回到最新消息" style="position:absolute;right:18px;bottom:18px;z-index:12;min-height:38px;border-radius:999px">有新消息 · 回到最新</button><div class="message-stack" id="messageStack"><div class="empty-state"><div><strong>选择一个聊天</strong>查看历史消息、翻译并生成可编辑回复建议。</div></div></div></div>
+      <div class="message-area" id="messageArea" aria-busy="false"><svg class="chat-wallpaper" aria-hidden="true" focusable="false"><rect width="100%" height="100%" fill="url(#ui-chat-wallpaper)"/></svg><div class="message-loading" id="messageLoading" hidden role="status" aria-live="polite"><span class="loading-spinner" aria-hidden="true"></span><span>正在更新消息…</span></div><button class="primary" id="latestMessageButton" type="button" hidden aria-label="回到最新消息" style="position:absolute;right:18px;bottom:18px;z-index:12;min-height:38px;border-radius:999px">有新消息 · 回到最新</button><div class="message-stack" id="messageStack"><div class="empty-state"><div><strong>选择一个聊天</strong>查看历史消息、翻译并生成可编辑回复建议。</div></div></div></div>
       <footer class="composer-wrap"><div class="composer"><div class="image-preview" id="imagePreview" hidden><img id="previewImage" alt="待发送图片预览"><div class="image-preview-copy"><div class="image-preview-name" id="previewName"></div><div class="image-preview-note">输入框文字将作为图片说明发送</div></div><button class="icon-button danger" id="removeImage" type="button" aria-label="移除图片"><svg class="icon" viewBox="0 0 24 24"><path d="M3 6h18M8 6V4h8v2M19 6l-1 15H6L5 6M10 11v6M14 11v6"/></svg></button></div><div class="compose-assist-bar" id="composeAssistBar" hidden role="status" aria-live="polite"><span class="compose-assist-label" id="composeAssistLabel"></span><button id="restoreDraftButton" type="button">恢复中文原稿</button></div><div class="composer-row"><label class="icon-button" for="imageInput" role="button" tabindex="0" aria-label="选择图片"><svg class="icon" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="9" cy="10" r="2"/><path d="m21 15-4-4L5 20"/></svg></label><input id="imageInput" type="file" accept="image/jpeg,image/png,image/webp" hidden><textarea id="composerInput" rows="1" maxlength="65535" placeholder="输入人工回复…" aria-label="人工回复输入框；Enter 发送，Shift+Enter 换行" disabled></textarea><button class="compose-assist-button" id="composeAssistButton" type="button" aria-label="优化并翻译当前中文草稿" disabled><svg class="icon" aria-hidden="true" viewBox="0 0 24 24"><path d="m12 3 1.3 4.2L17 9l-3.7 1.8L12 15l-1.3-4.2L7 9l3.7-1.8Z"/><path d="m19 15 .7 2.3L22 18l-2.3.7L19 21l-.7-2.3L16 18l2.3-.7Z"/></svg><span class="assist-label">优化并翻译</span></button><button class="primary send-button" id="sendButton" type="button" aria-label="发送消息" disabled><svg class="icon" viewBox="0 0 24 24"><path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/></svg></button></div><div class="composer-note" id="composerNotice" role="status" aria-live="polite">选择聊天后可发送；也可以先输入中文，再优化并翻译为客户语言。</div></div></footer>
     </section>
-  </main>
+  <aside class="customer-inspector" id="customerInspector" aria-label="客户信息">
+    <section class="customer-profile">
+      <button type="button" class="profile-more" data-inspector-action="moreButton" aria-label="更多客户资料"><svg class="icon" aria-hidden="true"><use href="#ui-more"/></svg></button>
+      <div class="profile-identity"><div class="avatar inspector-avatar" id="inspectorAvatar" aria-hidden="true">—</div><div style="min-width:0"><div class="inspector-name" data-customer-field="name">请选择聊天</div><div class="inspector-identifier" data-customer-field="identifier">从左侧列表选择客户</div></div></div>
+      <div class="profile-actions"><div class="profile-action"><button type="button" data-inspector-action="noteButton" aria-label="打开客户备注"><svg class="icon" aria-hidden="true"><use href="#ui-note"/></svg></button>备注</div><div class="profile-action"><button type="button" data-inspector-action="labelButton" aria-label="打开客户标签"><svg class="icon" aria-hidden="true"><use href="#ui-tag"/></svg></button>标签</div><div class="profile-action"><button type="button" data-inspector-action="summaryButton" aria-label="打开客户总结"><svg class="icon" aria-hidden="true"><use href="#ui-file"/></svg></button>总结</div><div class="profile-action"><button type="button" data-inspector-action="followUpButton" aria-label="打开客户跟进"><svg class="icon" aria-hidden="true"><use href="#ui-clock"/></svg></button>跟进</div></div>
+    </section>
+    <section class="rail-card"><h2 class="rail-title">客户信息</h2><dl class="customer-data"><dt>标识</dt><dd data-customer-field="identifier">—</dd><dt>类型</dt><dd data-customer-field="kind">—</dd><dt>来源</dt><dd>WhatsApp</dd><dt>标签</dt><dd class="tag-line"><div class="inspector-labels" data-customer-labels>暂无标签</div></dd></dl><div class="inspector-note" data-customer-field="note">暂无备注</div></section>
+    <section class="rail-card"><h2 class="rail-title">快捷操作</h2><div class="inspector-actions desktop-secondary-actions"><button type="button" id="noteButton"><svg class="icon" aria-hidden="true"><use href="#ui-note"/></svg>客户备注</button><button type="button" id="labelButton"><svg class="icon" aria-hidden="true"><use href="#ui-tag"/></svg>客户标签</button><button type="button" id="summaryButton"><svg class="icon" aria-hidden="true"><use href="#ui-file"/></svg>当前总结</button><button type="button" id="followUpButton"><svg class="icon" aria-hidden="true"><use href="#ui-clock"/></svg>跟进任务</button></div></section>
+    <section class="rail-card"><h2 class="rail-title">AI 助手</h2>
+      <button class="assistant-row" type="button" data-inspector-action="replyMode"><svg class="icon" aria-hidden="true"><use href="#ui-robot"/></svg><span>回复模式</span><strong data-customer-field="reply">—</strong><svg class="icon" aria-hidden="true"><use href="#ui-chevron"/></svg></button>
+      <button class="assistant-row" type="button" data-inspector-action="translationToggle"><svg class="icon" aria-hidden="true"><use href="#ui-translate"/></svg><span>全局翻译</span><strong data-customer-field="translation">—</strong><svg class="icon" aria-hidden="true"><use href="#ui-chevron"/></svg></button>
+      <button class="assistant-row" type="button" data-inspector-action="summaryButton"><svg class="icon" aria-hidden="true"><use href="#ui-file"/></svg><span>当前总结</span><svg class="icon" aria-hidden="true"><use href="#ui-chevron"/></svg></button>
+    </section>
+  </aside>
+</main>
 </div>
 
 <dialog id="aliyunTranslationDialog" aria-labelledby="aliyunTranslationTitle"><form class="dialog-body" id="aliyunTranslationForm"><div class="dialog-head"><div><div class="dialog-title" id="aliyunTranslationTitle">阿里云机器翻译</div><div class="dialog-note">全局翻译按客户独立开启，默认关闭。开启后仅翻译当前打开聊天中的非中文内容，包含客户、AI 和人工回复。</div></div><button class="icon-button" id="closeAliyunTranslationDialog" type="button" aria-label="关闭">×</button></div><div class="field"><label for="aliyunTranslationEndpoint">Endpoint</label><input id="aliyunTranslationEndpoint" required value="mt.cn-hangzhou.aliyuncs.com"></div><div class="field"><label for="aliyunTranslationRegion">地域</label><input id="aliyunTranslationRegion" required value="cn-hangzhou"></div><div class="field"><label for="aliyunAccessKeyId">AccessKey ID</label><input id="aliyunAccessKeyId" type="password" autocomplete="new-password" placeholder="留空表示保持当前凭据"></div><div class="field"><label for="aliyunAccessKeySecret">AccessKey Secret</label><input id="aliyunAccessKeySecret" type="password" autocomplete="new-password" placeholder="留空表示保持当前凭据"></div><div class="field"><label class="check"><input id="clearAliyunCredentials" type="checkbox">清除已保存的凭据</label></div><div class="dialog-note">聊天中以客户原文或客服原文 + 中文翻译双行显示。仅当前聊天加载的文本会发送给阿里云机器翻译服务。</div><div class="form-status" id="aliyunTranslationStatus" role="status" aria-live="polite"></div><div class="dialog-actions"><button id="openAssistantSettings" type="button">销售辅助 AI 设置</button><button id="clearAliyunTranslationCache" type="button">清空译文缓存</button><button id="testAliyunTranslation" type="button">测试连接</button><button class="primary" id="saveAliyunTranslation" type="submit">保存设置</button></div></form></dialog>
@@ -161,7 +167,7 @@ def chat_management_page(session_name):
       if(append){const merged=new Map(state.chats.map(item=>[item.chat_ref,item]));for(const item of incoming)merged.set(item.chat_ref,item);state.chats=Array.from(merged.values())}else state.chats=incoming;
       state.chatOffset=Number(data.next_offset??(state.chatOffset+incoming.length));
       state.chatHasMore=Boolean(data.has_more);
-      $('chatCount').textContent=String(state.chats.length);
+      $('chatCount').textContent=String(state.chats.length);$('navChatCount').textContent=String(state.chats.length);
       renderChats(Boolean(options.resetScroll));
       const wanted=new URLSearchParams(location.search).get('chat');
       let target=state.chats.find(item=>item.chat_ref===wanted)||(state.selected&&state.chats.find(item=>item.display_id===state.selected.display_id));
@@ -174,7 +180,15 @@ def chat_management_page(session_name):
   function setActiveChat(chatRef){document.querySelectorAll('#chatList .chat-item').forEach(button=>{const active=button.dataset.ref===chatRef;button.classList.toggle('active',active);if(active)button.setAttribute('aria-current','true');else button.removeAttribute('aria-current')})}
   function displayName(item){return item && (item.note || item.name || item.display_id) || '未知客户'}
    function renderLabelChips(item){const row=element('div','chat-labels');const labels=Array.isArray(item?.labels)?item.labels.slice(0, 4):[];for(const entry of labels){const source=entry?.source==='manual'?'manual':'ai';row.append(element('span','chat-label '+source,entry?.label||''))}const overflow=Math.max(0,Number(item?.label_overflow)||0);if(overflow)row.append(element('span','chat-label overflow','+'+overflow));return row}
-  function renderConversationIdentity(item){if(!item)return;$('conversationName').textContent=displayName(item);$('conversationMeta').textContent=item.note?'备注：'+item.note:item.display_id;const labels=$('conversationLabels');labels.replaceChildren();const compact=renderLabelChips(item);for(const child of [...compact.children])labels.append(child);setAvatar($('conversationAvatar'),item)}
+  function renderCustomerDetails(item){
+    const values={name:item?displayName(item):'请选择聊天',identifier:item?(item.display_id||'安全引用'):'从左侧列表选择客户',kind:item?(item.is_group?'群聊':'客户'):'—',reply:!item?'—':!state.connected?'会话未连接':item.takeover_state==='HUMAN_TAKEOVER'?'人工接管中':'AI 可回复',translation:item?(translationIsEnabled()?'已开启':'已关闭'):'—',note:item?(item.note||'暂无备注'):'暂无备注'};
+    document.querySelectorAll('[data-customer-field]').forEach(node=>{node.textContent=values[node.dataset.customerField]??'—'});
+    document.querySelectorAll('[data-customer-labels]').forEach(node=>{node.replaceChildren();const chips=renderLabelChips(item);if(chips.childElementCount)node.append(...chips.children);else node.textContent='暂无标签'});
+    setAvatar($('inspectorAvatar'),item||{});$('customerInspector').dataset.empty=String(!item);
+    ['noteButton','labelButton','summaryButton','followUpButton'].forEach(id=>{$(id).disabled=!item});
+    document.querySelectorAll('[data-inspector-action]').forEach(button=>{button.disabled=!item&&button.dataset.inspectorAction!=='openAssistantSettings'});
+  }
+  function renderConversationIdentity(item){if(!item){renderCustomerDetails(null);return}$('conversationName').textContent=displayName(item);$('conversationMeta').textContent=item.note?'备注：'+item.note:item.display_id;const labels=$('conversationLabels');labels.replaceChildren();const compact=renderLabelChips(item);for(const child of [...compact.children])labels.append(child);setAvatar($('conversationAvatar'),item);renderCustomerDetails(item)}
    function syncCompactLabels(){if(!state.selected)return;const all=[...(state.labels.manual||[]).map(item=>({id:item.id,source:'manual',label:item.label})),...(state.labels.ai||[]).map(item=>({id:item.id,source:'ai',label:item.label}))];syncSelectedMetadata({labels:all.slice(0, 4),label_overflow:Math.max(0,all.length-4)})}
   function updateChatButton(button,item){const active=state.selected?.chat_ref===item.chat_ref;button.className='chat-item'+(active?' active':'');button.type='button';button.dataset.ref=item.chat_ref;button.setAttribute('aria-label','打开与 '+displayName(item)+' 的聊天');if(active)button.setAttribute('aria-current','true');else button.removeAttribute('aria-current');const avatar=button.querySelector('.avatar')||element('div','avatar');setAvatar(avatar,item);const main=element('div','chat-main');const nameLine=element('div','chat-name-line');nameLine.append(element('div','chat-name',displayName(item)));if(item.is_group)nameLine.append(element('span','kind-pill','群聊'));if(item.takeover_state==='HUMAN_TAKEOVER')nameLine.append(element('span','takeover-dot'));const secondary=(Array.isArray(item.labels)&&item.labels.length)||item.label_overflow?renderLabelChips(item):element('div','chat-id',item.display_id);main.append(nameLine,secondary,element('div','chat-preview',item.last_message||'暂无文字消息'));const meta=element('div','chat-meta');meta.append(element('span','',formatTime(item.timestamp)));if(item.unread_count)meta.append(element('span','unread',item.unread_count));button.replaceChildren(avatar,main,meta);button.onclick=()=>selectChat(item,true);return button}
   function setMobileView(view){
@@ -221,6 +235,7 @@ def chat_management_page(session_name):
     $('takeoverPill').className='state-pill breathing-toggle'+(human?' human':'');$('takeoverPill').lastElementChild.textContent=human?'人工接管中':'AI 可回复';
     $('takeoverButton').hidden=human;$('resumeButton').hidden=!human;
     $('takeoverButton').setAttribute('aria-pressed','false');$('resumeButton').setAttribute('aria-pressed','true');
+    renderCustomerDetails(state.selected);
   }
   function setMessageLoading(active,initial=false){const area=$('messageArea');area.setAttribute('aria-busy',String(Boolean(active)));$('messageLoading').hidden=!active;if(active)$('messageLoading').lastElementChild.textContent=initial?'正在读取消息…':'正在更新消息…'}
   function setMessageScrollTop(value){ensureMessageScrollTracking();const area=$('messageArea');messageScrollProgrammatic=true;area.scrollTop=value;requestAnimationFrame(()=>{messageScrollProgrammatic=false})}
@@ -347,7 +362,7 @@ def chat_management_page(session_name):
   }
   function isCurrentChatVisible(){return Boolean(state.selected&&!document.hidden&&(!matchMedia('(max-width:820px)').matches||$('app').classList.contains('has-chat')))}
   function translationIsEnabled(){return state.translationEnabledByChat.get(state.selected?.chat_ref)===true}
-  function setTranslationToggle(){const enabled=translationIsEnabled();const button=$('translationToggle');button.disabled=!state.selected;button.classList.toggle('active',enabled);button.setAttribute('aria-pressed',String(enabled));button.textContent='全局翻译：'+(enabled?'开启':'关闭')}
+  function setTranslationToggle(){const enabled=translationIsEnabled();const button=$('translationToggle');button.disabled=!state.selected;button.classList.toggle('active',enabled);button.setAttribute('aria-pressed',String(enabled));button.textContent='全局翻译：'+(enabled?'开启':'关闭');renderCustomerDetails(state.selected)}
   function stopMachineTranslation(){state.translationRequestId++;state.translationAbort?.abort();state.translationAbort=null}
   function toggleTranslation(){
     if(!state.selected)return;
@@ -437,9 +452,11 @@ def chat_management_page(session_name):
    $('openAssistantSettings').addEventListener('click',()=>{closeWithMotion($('aliyunTranslationDialog'));setTimeout(()=>{openDialogWithMotion($('translationDialog'));loadTranslationSettings().catch(()=>{})},230)});
    document.addEventListener('visibilitychange',()=>{if(document.hidden)stopMachineTranslation();refreshTranslationLines();if(!document.hidden)loadCachedTranslations().catch(()=>{})});
    window.addEventListener('beforeunload',stopMachineTranslation);
+   document.querySelectorAll('[data-inspector-action]').forEach(button=>button.addEventListener('click',()=>{const action=button.dataset.inspectorAction;if(action==='openAssistantSettings'){$('openAssistantSettings').click();return}if(!state.selected)return;const target=action==='replyMode'?(state.selected.takeover_state==='HUMAN_TAKEOVER'?'resumeButton':'takeoverButton'):action;$(target)?.click()}));
+   renderCustomerDetails(null);
    initialize();
 })();
 </script>
 </body>
 </html>'''
-    return page.replace("__SESSION__", escaped)
+    return page.replace("__SESSION__", escaped).replace("__VISUAL_STYLE__", SHARED_CSS + CHAT_CSS).replace("__VISUAL_ICONS__", ICON_SPRITE)

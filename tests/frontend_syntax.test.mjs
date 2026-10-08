@@ -275,3 +275,144 @@ test('QR reveal and pairing states are explicit and resource-safe', () => {
   assert.match(appSource, /setPairingState\(['"]error/);
   assert.match(appSource, /aria-busy/);
 });
+
+test('connected sessions prevent new QR requests and discard a pending QR response', async () => {
+  const source = scripts.find(([, body]) => body.includes('async function selectSession(name)'))?.[1];
+  const declarations = source.replace(/^\s*<!-- SPONSOR_SCRIPT -->\s*$/m, '')
+    .slice(0, source.indexOf("$('themeSelect').addEventListener"));
+  const nodes = new Map();
+  const getNode = id => {
+    if (!nodes.has(id)) nodes.set(id, {
+      dataset: {}, disabled: false, textContent: '', children: [], setAttribute() {},
+      replaceChildren(...children) { this.children = children; },
+    });
+    return nodes.get(id);
+  };
+  let requests = 0;
+  let pendingResponse;
+  const releasedUrls = [];
+  class TestURL extends URL {
+    static createObjectURL() { return 'blob:pending-demo-qr'; }
+    static revokeObjectURL(url) { releasedUrls.push(url); }
+  }
+  const context = vm.createContext({
+    document: { getElementById: getNode, createElement: () => ({ decode: async () => {} }) },
+    location: { search: '?session=default' },
+    URL: TestURL, URLSearchParams,
+    requestAnimationFrame: callback => callback(),
+    fetch() {
+      requests++;
+      if (pendingResponse) return pendingResponse;
+      throw new Error('connected session must not fetch QR');
+    },
+  });
+  vm.runInContext(`${declarations}\nglobalThis.testConnection = {
+    setStatus(state) { statusData = { sessions: [{ name: 'default', state }] }; },
+    loadQr, syncConnectionPresentation
+  };`, context);
+  for (const state of ['WORKING', 'CONNECTED']) {
+    context.testConnection.setStatus(state);
+    await context.testConnection.loadQr();
+    assert.equal(requests, 0);
+    assert.equal(getNode('qrButton').disabled, true);
+    assert.equal(getNode('qrWrap').dataset.state, 'connected');
+    assert.match(getNode('qrTitle').textContent, /已连接/);
+  }
+  context.testConnection.setStatus('SCAN_QR_CODE');
+  context.testConnection.syncConnectionPresentation();
+  assert.equal(getNode('qrButton').disabled, false);
+  assert.equal(getNode('qrWrap').dataset.state, 'idle');
+
+  let resolveResponse;
+  pendingResponse = new Promise(resolve => { resolveResponse = resolve; });
+  const inFlight = context.testConnection.loadQr();
+  assert.equal(getNode('qrWrap').dataset.state, 'loading');
+  context.testConnection.setStatus('WORKING');
+  context.testConnection.syncConnectionPresentation();
+  resolveResponse({ ok: true, headers: { get: () => 'image/png' }, blob: async () => ({}) });
+  await inFlight;
+  assert.equal(requests, 1);
+  assert.equal(getNode('qrWrap').dataset.state, 'connected');
+  assert.equal(getNode('qrButton').disabled, true);
+  assert.equal(getNode('qrImageLayer').children.length, 0);
+  assert.deepEqual(releasedUrls, ['blob:pending-demo-qr']);
+});
+
+test('customer inspector updates both layouts safely when selection and reply mode change', () => {
+  const helper = chatSource.match(/  function renderCustomerDetails\(item\)\{[\s\S]*?\n  \}/)?.[0];
+  assert.ok(helper, 'expected a customer inspector renderer');
+  const fields = ['name', 'identifier', 'kind', 'reply', 'translation', 'note'];
+  const nodes = fields.flatMap(field => [0, 1].map(() => ({
+    dataset: { customerField: field }, textContent: '',
+    set innerHTML(_value) { throw new Error('customer content must remain plain text'); },
+  })));
+  const controls = new Map(['noteButton', 'labelButton', 'summaryButton', 'followUpButton', 'inspectorAvatar', 'customerInspector']
+    .map(id => [id, { disabled: false, dataset: {} }]));
+  const state = { connected: true };
+  const profileActions = [
+    { disabled: false, dataset: { inspectorAction: 'noteButton' } },
+    { disabled: false, dataset: { inspectorAction: 'replyMode' } },
+    { disabled: false, dataset: { inspectorAction: 'openAssistantSettings' } },
+  ];
+  const context = vm.createContext({
+    state,
+    $: id => controls.get(id),
+    displayName: item => item?.note || item?.name || item?.display_id || '未知客户',
+    translationIsEnabled: () => false,
+    setAvatar() {},
+    document: { querySelectorAll: selector => selector === '[data-customer-field]' ? nodes : selector === '[data-inspector-action]' ? profileActions : [] },
+  });
+  vm.runInContext(`${helper}\nglobalThis.renderDetails = renderCustomerDetails;`, context);
+  const item = { name: '客户 A', display_id: '演示号码 A', note: '<img src=x onerror=alert(1)>', takeover_state: 'HUMAN_TAKEOVER' };
+  context.renderDetails(item);
+  const values = field => nodes.filter(node => node.dataset.customerField === field).map(node => node.textContent);
+  assert.deepEqual(values('note'), [item.note, item.note]);
+  assert.deepEqual(values('reply'), ['人工接管中', '人工接管中']);
+  context.renderDetails({ name: '客户 B', display_id: '演示号码 B', is_group: true, takeover_state: 'AI_ELIGIBLE' });
+  assert.deepEqual(values('identifier'), ['演示号码 B', '演示号码 B']);
+  assert.deepEqual(values('note'), ['暂无备注', '暂无备注']);
+  assert.deepEqual(values('kind'), ['群聊', '群聊']);
+  state.connected = false;
+  context.renderDetails({ name: '客户 B' });
+  assert.deepEqual(values('reply'), ['会话未连接', '会话未连接']);
+  context.renderDetails(null);
+  assert.equal(controls.get('noteButton').disabled, true);
+  assert.ok(profileActions.slice(0, 2).every(action => action.disabled), 'profile shortcuts must be disabled without a customer');
+  assert.equal(profileActions[2].disabled, false, 'global AI settings must remain available without a customer');
+  context.renderDetails({ name: '客户 C' });
+  assert.ok(profileActions.every(action => !action.disabled), 'profile shortcuts must follow the selected customer');
+});
+
+test('overview metrics use session data and navigation follows the selected session', () => {
+  const helper = appSource.match(/    function renderOverviewMetrics\(\) \{[\s\S]*?\n    \}/)?.[0];
+  assert.ok(helper, 'expected a real-data overview renderer');
+  const nodes = new Map();
+  const getNode = id => {
+    if (!nodes.has(id)) nodes.set(id, { textContent: '', href: '', attributes: {}, setAttribute(name, value) { this.attributes[name] = value; } });
+    return nodes.get(id);
+  };
+  let current = { name: '销售 inbox', updated_at: 1234 };
+  const context = vm.createContext({
+    statusData: { sessions: [{ state: 'WORKING' }, { state: 'CONNECTED' }, { state: 'STOPPED' }] },
+    selected: 'default', $: getNode, currentItem: () => current,
+    formatTime: value => value ? 'time:' + value : '—', encodeURIComponent,
+  });
+  vm.runInContext(helper + '\nglobalThis.renderMetrics = renderOverviewMetrics;', context);
+  context.renderMetrics();
+  assert.equal(getNode('sessionTotalMetric').textContent, '3');
+  assert.equal(getNode('connectedTotalMetric').textContent, '2');
+  assert.equal(getNode('overviewUpdatedMetric').textContent, 'time:1234');
+  assert.equal(getNode('chatLink').href, '/sessions/' + encodeURIComponent(current.name) + '/chats');
+  assert.equal(getNode('settingsLink').href, '/settings?session=' + encodeURIComponent(current.name));
+  current = { name: 'sales', updated_at: 5678 };
+  context.renderMetrics();
+  assert.equal(getNode('chatLink').href, '/sessions/sales/chats');
+  current = null;
+  context.statusData = { sessions: [] };
+  context.renderMetrics();
+  assert.equal(getNode('sessionTotalMetric').textContent, '0');
+  assert.equal(getNode('connectedTotalMetric').textContent, '0');
+  assert.equal(getNode('overviewUpdatedMetric').textContent, '—');
+  assert.equal(getNode('chatLink').href, '#');
+  assert.equal(getNode('chatLink').attributes['aria-disabled'], 'true');
+});
