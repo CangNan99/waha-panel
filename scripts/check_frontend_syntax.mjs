@@ -1,4 +1,5 @@
-import { readFile } from 'node:fs/promises';
+import { readFile, readdir } from 'node:fs/promises';
+import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import vm from 'node:vm';
 
@@ -26,5 +27,19 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const chatSource = await readFile(chatPath, 'utf8');
   const appCount = checkInlineScripts(appSource, fileURLToPath(appPath), 3);
   const chatCount = checkInlineScripts(chatSource, fileURLToPath(chatPath));
-  console.log(`Validated JavaScript syntax in ${appCount + chatCount} inline scripts.`);
+  let modules=0;
+  async function checkModules(directory){
+    for(const item of await readdir(directory,{withFileTypes:true})){
+      const path=new URL(item.name+(item.isDirectory()?'/':''),directory);
+      if(item.isDirectory())await checkModules(path);
+      else if(item.name.endsWith('.js')){
+        const source=await readFile(path,'utf8');
+        const result=spawnSync(process.execPath,['--check','--input-type=module'],{input:source,encoding:'utf8'});
+        if(result.status!==0)throw new Error(fileURLToPath(path)+': '+result.stderr);
+        modules++;
+      }
+    }
+  }
+  await checkModules(new URL('../panel/static/',import.meta.url));
+  console.log(`Validated JavaScript syntax in ${appCount + chatCount} inline scripts and ${modules} modules.`);
 }

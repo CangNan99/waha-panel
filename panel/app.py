@@ -25,6 +25,18 @@ from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
 
 try:
+    from .monitoring_service import MonitoringService, safe_log_message
+except ImportError:
+    from monitoring_service import MonitoringService, safe_log_message
+
+UI_MONITORING_LOCK = threading.Lock()
+
+try:
+    from .app_shell import app_shell_page, asset_response, view_payload
+except ImportError:
+    from app_shell import app_shell_page, asset_response, view_payload
+
+try:
     from .visual_theme import ICON_SPRITE, SHARED_CSS, DASHBOARD_CSS, SETTINGS_CSS
 except ImportError:
     from visual_theme import ICON_SPRITE, SHARED_CSS, DASHBOARD_CSS, SETTINGS_CSS
@@ -831,7 +843,7 @@ class PanelState:
         self.admin_service = AdminService(self.database_path)
         self._admin_db_auth = as_bool(os.environ.get("PANEL_ADMIN_DB_AUTH", "0"))
         self._update_service = UpdateService(
-            current_panel=os.environ.get("PANEL_VERSION", "1.0.14"),
+            current_panel=os.environ.get("PANEL_VERSION", "1.0.15"),
             current_waha=os.environ.get("WAHA_IMAGE_TAG", "latest-2026.9.1"),
         )
         self.sleep_fn = sleep_fn or time.sleep
@@ -2172,7 +2184,7 @@ class PanelState:
         try:
             connection.execute(
                 "INSERT INTO system_logs(session_name, level, event, message, created_at) VALUES (?, ?, ?, ?, ?)",
-                (name, level, event, redact_error(message, self.api_key), int(time.time())),
+                (name, level, event, safe_log_message(redact_error(message, self.api_key), (self.api_key,)), int(time.time())),
             )
             connection.commit()
         finally:
@@ -2190,7 +2202,7 @@ class PanelState:
             ).fetchall()
         finally:
             connection.close()
-        return [dict(row) for row in rows]
+        return [{**dict(row), "message": safe_log_message(row["message"], (self.api_key,))} for row in rows]
 
     def _session_detail(self, session_name, remote_sessions):
         name = normalize_session_name(session_name)
@@ -2974,7 +2986,7 @@ def settings_page():
     async function mutateFetch(url, options={}) { const headers = new Headers(options.headers || {}); try { await ensureCsrf(); } catch (_) {} if (csrfToken) headers.set('X-CSRF-Token', csrfToken); return fetch(url, {...options, headers, credentials:'same-origin', cache:'no-store'}); }
     async function saveTheme(theme) { applyTheme(theme); try { const response = await mutateFetch('/api/settings' + sessionQuery, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({theme})}); if (!response.ok) { const data = await response.json(); throw new Error(data.message || '主题保存失败'); } } catch (error) { $('settingsNotice').textContent = error.message; } }
     async function loadSettings() { const response = await fetch('/api/settings' + sessionQuery, {cache:'no-store'}); const data = await response.json(); if (!response.ok) throw new Error(data.message || '读取设置失败'); $('enabled').checked = data.auto_reply_enabled; $('allDay').checked = data.auto_reply_all_day; $('customerMemoryEnabled').checked = Boolean(data.customer_memory_enabled); setEnabledState(); renderSchedule(data.weekly_reply_windows); $('contextPerSide').value = String(data.auto_reply_context_per_side ?? 5); renderContextCount(); for (const name of mediaTypeNames) $('autoReplyMedia_' + name).checked = Boolean(data.auto_reply_media_types?.[name]); $('defaultText').value = data.default_reply_text || ''; $('persona').value = data.persona || ''; $('systemPrompt').value = data.system_prompt || ''; $('aiBaseUrl').value = data.ai_base_url || ''; $('aiModel').value = data.ai_model || ''; $('keyState').textContent = data.ai_api_key_configured ? 'APIKey：已配置（隐藏）' : 'APIKey：未配置'; applyTheme(data.theme); }
-    async function saveSettings(event) { event.preventDefault(); const button = $('saveButton'); button.disabled = true; $('settingsNotice').textContent = ''; renderContextCount(); try { const body = {auto_reply_enabled:$('enabled').checked,auto_reply_all_day:$('allDay').checked,customer_memory_enabled:$('customerMemoryEnabled').checked,weekly_reply_windows:collectWindows(),auto_reply_context_per_side:Number($('contextPerSide').value),auto_reply_media_types:collectMediaTypes(),default_reply_text:$('defaultText').value,persona:$('persona').value,system_prompt:$('systemPrompt').value,ai_base_url:$('aiBaseUrl').value,ai_model:$('aiModel').value,ai_api_key:$('aiKey').value,clear_ai_api_key:$('clearKey').checked,theme:$('themeSelect').value}; const response = await mutateFetch('/api/settings' + sessionQuery, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}); const data = await response.json(); if (!response.ok) throw new Error(data.message || '保存失败'); $('aiKey').value = ''; $('clearKey').checked = false; $('keyState').textContent = data.ai_api_key_configured ? 'APIKey：已配置（隐藏）' : 'APIKey：未配置'; $('settingsNotice').className = 'notice success'; $('settingsNotice').textContent = '设置已保存'; } catch (error) { $('settingsNotice').className = 'notice'; $('settingsNotice').textContent = error.message; } finally { button.disabled = false; } }
+    async function saveSettings(event) { event.preventDefault(); const button = $('saveButton'); button.disabled = true; $('settingsNotice').textContent = ''; renderContextCount(); try { const body = {auto_reply_enabled:$('enabled').checked,auto_reply_all_day:$('allDay').checked,customer_memory_enabled:$('customerMemoryEnabled').checked,weekly_reply_windows:collectWindows(),auto_reply_context_per_side:Number($('contextPerSide').value),auto_reply_media_types:collectMediaTypes(),default_reply_text:$('defaultText').value,persona:$('persona').value,system_prompt:$('systemPrompt').value,ai_base_url:$('aiBaseUrl').value,ai_model:$('aiModel').value,ai_api_key:$('aiKey').value,clear_ai_api_key:$('clearKey').checked,theme:$('themeSelect').value}; const response = await mutateFetch('/api/settings' + sessionQuery, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}); const data = await response.json(); if (!response.ok) throw new Error(data.message || '保存失败'); $('aiKey').value = ''; $('clearKey').checked = false; $('keyState').textContent = data.ai_api_key_configured ? 'APIKey：已配置（隐藏）' : 'APIKey：未配置'; $('settingsNotice').className = 'notice success'; $('settingsNotice').textContent = '设置已保存'; delete document.body.dataset.dirty; } catch (error) { $('settingsNotice').className = 'notice'; $('settingsNotice').textContent = error.message; } finally { button.disabled = false; } }
     async function addKnowledge(name, content) { $('knowledgeNotice').textContent = ''; const response = await mutateFetch('/api/knowledge' + sessionQuery, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({file_name:name,content})}); const data = await response.json(); if (!response.ok) throw new Error(data.message || '资料保存失败'); $('knowledgeText').value = ''; await loadKnowledge(); }
     async function loadKnowledge() { const response = await fetch('/api/knowledge' + sessionQuery, {cache:'no-store'}); const data = await response.json(); if (!response.ok) throw new Error(data.message || '资料读取失败'); $('knowledgeList').innerHTML = data.items.length ? data.items.map(item => `<div class="knowledge-item"><div><div class="knowledge-name">${esc(item.file_name)}</div><div class="knowledge-meta">${item.characters} 字符 · ${new Date(item.created_at * 1000).toLocaleString()}</div></div><div class="knowledge-actions"><button type="button" data-view="${item.id}">查看</button><button type="button" class="danger" data-delete="${item.id}">删除</button></div></div>`).join('') : '<div class="muted">暂无资料</div>'; document.querySelectorAll('[data-view]').forEach(button => button.addEventListener('click', () => viewKnowledge(button.dataset.view))); document.querySelectorAll('[data-delete]').forEach(button => button.addEventListener('click', () => deleteKnowledge(button.dataset.delete))); }
     async function viewKnowledge(id) { const response = await fetch('/api/knowledge/' + id + sessionQuery, {cache:'no-store'}); const data = await response.json(); if (!response.ok) throw new Error(data.message || '资料读取失败'); $('knowledgePreview').hidden = false; $('knowledgePreview').textContent = data.content; }
@@ -3257,7 +3269,7 @@ class PanelHandler(BaseHTTPRequestHandler):
         allowed = {
             "overview", "messages", "media", "avatar", "events",
             "send-text", "send-image", "takeover", "resume-ai", "note",
-            "follow-ups", "labels", "summary", "memory", "memory/rebuild",
+            "follow-ups", "labels", "summary", "memory", "memory/rebuild", "notes/normalize",
             "machine-translations", "machine-translations/cache",
         }
         if action not in allowed and not (
@@ -3403,6 +3415,17 @@ class PanelHandler(BaseHTTPRequestHandler):
         self.require_waha_session(name, connected=action in {"send-text", "send-image"})
         if action == "labels":
             self.send_chat_labels_write(route, "POST")
+            return
+        if action == "notes/normalize":
+            payload = self.read_api_json()
+            chat._decode_chat(name, payload.get("chat_ref"))
+            translation = self.require_translation_service()
+            self.state.begin_translation_request()
+            try:
+                candidate = translation.normalize_internal_note(payload.get("text"))
+            finally:
+                self.state.end_translation_request()
+            self.send_json({"note_zh": candidate})
             return
         if action == "follow-ups":
             if self.state.automation is None:
@@ -3954,9 +3977,85 @@ class PanelHandler(BaseHTTPRequestHandler):
             raise ValueError("会话删除路径不正确")
         self.send_json(self.state.delete_session(name))
 
+    def send_monitoring_get(self, route):
+        values = parse_qs(urlparse(self.path).query, keep_blank_values=True)
+        if any(len(items) != 1 for items in values.values()):
+            raise ValueError("日志或概览参数不能重复")
+        query = {key: items[0] for key, items in values.items()}
+        supported = {"scope", "session"} if route == "/api/overview" else {
+            "scope", "session", "level", "event", "from", "to", "q", "limit", "before_id", "after_id"
+        }
+        if set(query) - supported or query.get("scope", "current") not in {"current", "all"}:
+            raise ValueError("日志或概览参数无效")
+        if query.get("scope") == "all" and query.get("session"):
+            raise ValueError("不能同时选择全部与指定会话")
+        allowed = [item["session_name"] for item in self.state.managed_session_rows()]
+        selected = query.get("session", DEFAULT_SESSION_NAME) if query.get("scope") != "all" else None
+        if selected and selected not in allowed:
+            raise PermissionError("无权查看该会话")
+        with UI_MONITORING_LOCK:
+            service = getattr(self.state, "_monitoring_service", None)
+            if service is None:
+                service = MonitoringService(self.state)
+                self.state._monitoring_service = service
+        if route == "/api/overview":
+            self.send_json(service.overview(allowed, selected))
+        elif set(query) <= {"session"}:
+            self.send_json({"logs": self.state.recent_logs(session_name=selected)})
+        else:
+            if selected:
+                query["session"] = selected
+            self.send_json(service.query_logs(allowed, query))
+
+    def send_ui_bytes(self, body, content_type):
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Cache-Control", "private, no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Referrer-Policy", "same-origin")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_GET(self):
         route = urlparse(self.path).path
         try:
+            if route in {"/api/overview", "/api/logs"}:
+                self.require_admin_auth()
+                try:
+                    self.send_monitoring_get(route)
+                except PermissionError:
+                    self.send_json({"message": "无权查看该会话"}, HTTPStatus.FORBIDDEN)
+                except sqlite3.Error:
+                    self.send_json({"message": "监控数据暂不可读取，请稍后重试"}, HTTPStatus.SERVICE_UNAVAILABLE)
+                return
+            if route.startswith("/assets/ui/"):
+                self.require_admin_auth()
+                try:
+                    body, content_type = asset_response(route)
+                except FileNotFoundError:
+                    self.send_json({"message": "页面资源不存在"}, HTTPStatus.NOT_FOUND)
+                    return
+                self.send_ui_bytes(body, content_type)
+                return
+            if route == "/api/ui/view":
+                self.require_admin_auth()
+                query = parse_qs(urlparse(self.path).query)
+                view = query.get("view", ["dashboard"])[0]
+                session = query.get("session", [DEFAULT_SESSION_NAME])[0]
+                if view == "chat":
+                    self.require_waha_session(session)
+                self.send_json(view_payload(view, session))
+                return
+            if route in {"/", "/settings", "/overview", "/logs"} or (
+                route.startswith("/sessions/") and route.endswith("/chats")
+            ):
+                self.require_admin_auth()
+                if route.startswith("/sessions/"):
+                    self.require_waha_session(self.chat_page_session(route))
+                self.send_ui_bytes(app_shell_page(self.path).encode("utf-8"), "text/html; charset=utf-8")
+                return
             if route.startswith("/sessions/") and route.endswith("/chats"):
                 self.require_admin_auth()
                 name = self.chat_page_session(route)

@@ -138,18 +138,18 @@ class ChatServiceEngagementTests(unittest.TestCase):
 
     def test_summary_requires_encrypting_cipher(self):
         self.service.codec.cipher = None
-        with self.assertRaises(Exception): self.service.save_summary_and_ai_labels("default", self.item["chat_ref"], {"summary": "x"}, [])
+        with self.assertRaises(Exception): self.service.save_summary_and_ai_labels("default", self.item["chat_ref"], {"summary": "中文总结"}, [])
         connection = sqlite3.connect(self.database)
         self.assertIsNone(connection.execute("SELECT summary_ciphertext FROM conversation_summaries").fetchone())
         connection.close()
 
     def test_summary_ciphertext_is_not_readable_json(self):
-        self.service.save_summary_and_ai_labels("default", self.item["chat_ref"], {"summary": "secret"}, [])
+        self.service.save_summary_and_ai_labels("default", self.item["chat_ref"], {"summary": "敏感总结"}, [])
         connection = sqlite3.connect(self.database)
         ciphertext = connection.execute("SELECT summary_ciphertext FROM conversation_summaries").fetchone()[0]
         connection.close()
-        self.assertNotEqual(ciphertext, '{"summary":"secret"}')
-        self.assertNotIn("secret", ciphertext)
+        self.assertNotEqual(ciphertext, '{"summary":"敏感总结"}')
+        self.assertNotIn("敏感总结", ciphertext)
 
     def test_history_is_capped_and_sorted_without_chat_reference(self):
         self.client.messages = [
@@ -207,13 +207,13 @@ class ChatServiceEngagementTests(unittest.TestCase):
         with self.assertRaises(Exception): self.service.update_manual_label("default", self.item["chat_ref"], "AI", "VIP", source="AI")
 
     def test_summary_and_labels_roll_back_together(self):
-        self.service.save_summary_and_ai_labels("default", self.item["chat_ref"], {"summary": "before"}, ["old-ai"])
+        self.service.save_summary_and_ai_labels("default", self.item["chat_ref"], {"summary": "旧总结"}, ["旧标签"])
         connection = sqlite3.connect(self.database)
         connection.execute("CREATE TRIGGER fail_ai_insert BEFORE INSERT ON customer_labels WHEN NEW.source='AI' BEGIN SELECT RAISE(ABORT, 'boom'); END")
         connection.commit(); connection.close()
-        with self.assertRaises(Exception): self.service.save_summary_and_ai_labels("default", self.item["chat_ref"], {"summary": "after"}, ["new-ai"])
-        self.assertEqual(self.service.current_summary("default", self.item["chat_ref"])["summary"], "before")
-        self.assertEqual(self.service.customer_labels("default", self.item["chat_ref"])["ai"], ["old-ai"])
+        with self.assertRaises(Exception): self.service.save_summary_and_ai_labels("default", self.item["chat_ref"], {"summary": "新总结"}, ["新标签"])
+        self.assertEqual(self.service.current_summary("default", self.item["chat_ref"])["summary"], "旧总结")
+        self.assertEqual(self.service.customer_labels("default", self.item["chat_ref"])["ai"], ["旧标签"])
 
 
 class _FakeAIResponse:
@@ -314,19 +314,19 @@ class TranslationServiceEngagementTests(unittest.TestCase):
 
     def test_summary_normalizes_and_caps_fields_and_labels(self):
         payload = {
-            "summary": "  first\n\nsecond  ",
-            "customer_need": "x" * 5000,
-            "intent": "x",
-            "confirmed_items": "x",
-            "unresolved_items": "x",
-            "next_action": "x",
-            "ai_labels": ["  warm\n lead  ", "y" * 200],
+            "summary": "  首段\n\n次段  ",
+            "customer_need": "字" * 5000,
+            "intent": "未提及",
+            "confirmed_items": "未提及",
+            "unresolved_items": "未提及",
+            "next_action": "未提及",
+            "ai_labels": ["  待\n 报价  ", "签" * 200],
         }
         service, _opener = self._service(payload)
         result = service.summarize_conversation([{"from_me": False, "body": "Hello, I need a quote"}])
-        self.assertEqual(result["summary"], "first second")
+        self.assertEqual(result["summary"], "首段 次段")
         self.assertEqual(len(result["customer_need"]), 4000)
-        self.assertEqual(result["ai_labels"], ["warm lead", "y" * 100])
+        self.assertEqual(result["ai_labels"], ["待 报价", "签" * 100])
 
     def test_structured_result_types_are_validated(self):
         service, _opener = self._service([{"target_language_code": "en", "target_language_name_zh": "英语", "message": 1}] * 2)
@@ -341,7 +341,7 @@ class TranslationServiceEngagementTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, "SUMMARY_RESULT_INVALID")
 
     def test_summary_repairs_nested_invalid_result_once(self):
-        valid = {"summary": "ok", "customer_need": "need", "intent": "buy", "confirmed_items": "none", "unresolved_items": "price", "next_action": "reply", "ai_labels": ["warm"]}
+        valid = {"summary": "客户问候", "customer_need": "未提及", "intent": "未提及", "confirmed_items": "未提及", "unresolved_items": "未提及", "next_action": "回复客户", "ai_labels": ["待沟通"]}
         service, opener = self._service([dict(valid, ai_labels=[1]), valid])
         result = service.summarize_conversation([{"from_me": False, "body": "hello"}])
         self.assertEqual(result, valid)
@@ -748,9 +748,9 @@ class PanelEngagementRouteTests(unittest.TestCase):
         def summarize(messages):
             self.summary_message_counts.append(len(messages))
             return {
-                "summary": "current summary", "customer_need": "quote", "intent": "buy",
-                "confirmed_items": "model", "unresolved_items": "price",
-                "next_action": "reply", "ai_labels": ["warm"],
+                "summary": "当前总结", "customer_need": "咨询报价", "intent": "待确认",
+                "confirmed_items": "未提及", "unresolved_items": "报价",
+                "next_action": "回复客户", "ai_labels": ["待报价"],
             }
 
         self.state.translation.summarize_conversation = summarize

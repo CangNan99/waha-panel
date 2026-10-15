@@ -3,6 +3,7 @@ FROM node:24-alpine AS frontend-check
 WORKDIR /src
 COPY panel/app.py panel/app.py
 COPY panel/chat_page.py panel/chat_page.py
+COPY panel/static/ panel/static/
 COPY scripts/check_frontend_syntax.mjs scripts/check_frontend_syntax.mjs
 RUN node scripts/check_frontend_syntax.mjs && touch /frontend-syntax-ok
 
