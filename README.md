@@ -4,11 +4,15 @@
 
 ## 界面预览
 
-1.0.14 使用蓝紫淡青渐变和白色卡片，提供工作台三列、聊天四栏及手机布局。以下截图使用演示数据。
+1.0.15 增加独立状态概览、系统日志与五个菜单的无刷新切换，完善二维码、最新消息定位、中文内部资料和双主题聊天背景。以下截图均使用演示数据。
 
-![工作台](docs/assets/dashboard-1.0.14.jpg)
+![状态概览](docs/assets/overview-1.0.15.png)
 
-![聊天管理](docs/assets/chat-1.0.14.jpg)
+![白天聊天](docs/assets/chat-daylight-1.0.15.png)
+
+![夜间聊天](docs/assets/chat-night-1.0.15.png)
+
+![系统日志](docs/assets/logs-1.0.15.png)
 
 ## 一键搭建
 
@@ -79,6 +83,7 @@ pwsh -File .\update.ps1 -Component waha
 
 | 版本 | 更新内容 | 详细说明 |
 | --- | --- | --- |
+| 1.0.15 | 新增独立概览与日志、主菜单无刷新切换；修复二维码裁切、最新消息跟随与聊天背景，统一中文内部资料并增强异步草稿和日志脱敏保护。 | [docs/releases/1.0.15.md](docs/releases/1.0.15.md) |
 | 1.0.14 | 按 Bento Grid 视觉规范重构状态、设置和聊天页面；主题收敛为白天与夜间，不改变业务功能。 | [docs/releases/1.0.14.md](docs/releases/1.0.14.md) |
 | 1.0.13 | 修复全局翻译开关重新打开窗口后默认关闭但保留已完成译文；增加稳定消息身份缓存和旧缓存迁移，避免服务重启或安全引用轮换后重复翻译。 | [docs/releases/1.0.13.md](docs/releases/1.0.13.md) |
 | 1.0.12 | 增加按客户动态记忆、阿里云当前聊天双行翻译、最近聊天滚动位置保持和翻译/人工接管状态呼吸动画。 | [docs/releases/1.0.12.md](docs/releases/1.0.12.md) |
@@ -114,6 +119,6 @@ pwsh -File .\backup.ps1
 当前镜像版本：
 
 - `devlikeapro/waha:latest-2026.9.1`
-- `docker.io/cangnan88/waha-panel:1.0.14`
+- `docker.io/cangnan88/waha-panel:1.0.15`
 
 如需域名访问，只反代到面板端口 `127.0.0.1:3003`。WAHA API 端口 `3002` 默认不应公开。请在反向代理层启用 HTTPS，并确保代理不会记录 `Authorization`、APIKey 或密码字段。

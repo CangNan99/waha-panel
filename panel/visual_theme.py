@@ -251,6 +251,12 @@ html[data-theme="night"] .qr-decoration{opacity:.12}html[data-theme="night"] .qr
 @media(max-width:1023px){.dashboard-topbar .top-label{display:none}.dashboard-topbar .top-actions{gap:6px}.dashboard-topbar .nav-link{width:36px;padding:0;justify-content:center}.dashboard-workspace{width:auto}.pairing-form{grid-template-columns:1fr}}
 @media(max-width:699px){.dashboard-topbar{padding:12px;flex-wrap:wrap;gap:8px}.dashboard-topbar .top-actions{flex-wrap:wrap;justify-content:flex-start;width:100%;gap:7px}.dashboard-topbar .brand-title{font-size:13px}.dashboard-topbar .top-label{display:inline}.dashboard-topbar .nav-link{width:auto;padding:0 10px}.dashboard-topbar .icon-button{display:inline-flex;width:34px;min-height:34px;padding:0;justify-content:center}.dashboard-workspace{grid-column:1;grid-row:2;padding:10px}.app-navigation{display:none}.overview{padding:15px;display:grid}.hero p{font-size:12px}.overview-identity{gap:12px}.metric-label{font-size:12px}.metric-value.text-metric{font-size:13px}.sessions-card .side-head{padding-bottom:8px}.session-list{display:block}.session-item{min-width:0}.control-card{padding:15px}.action-row{gap:6px}.action-row button{font-size:11px;padding:0 5px}.summary-value{font-size:12px}.summary{min-height:64px}.logs-card{min-height:230px}.log{grid-template-columns:1fr;gap:3px;padding:7px 0}.log-meta{font-size:10px}.log-message{font-size:12px}.qr-card{min-height:320px}.qr-wrap{height:230px;min-height:230px}.pairing-card{min-height:215px}}
 @media(max-width:699px){.window[data-view="dashboard"]>.app-navigation{display:block;grid-column:1;grid-row:2;padding:8px 12px;background:rgba(255,255,255,.3);overflow:visible}.window[data-view="dashboard"]>.app-navigation::after{display:none}.window[data-view="dashboard"] .navigation{display:flex;flex-direction:row;flex-wrap:wrap;gap:7px}.window[data-view="dashboard"] .nav-item{min-height:34px;width:auto;flex:1;justify-content:center;padding:0 10px;font-size:11px;gap:6px;border-radius:11px;background:rgba(255,255,255,.5)}.window[data-view="dashboard"] .nav-label{display:inline}.window[data-view="dashboard"] .nav-item:nth-child(n+4){display:none}.window[data-view="dashboard"] .nav-item .icon{width:16px;height:16px}.window[data-view="dashboard"] .dashboard-workspace{grid-row:3}.window[data-view="dashboard"] .dashboard-grid{grid-template-rows:none}}
+.qr-card .qr-wrap{height:auto;min-height:0;aspect-ratio:1;flex:none}
+.qr-card .qr-image-layer{padding:16px;min-height:0;min-width:0}
+.qr-card .qr-image-layer img{width:min(100%,330px);height:auto;max-height:100%;aspect-ratio:1;padding:0;object-fit:contain}
+.qr-card{height:auto}.qr-card .qr-caption{position:relative}
+.window .dashboard-workspace{overflow:auto;grid-template-rows:max-content max-content;align-content:start}
+.dashboard-workspace .dashboard-grid{grid-template-rows:max-content max-content;grid-auto-rows:max-content;min-height:max-content;height:auto;align-content:start}
 '''
 
 CHAT_CSS = r'''
@@ -325,6 +331,17 @@ input::placeholder,textarea::placeholder{color:var(--muted);opacity:1}
 @media(max-width:420px){.conversation-primary-actions{gap:5px}.conversation-primary-actions button{font-size:10px;padding:0 6px}.state-pill{font-size:10px;padding:0 7px}.composer-row{grid-template-columns:28px minmax(0,1fr) 38px 39px;gap:5px}.composer-row label.icon-button{width:28px}.sidebar-controls #sessionSelect{max-width:122px!important}}
 @media(prefers-reduced-motion:reduce){.breathing-toggle,.loading-spinner,.skeleton-bubble{animation:none!important}.mobile-view-layer{transition:none!important;transform:none!important}}
 '''
+
+
+CHAT_CSS += r"""
+.message-viewport{position:relative;min-height:0;overflow:hidden;isolation:isolate;background:#f5f7fc;--chat-pattern:#aab9d1;--chat-pattern-opacity:.35}
+.message-viewport>.message-area{height:100%;position:relative;z-index:1;background:transparent}
+.message-viewport>.chat-wallpaper{position:absolute;inset:0;width:100%;height:100%;z-index:0;pointer-events:none;background:var(--chat-pattern);opacity:var(--chat-pattern-opacity);mask-repeat:repeat;mask-size:180px 150px;mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='150' viewBox='0 0 180 150'%3E%3Cg stroke='black' stroke-width='1' fill='none'%3E%3Cpath d='M18 27h26v19H27l-9 6zM104 24l13-9 13 9v15h-26zM52 115l11-14 11 14-11 8zM139 112c-9-16-24-9-16 2l16 12 16-12c8-11-7-18-16-2zM25 84c-5-8 2-14 7-9 5-5 12 1 7 9l-7 6z'/%3E%3Ccircle cx='87' cy='64' r='10'/%3E%3Cpath d='M82 65q5 6 10 0M84 61h1M90 61h1M152 63l6 12-13-2z'/%3E%3C/g%3E%3C/svg%3E")}
+.chat-wallpaper rect{display:none}
+html[data-theme="night"] .message-viewport{background:#232a3d;--chat-pattern:#6b7fa5;--chat-pattern-opacity:.24}
+html[data-theme="night"] .message-viewport>.message-area{background:transparent}
+html[data-theme="night"] .message-viewport>.chat-wallpaper{opacity:var(--chat-pattern-opacity)}
+"""
 
 SETTINGS_CSS = r'''
 /* Bento visual system: automation settings — approved reference v2. */

@@ -15,6 +15,11 @@ from urllib.parse import quote, urlencode
 from PIL import Image, UnidentifiedImageError
 
 try:
+    from .internal_language import validate_internal_chinese, InternalLanguageError
+except ImportError:
+    from internal_language import validate_internal_chinese, InternalLanguageError
+
+try:
     from .chat_security import ReferenceError as SecureReferenceError, chat_key_hmac
 except ImportError:
     from chat_security import ReferenceError as SecureReferenceError, chat_key_hmac
@@ -437,7 +442,10 @@ class ChatService:
     def save_note(self, session, chat_ref, note):
         name = _session_name(session)
         chat_id = self._decode_chat(name, chat_ref)
-        value = _limited_text(note, 1000)
+        try:
+            value = validate_internal_chinese(note, 'note')
+        except InternalLanguageError as error:
+            raise ChatServiceError(str(error), 'NOTE_LANGUAGE_INVALID') from error
         key = self._chat_key(name, chat_id)
         now = int(self.clock())
         connection = sqlite3.connect(self.database_path)
@@ -1007,6 +1015,15 @@ class ChatService:
 
     def save_summary_and_ai_labels(self, session, chat_ref, summary, ai_labels):
         if not isinstance(summary, dict): raise ChatServiceError("摘要格式无效", "INVALID_SUMMARY")
+        if ai_labels is not None and (not isinstance(ai_labels,(list,tuple)) or len(ai_labels)>10):
+            raise ChatServiceError('AI 标签必须为 0 至 10 个中文标签', 'INVALID_AI_LABELS')
+        try:
+            summary = {key: validate_internal_chinese(value, 'summary') if key in {
+                'summary','customer_need','intent','confirmed_items','unresolved_items','next_action'
+            } else value for key,value in summary.items()}
+            ai_labels = [validate_internal_chinese(value, 'label') for value in (ai_labels or [])]
+        except InternalLanguageError as error:
+            raise ChatServiceError(str(error), 'SUMMARY_LANGUAGE_INVALID') from error
         name = _session_name(session); chat_id = self._decode_chat(name, chat_ref); key = self._chat_key(name, chat_id); now = int(self.clock())
         labels = [self._label_value(item) for item in (ai_labels or [])]
         encrypted = self._summary_ciphertext(summary)
