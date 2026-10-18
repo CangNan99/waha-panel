@@ -87,6 +87,7 @@ test('stale QR requests cannot update a newly selected session', async () => {
     encodeURIComponent,
     fetch,
     Headers,
+    AbortController,
     history: { replaceState() {} },
     localStorage: { getItem: () => null, setItem() {} },
     location: { href: 'http://panel.local/?session=default', search: '?session=default' },
@@ -283,7 +284,7 @@ test('connected sessions prevent new QR requests and discard a pending QR respon
   const nodes = new Map();
   const getNode = id => {
     if (!nodes.has(id)) nodes.set(id, {
-      dataset: {}, disabled: false, textContent: '', children: [], setAttribute() {},
+      dataset: {}, disabled: false, textContent: '', children: [], setAttribute() {}, addEventListener() {},
       replaceChildren(...children) { this.children = children; },
     });
     return nodes.get(id);

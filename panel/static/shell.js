@@ -52,6 +52,7 @@ function replaceURL(record,value){
 async function navigate(value,{push=true}={}){
   if(!authenticated)return;
   const route=parseRoute(value);if(!route)return;
+  if(current && route.url===current.context.url)push=false;
   const generation=++routeGeneration;
   pendingController?.abort();pendingController=new AbortController();
   const key=route.view+':'+route.session;

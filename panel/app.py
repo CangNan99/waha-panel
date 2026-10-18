@@ -25,6 +25,11 @@ from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
 
 try:
+    from .auto_reply_policy import AutoReplyPolicy, active_window_start, message_timestamp
+except ImportError:
+    from auto_reply_policy import AutoReplyPolicy, active_window_start, message_timestamp
+
+try:
     from .monitoring_service import MonitoringService, safe_log_message
 except ImportError:
     from monitoring_service import MonitoringService, safe_log_message
@@ -124,7 +129,6 @@ except ImportError:  # Supports the existing `python app.py` container entrypoin
 CONNECTED_STATES = {"WORKING", "CONNECTED"}
 IN_PROGRESS_STATES = {"STARTING", "SCAN_QR_CODE", "AUTHENTICATING"}
 SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
-DEFAULT_REPLY_TEXT = "您好，我现在暂时无法及时回复，稍后回复您。"
 WEEKDAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 THEMES = ("daylight", "night")
 SESSION_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
@@ -134,7 +138,6 @@ DEFAULT_SETTINGS = {
     "auto_reply_enabled": "0",
     "auto_reply_all_day": "0",
     "weekly_reply_windows": json.dumps({}, ensure_ascii=False),
-    "default_reply_text": DEFAULT_REPLY_TEXT,
     "persona": "",
     "system_prompt": "",
     "ai_base_url": "",
@@ -483,11 +486,6 @@ def init_db(path, seed_business=True):
         connection.executemany(
             "INSERT OR IGNORE INTO settings(key, value, updated_at) VALUES (?, ?, ?)",
             [(key, value, now) for key, value in defaults.items()],
-        )
-        connection.execute(
-            "UPDATE settings SET value = ?, updated_at = ? "
-            "WHERE key = 'default_reply_text' AND trim(value) = ''",
-            (DEFAULT_REPLY_TEXT, now),
         )
         ensure_multi_session_schema(connection)
         multi_session_migration = Path(__file__).with_name("migrations") / "003_multi_session.sql"
@@ -843,12 +841,13 @@ class PanelState:
         self.admin_service = AdminService(self.database_path)
         self._admin_db_auth = as_bool(os.environ.get("PANEL_ADMIN_DB_AUTH", "0"))
         self._update_service = UpdateService(
-            current_panel=os.environ.get("PANEL_VERSION", "1.0.15"),
+            current_panel=os.environ.get("PANEL_VERSION", "1.0.16"),
             current_waha=os.environ.get("WAHA_IMAGE_TAG", "latest-2026.9.1"),
         )
         self.sleep_fn = sleep_fn or time.sleep
         self.uniform_fn = uniform_fn or random.uniform
         self.clock = time.time
+        self.reply_policy = AutoReplyPolicy(self.database_path, lambda: self.clock())
         self.chat = None
         self.translation = None
         self.automation = None
@@ -886,6 +885,34 @@ class PanelState:
         )
         if str(data_encryption_key or "").strip():
             self.enable_chat_services(data_encryption_key)
+        self._sync_reply_connections()
+
+    def _sync_reply_connections(self, remote_sessions=None, observed_at=None):
+        observed_at = self.clock() if observed_at is None else observed_at
+        try:
+            remote = extract_sessions(self.client.get_sessions()) if remote_sessions is None else extract_sessions(remote_sessions)
+            states = {normalize_session_name(item.get("name")): session_state_for(remote, item.get("name")) for item in remote}
+        except Exception:
+            for name in list(self.reply_policy.sessions):
+                self.reply_policy.observe(name, False, observed_at)
+            return False
+        for name in set(states) | set(self.reply_policy.sessions):
+            self.ensure_managed_session(name)
+            self.reply_policy.observe(name, classify_session_state(states.get(name)), observed_at)
+        return True
+
+    def _reply_ticket(self, session_name, timestamp, chat_id, now=None):
+        if not self._sync_reply_connections():
+            return None
+        settings = self._settings(session_name)
+        all_day = as_bool(settings.get("auto_reply_all_day", "0"))
+        if not all_day and not as_bool(settings.get("auto_reply_enabled", "0")):
+            return None
+        current = now.astimezone(SHANGHAI_TZ) if now else datetime.fromtimestamp(self.clock(), SHANGHAI_TZ)
+        window = 0 if all_day else active_window_start(normalize_windows(settings.get("weekly_reply_windows", "{}")), current)
+        if window is None or (self.chat is not None and self.chat.is_human_takeover(session_name, chat_id)):
+            return None
+        return self.reply_policy.ticket(session_name, timestamp, window, chat_id)
 
     def admin_users_payload(self):
         return {"items": self.admin_service.list_users()}
@@ -954,6 +981,8 @@ class PanelState:
             ),
             clock=self.clock,
             outbound_recorder=self._record_outbound_message,
+            takeover_changed=self.reply_policy.chat_changed,
+            takeover_lock=self.reply_policy.lock,
         )
         self.translation = TranslationService(
             self.database_path,
@@ -1070,8 +1099,10 @@ class PanelState:
                 return method(*args)
             raise
 
-    def _handle_commerce(self, request, session_name):
+    def _handle_commerce(self, request, session_name, suppress_customer_notifications=False):
         """Run order tools with an outbound sender bound to the triggering session."""
+        request = dict(request)
+        request["_suppress_customer_notifications"] = bool(suppress_customer_notifications)
         cases = getattr(self.commerce, "cases", None)
         sender = getattr(cases, "send_message", None) if cases is not None else None
         if cases is None or not hasattr(cases, "send_message"):
@@ -1206,7 +1237,6 @@ class PanelState:
             "auto_reply_enabled": as_bool(values.get("auto_reply_enabled", "0")),
             "auto_reply_all_day": as_bool(values.get("auto_reply_all_day", "0")),
             "weekly_reply_windows": normalize_windows(values.get("weekly_reply_windows", "{}")),
-            "default_reply_text": values.get("default_reply_text", "").strip() or DEFAULT_REPLY_TEXT,
             "persona": values.get("persona", ""),
             "system_prompt": values.get("system_prompt", ""),
             "ai_base_url": values.get("ai_base_url", ""),
@@ -1224,6 +1254,21 @@ class PanelState:
         }
 
     def save_settings(self, payload, session_name=DEFAULT_SESSION_NAME):
+        name = normalize_session_name(session_name)
+        with self.reply_policy.lock:
+            previous = self._settings(name)
+            result = self._save_settings(payload, name)
+            was_enabled = as_bool(previous.get("auto_reply_enabled")) or as_bool(previous.get("auto_reply_all_day"))
+            enabled = result["auto_reply_enabled"] or result["auto_reply_all_day"]
+            timing_changed = (as_bool(previous.get("auto_reply_all_day")) != result["auto_reply_all_day"] or
+                              normalize_windows(previous.get("weekly_reply_windows", "{}")) != result["weekly_reply_windows"])
+            if enabled and (not was_enabled or timing_changed):
+                self.reply_policy.invalidate(name)
+            if was_enabled and not enabled:
+                self.reply_policy.invalidate(name)
+            return result
+
+    def _save_settings(self, payload, session_name=DEFAULT_SESSION_NAME):
         if not isinstance(payload, dict):
             raise ValueError("设置格式不正确")
         name = normalize_session_name(session_name)
@@ -1255,7 +1300,7 @@ class PanelState:
             updates["weekly_reply_windows"] = json.dumps(
                 normalize_windows(payload["weekly_reply_windows"]), ensure_ascii=False
             )
-        for key in ("default_reply_text", "persona", "system_prompt", "ai_base_url", "ai_model"):
+        for key in ("persona", "system_prompt", "ai_base_url", "ai_model"):
             if key in payload:
                 updates[key] = str(payload[key] or "").strip()
         if "theme" in payload:
@@ -1562,7 +1607,7 @@ class PanelState:
         self.log("INFO", "knowledge.delete", f"已删除知识库资料 #{item_id}", name_session)
 
     def _within_schedule(self, windows, now=None):
-        current = now.astimezone(SHANGHAI_TZ) if now else datetime.now(SHANGHAI_TZ)
+        current = now.astimezone(SHANGHAI_TZ) if now else datetime.fromtimestamp(self.clock(), SHANGHAI_TZ)
         day_index = current.weekday()
         day = WEEKDAYS[day_index]
         previous_day = WEEKDAYS[(day_index - 1) % len(WEEKDAYS)]
@@ -1851,7 +1896,7 @@ class PanelState:
         model = settings.get("ai_model", "").strip()
         api_key = settings.get("ai_api_key", "")
         if not (base_url and model and api_key):
-            return settings.get("default_reply_text", "").strip() or DEFAULT_REPLY_TEXT, "fixed"
+            return "", "ai_unconfigured"
         endpoint = base_url if base_url.rstrip("/").endswith("/chat/completions") else base_url.rstrip("/") + "/chat/completions"
         knowledge_context = self._knowledge_context(name)
         try:
@@ -1929,9 +1974,14 @@ class PanelState:
         try:
             with urlopen(request, timeout=30) as response:
                 result = json.loads(response.read().decode("utf-8"))
-            message_result = result["choices"][0]["message"]
+            choice = result["choices"][0]
+            message_result = choice["message"]
+            if message_result.get("refusal") or choice.get("finish_reason") not in (None, "stop", "tool_calls"):
+                return "", "ai_invalid_result"
             tool_calls = message_result.get("tool_calls") or []
-            if include_tools and tool_calls:
+            if tool_calls:
+                if not include_tools or not self.commerce_config.enabled or not isinstance(tool_calls, list):
+                    return "", "ai_invalid_tool"
                 for tool_call in tool_calls:
                     function = tool_call.get("function") if isinstance(tool_call, dict) else None
                     if not isinstance(function, dict) or function.get("name") != "query_order":
@@ -1945,11 +1995,13 @@ class PanelState:
                     if arguments.get("query_type") not in {"order_status", "payment_status"}:
                         continue
                     return json.dumps(arguments, ensure_ascii=False), "order_tool"
-            reply = str(message_result.get("content") or "").strip()
-            return reply or DEFAULT_REPLY_TEXT, "ai"
+                return "", "ai_invalid_tool"
+            content = message_result.get("content")
+            reply = content.strip() if isinstance(content, str) else ""
+            return (reply, "ai") if reply else ("", "ai_empty")
         except Exception as error:
             self.log("ERROR", "ai.reply", redact_error(error, api_key), name)
-            return settings.get("default_reply_text", "").strip() or DEFAULT_REPLY_TEXT, "fixed_fallback"
+            return "", "ai_error"
 
     def _record_incoming_activity(self, chat_id, received_at, session_name=DEFAULT_SESSION_NAME):
         name = normalize_session_name(session_name)
@@ -2080,11 +2132,22 @@ class PanelState:
             session_name, event_name, message, chat_id, message_id, from_me, is_media, message_type
         )
         if not event_name.startswith("message"):
+            if event_name == "session.status":
+                stamp = message_timestamp(event.get("timestamp"), self.clock())
+                if stamp is not None:
+                    status = str(message.get("status") or message.get("state") or "").upper()
+                    if status:
+                        self.reply_policy.observe(session_name, classify_session_state(status), event_timestamp=stamp)
+                else:
+                    self._sync_reply_connections()
             return {"action": "ignored", "reason": "非消息事件", "session": session_name}
         if not chat_id or not message_id:
             return {"action": "ignored", "reason": "消息缺少聊天编号或消息编号", "session": session_name}
-        current = now.astimezone(SHANGHAI_TZ) if now else datetime.now(SHANGHAI_TZ)
+        current = now.astimezone(SHANGHAI_TZ) if now else datetime.fromtimestamp(self.clock(), SHANGHAI_TZ)
         received_at = int(current.timestamp())
+        original_timestamp = message_timestamp(
+            message.get("timestamp") or message.get("t") or metadata.get("timestamp") or metadata.get("t"), received_at
+        )
         direction = "outbound" if from_me else "inbound"
         context_content, media_kind = self._message_context_content(message, direction, message_type)
         try:
@@ -2094,7 +2157,7 @@ class PanelState:
                 direction,
                 message_id,
                 context_content,
-                received_at,
+                original_timestamp if original_timestamp is not None else received_at,
             )
         except Exception as error:
             self.log("ERROR", "conversation.archive", "消息归档失败：" + redact_error(error, self.api_key), session_name)
@@ -2113,7 +2176,6 @@ class PanelState:
         # Media requests always use the bounded marker (including its caption)
         # so the AI knows both the media kind and any accompanying text.
         incoming_for_ai = context_content if media_kind else customer_text
-        is_hot = self._record_incoming_activity(chat_id, received_at, session_name)
         if self.chat is not None and self.chat.is_human_takeover(session_name, chat_id):
             self.log("INFO", "auto_reply.ignored", "人工接管中", session_name)
             return {"action": "ignored", "reason": "人工接管中", "session": session_name}
@@ -2124,6 +2186,11 @@ class PanelState:
         if not all_day and not self._within_schedule(normalize_windows(settings.get("weekly_reply_windows", "{}")), now):
             self.log("INFO", "auto_reply.ignored", "当前不在回复时间段", session_name)
             return {"action": "ignored", "reason": "当前不在回复时间段", "session": session_name}
+        ticket = self._reply_ticket(session_name, original_timestamp, chat_id, now)
+        if ticket is None:
+            self.log("INFO", "auto_reply.ignored", "历史消息、时间无效或当前回复周期未就绪", session_name)
+            return {"action": "ignored", "reason": "消息不属于当前自动回复周期", "session": session_name}
+        is_hot = self._record_incoming_activity(chat_id, received_at, session_name)
         per_side = normalize_context_per_side(
             settings.get("auto_reply_context_per_side", CONTEXT_PER_SIDE_MIN)
         )
@@ -2150,7 +2217,7 @@ class PanelState:
             try:
                 tool_request = json.loads(reply)
                 tool_request.update({"chat_id": chat_id, "sender_phone": chat_id.split("@", 1)[0]})
-                commerce_result = self._handle_commerce(tool_request, session_name)
+                commerce_result = self._handle_commerce(tool_request, session_name, suppress_customer_notifications=True)
                 if commerce_result.get("action") == "reply":
                     reply = commerce_result["text"]
                     mode = "order"
@@ -2165,15 +2232,20 @@ class PanelState:
                     )
                     mode = "order_selection"
                 else:
-                    reply = "您的订单正在人工核对，请稍候。"
-                    mode = "order_manual"
-            except (TypeError, ValueError, json.JSONDecodeError) as error:
+                    reply, mode = "", "ai_tool_unavailable"
+            except Exception as error:
                 self.log("ERROR", "commerce.tool", redact_sensitive(error), session_name)
-                reply = settings.get("default_reply_text", "").strip() or DEFAULT_REPLY_TEXT
-                mode = "fixed_fallback"
+                reply, mode = "", "ai_invalid_tool"
+        if not isinstance(reply, str) or not reply.strip():
+            self.log("INFO", "auto_reply.ignored", "AI 未产生有效回复（" + mode + "）", session_name)
+            return {"action": "ignored", "reason": "AI 未产生有效回复", "mode": mode, "session": session_name}
         if dispatch:
             self._wait_before_reply(reply, is_hot)
-            self._send_text(session_name, chat_id, reply, origin="auto_ai")
+            with self.reply_policy.lock:
+                if self._reply_ticket(session_name, original_timestamp, chat_id) != ticket:
+                    self.log("INFO", "auto_reply.ignored", "发送前回复条件已变化，取消发送", session_name)
+                    return {"action": "ignored", "reason": "发送前回复条件已变化", "session": session_name}
+                self._send_text(session_name, chat_id, reply, origin="auto_ai")
         conversation_type = "热对话" if is_hot else "冷对话"
         self.log("INFO", "auto_reply.sent", f"已处理私聊文字消息（{mode}，{conversation_type}）", session_name)
         return {"action": "replied", "mode": mode, "chat_id": chat_id, "text": reply, "session": session_name}
@@ -2230,8 +2302,10 @@ class PanelState:
             },
         }
 
-    def sessions_payload(self, remote_sessions=None):
+    def sessions_payload(self, remote_sessions=None, observed_at=None):
+        observed_at = self.clock() if observed_at is None else observed_at
         remote = extract_sessions(remote_sessions) if remote_sessions is not None else extract_sessions(self.client.get_sessions())
+        self._sync_reply_connections(remote, observed_at)
         managed = self.managed_session_rows()
         names = [item["session_name"] for item in managed]
         for item in remote:
@@ -2271,11 +2345,12 @@ class PanelState:
             errors.append(f"WAHA 版本接口失败（HTTP {error.status or '网络'}）：{redact_error(error, self.api_key)}")
 
         remote_sessions = []
+        sessions_observed_at = self.clock()
         try:
             remote_sessions = extract_sessions(self.client.get_sessions())
         except WahaApiError as error:
             errors.append(f"会话状态读取失败（HTTP {error.status or '网络'}）：{redact_error(error, self.api_key)}")
-        sessions = self.sessions_payload(remote_sessions)
+        sessions = self.sessions_payload(remote_sessions, sessions_observed_at)
         try:
             selected = normalize_session_name(selected_session or DEFAULT_SESSION_NAME)
         except ValueError:
@@ -2367,6 +2442,7 @@ class PanelState:
     def start_session(self, session_name=DEFAULT_SESSION_NAME):
         name = normalize_session_name(session_name)
         self.ensure_managed_session(name)
+        self.reply_policy.observe(name, False)
         self._client_session_call("start_session", name)
         self.log("INFO", "session.start", "已请求启动会话", name)
         return self.session_detail(name)
@@ -2374,6 +2450,7 @@ class PanelState:
     def stop_session(self, session_name=DEFAULT_SESSION_NAME):
         name = normalize_session_name(session_name)
         self.ensure_managed_session(name)
+        self.reply_policy.observe(name, False)
         self._client_session_call("stop_session", name)
         self.log("INFO", "session.stop", "已请求停止会话", name)
         return self.session_detail(name)
@@ -2381,6 +2458,7 @@ class PanelState:
     def restart_session(self, session_name=DEFAULT_SESSION_NAME):
         name = normalize_session_name(session_name)
         self.ensure_managed_session(name)
+        self.reply_policy.observe(name, False)
         self._client_session_call("restart_session", name)
         self.log("INFO", "session.restart", "已请求重启会话", name)
         return self.session_detail(name)
@@ -2824,6 +2902,8 @@ def multi_session_html_page():
     const themeNames = {daylight:'白天',night:'夜间'};
     let selected = new URLSearchParams(location.search).get('session') || 'default';
     let statusData = null;
+    let refreshGeneration = 0;
+    let refreshAbort = null;
     let csrfToken = '';
      let qrRequestGeneration = 0;
      let qrObjectUrl = '';
@@ -2839,14 +2919,15 @@ def multi_session_html_page():
      function initials(value) { const text = String(value || 'W').trim(); return Array.from(text)[0]?.toUpperCase() || 'W'; }
      function renderIdentityAvatar(item) { const node = $('identityAvatar'); const rawUrl = String(item?.avatar_url || ''); const avatarUrl = rawUrl.startsWith('/api/sessions/') ? rawUrl : ''; const fallback = initials(item?.display_name || item?.name); const currentImage = node.querySelector('img'); const sameUrl = node.dataset.avatarUrl === avatarUrl; const sameFallback = node.dataset.avatarFallback === fallback; if (sameUrl && sameFallback && ((avatarUrl && (currentImage || node.dataset.avatarFailed === '1')) || (!avatarUrl && !currentImage))) return; if (!sameUrl) node.dataset.avatarFailed = ''; node.dataset.avatarUrl = avatarUrl; node.dataset.avatarFallback = fallback; if (!avatarUrl || node.dataset.avatarFailed === '1') { node.replaceChildren(); node.textContent = fallback; return; } if (currentImage?.dataset.avatarUrl === avatarUrl) return; const image = document.createElement('img'); image.alt = ''; image.loading = 'lazy'; image.decoding = 'async'; image.dataset.avatarUrl = avatarUrl; image.src = avatarUrl; image.addEventListener('error', () => { if (node.dataset.avatarUrl !== avatarUrl) return; node.dataset.avatarFailed = '1'; node.replaceChildren(); node.textContent = fallback; }); node.replaceChildren(image); }
     function currentItem() { return (statusData?.sessions || []).find(item => item.name === selected) || null; }
-    function renderSessions() { const items = statusData?.sessions || []; $('sessionCount').textContent = `${items.length} 个会话`; $('sessionList').innerHTML = items.length ? items.map(item => `<button class="session-item ${item.name === selected ? 'selected' : ''}" data-session="${esc(item.name)}" type="button"><div class="session-avatar" aria-hidden="true">${esc(initials(item.display_name || item.name))}</div><div class="session-body"><div class="session-name-row"><span class="session-display">${esc(item.display_name || item.name)}</span><span class="mini-status ${stateTone(item.state)}"><span class="service-dot"></span>${esc(stateText(item.state))}</span></div><div class="session-tech">${esc(item.name)}</div><div class="session-meta"><span>${item.auto_reply?.all_day ? '全时段自动回复' : item.auto_reply?.enabled ? '按时段自动回复' : '自动回复关闭'}</span><span>${item.auto_reply?.ai_configured ? 'AI 已配置' : '固定文案'}</span></div></div><svg class="icon" aria-hidden="true"><use href="#ui-chevron"/></svg></button>`).join('') : '<div class="empty">WAHA 尚未返回会话。</div>'; document.querySelectorAll('[data-session]').forEach(button => button.addEventListener('click', () => selectSession(button.dataset.session))); }
+    function renderSessions() { const items = statusData?.sessions || []; $('sessionCount').textContent = `${items.length} 个会话`; const list = $('sessionList'); const markup = items.length ? items.map(item => `<button class="session-item ${item.name === selected ? 'selected' : ''}" data-session="${esc(item.name)}" type="button"><div class="session-avatar" aria-hidden="true">${esc(initials(item.display_name || item.name))}</div><div class="session-body"><div class="session-name-row"><span class="session-display">${esc(item.display_name || item.name)}</span><span class="mini-status ${stateTone(item.state)}"><span class="service-dot"></span>${esc(stateText(item.state))}</span></div><div class="session-tech">${esc(item.name)}</div><div class="session-meta"><span>${item.auto_reply?.all_day ? '全时段自动回复' : item.auto_reply?.enabled ? '按时段自动回复' : '自动回复关闭'}</span><span>${item.auto_reply?.ai_configured ? 'AI 已配置' : 'AI 未配置'}</span></div></div><svg class="icon" aria-hidden="true"><use href="#ui-chevron"/></svg></button>`).join('') : '<div class="empty">WAHA 尚未返回会话。</div>'; if (list.innerHTML !== markup) list.innerHTML = markup; }
+    $('sessionList').addEventListener('click', event => { const button = event.target.closest('button[data-session]'); if (button && $('sessionList').contains(button)) selectSession(button.dataset.session); });
      function syncConnectionPresentation() { const item = currentItem(); const connected = ['WORKING','CONNECTED'].includes(item?.state); if (connected) { qrRequestGeneration += 1; releaseQrObjectUrl(); $('qrImageLayer').replaceChildren(); setQrState('connected', '已连接，无需二维码', '当前会话已连接；停止后可重新扫码。'); $('qrButton').disabled = true; return; } if ($('qrWrap').dataset.state === 'connected') setQrState('idle', '二维码待刷新', '点击“刷新二维码”获取当前会话的登录二维码。'); $('qrButton').disabled = $('qrWrap').dataset.state === 'loading'; }
-     function renderDetail() { const item = currentItem(); if (!item) { $('pageTitle').textContent = '没有可用会话'; $('pageSubtitle').textContent = '请先新建或让 WAHA 返回一个会话。'; $('deleteButton').disabled = true; syncConnectionPresentation(); return; } $('pageTitle').textContent = item.display_name || item.name; $('pageSubtitle').textContent = '独立管理连接状态、二维码、聊天、日志和自动回复。'; $('currentSessionLabel').textContent = item.display_name || item.name; $('currentSessionTech').textContent = item.name; $('identityName').textContent = item.display_name || item.name; $('identityTech').textContent = 'WAHA / ' + item.name; renderIdentityAvatar(item); badge($('currentBadge'), item.state); badge($('identityBadge'), item.state); $('autoReplySummary').textContent = item.auto_reply?.all_day ? '全时段开启' : item.auto_reply?.enabled ? '按时段开启' : '已关闭'; $('aiSummary').textContent = item.auto_reply?.ai_configured ? '已配置（密钥隐藏）' : '未配置，使用固定文案'; $('remoteStateSummary').textContent = stateText(item.state); $('updatedSummary').textContent = formatTime(item.updated_at); $('chatLink').href = '/sessions/' + encodeURIComponent(item.name) + '/chats'; $('settingsLink').href = '/settings?session=' + encodeURIComponent(item.name); $('startButton').disabled = ['WORKING','CONNECTED','STARTING','AUTHENTICATING','SCAN_QR_CODE'].includes(item.state); $('stopButton').disabled = item.state === 'STOPPED' || item.state === 'NOT_CREATED'; $('restartButton').disabled = item.state === 'NOT_CREATED'; $('deleteButton').disabled = (statusData?.sessions || []).length <= 1; syncConnectionPresentation(); }
+     function renderDetail() { const item = currentItem(); if (!item) { $('pageTitle').textContent = '没有可用会话'; $('pageSubtitle').textContent = '请先新建或让 WAHA 返回一个会话。'; $('deleteButton').disabled = true; syncConnectionPresentation(); return; } $('pageTitle').textContent = item.display_name || item.name; $('pageSubtitle').textContent = '独立管理连接状态、二维码、聊天、日志和自动回复。'; $('currentSessionLabel').textContent = item.display_name || item.name; $('currentSessionTech').textContent = item.name; $('identityName').textContent = item.display_name || item.name; $('identityTech').textContent = 'WAHA / ' + item.name; renderIdentityAvatar(item); badge($('currentBadge'), item.state); badge($('identityBadge'), item.state); $('autoReplySummary').textContent = item.auto_reply?.all_day ? '全时段开启' : item.auto_reply?.enabled ? '按时段开启' : '已关闭'; $('aiSummary').textContent = item.auto_reply?.ai_configured ? '已配置（密钥隐藏）' : '未配置，自动回复不可用'; $('remoteStateSummary').textContent = stateText(item.state); $('updatedSummary').textContent = formatTime(item.updated_at); $('chatLink').href = '/sessions/' + encodeURIComponent(item.name) + '/chats'; $('settingsLink').href = '/settings?session=' + encodeURIComponent(item.name); $('startButton').disabled = ['WORKING','CONNECTED','STARTING','AUTHENTICATING','SCAN_QR_CODE'].includes(item.state); $('stopButton').disabled = item.state === 'STOPPED' || item.state === 'NOT_CREATED'; $('restartButton').disabled = item.state === 'NOT_CREATED'; $('deleteButton').disabled = (statusData?.sessions || []).length <= 1; syncConnectionPresentation(); }
     function renderGlobal() { const waha = statusData?.waha || {}; $('wahaSummary').textContent = waha.running ? (waha.version ? '运行中 · ' + waha.version : '运行中') : '不可用'; $('dbSummary').textContent = statusData?.database?.ok ? '数据库正常' : '数据库异常'; $('servicePill').className = 'service-pill ' + (waha.running ? 'good' : ''); $('servicePill').innerHTML = `<span class="service-dot" aria-hidden="true"></span><span>${waha.running ? 'WAHA 运行中' : 'WAHA 不可用'}</span>`; $('globalNotice').textContent = statusData?.errors?.length ? statusData.errors.join('；') : ''; }
     function renderLogs(logs, errors) { const all = [...(errors || []).map(message => ({level:'ERROR',event:'当前检查',message,created_at:Date.now()/1000})), ...(logs || [])]; $('logs').innerHTML = all.length ? all.map(log => `<div class="log ${log.level === 'ERROR' ? 'error' : ''}"><div class="log-meta"><span>${esc(log.level)} / ${esc(log.event)}</span><span>${esc(formatTime(log.created_at))}</span></div><div class="log-message">${esc(log.message)}</div></div>`).join('') : '<div class="empty">暂无当前会话记录</div>'; }
     async function refreshLogs() { if (!selected) return; try { const response = await fetch(apiSession('/logs'), {cache:'no-store'}); const data = await response.json(); if (!response.ok) throw new Error(data.message || '读取记录失败'); renderLogs(data.logs, []); } catch (error) { $('logs').innerHTML = `<div class="empty">${esc(error.message)}</div>`; } }
     function render(data) { statusData = data; const names = (data.sessions || []).map(item => item.name); if (!names.includes(selected)) setSelectedSession(data.selected_session || names[0] || 'default'); renderSessions(); renderDetail(); renderGlobal(); renderOverviewMetrics(); const item = currentItem(); renderLogs(data.logs, data.errors); if (item && data.auto_reply?.theme) applyTheme(data.auto_reply.theme); const url = new URL(location.href); url.searchParams.set('session', selected); history.replaceState(null,'',url); }
-    async function refresh() { try { const response = await fetch('/api/status?session=' + encodeURIComponent(selected), {cache:'no-store'}); const data = await response.json(); if (!response.ok) throw new Error(data.message || '读取状态失败'); render(data); } catch (error) { $('globalNotice').textContent = error.message; } }
+    async function refresh() { const requestedSession = selected; const generation = ++refreshGeneration; refreshAbort?.abort(); refreshAbort = new AbortController(); try { const response = await fetch('/api/status?session=' + encodeURIComponent(requestedSession), {cache:'no-store',signal:refreshAbort.signal}); const data = await response.json(); if (generation !== refreshGeneration || selected !== requestedSession) return; if (!response.ok) throw new Error(data.message || '读取状态失败'); render(data); } catch (error) { if (error.name !== 'AbortError' && generation === refreshGeneration && selected === requestedSession) $('globalNotice').textContent = error.message; } }
     function renderOverviewMetrics() {
       const sessions = Array.isArray(statusData?.sessions) ? statusData.sessions : [];
       $('sessionTotalMetric').textContent = String(sessions.length);
@@ -2862,7 +2943,7 @@ def multi_session_html_page():
      async function revealQrImage(blob, ownsRequest) { const objectUrl = URL.createObjectURL(blob); const image = document.createElement('img'); image.alt = '当前 WhatsApp 会话二维码'; image.src = objectUrl; try { await image.decode(); } catch (error) { releaseQrObjectUrl(objectUrl); throw error; } if (!ownsRequest()) { releaseQrObjectUrl(objectUrl); return false; } releaseQrObjectUrl(); qrObjectUrl = objectUrl; $('qrImageLayer').replaceChildren(image); requestAnimationFrame(() => { if (ownsRequest()) setQrState('ready', '二维码已生成', '请使用手机 WhatsApp 扫描。'); }); return true; }
       function resetQrState() { qrRequestGeneration += 1; pairingRequestGeneration += 1; $('qrButton').disabled = false; $('pairingButton').disabled = false; $('pairingButton').setAttribute('aria-busy', 'false'); releaseQrObjectUrl(); setQrState('idle', '二维码待刷新', '点击“刷新二维码”获取当前会话的登录二维码。'); setPairingState('idle'); }
     function setSelectedSession(name) { const next = name || 'default'; if (selected === next) return false; selected = next; resetQrState(); return true; }
-    async function selectSession(name) { setSelectedSession(name); $('globalNotice').textContent = ''; $('logs').innerHTML = '<div class="empty">正在读取记录...</div>'; await refresh(); }
+    async function selectSession(name) { if (typeof navigateSession === 'function') { navigateSession(name); return; } if (!setSelectedSession(name)) return; $('globalNotice').textContent = ''; $('logs').innerHTML = '<div class="empty">正在读取记录...</div>'; if (typeof history.pushState === 'function') { const url = new URL(location.href); url.searchParams.set('session', selected); history.pushState(null,'',url); } await refresh(); }
      async function operation(action) { const button = $(action + 'Button'); if (button) { button.disabled = true; } $('controlNotice').textContent = ''; try { const response = await mutateFetch(apiSession('/' + action), {method:'POST'}); const data = await response.json(); if (!response.ok) throw new Error(data.message || '会话操作失败'); $('controlNotice').className = 'notice success'; $('controlNotice').textContent = '操作已提交，状态正在更新。'; await refresh(); } catch (error) { $('controlNotice').className = 'notice'; $('controlNotice').textContent = error.message; } finally { renderDetail(); } }
      async function deleteSelected() { const item = currentItem(); if (!item || (statusData?.sessions || []).length <= 1) return; if (!window.confirm('确认删除会话“' + (item.display_name || item.name) + '”？这会同时删除 WAHA 会话和面板中的关联数据。')) return; const button = $('deleteButton'); button.disabled = true; $('controlNotice').textContent = ''; try { const response = await mutateFetch('/api/sessions/' + encodeURIComponent(item.name), {method:'DELETE'}); const data = await response.json(); if (!response.ok) throw new Error(data.message || '删除会话失败'); const remaining = (statusData?.sessions || []).filter(entry => entry.name !== item.name); setSelectedSession(remaining[0]?.name || 'default'); $('controlNotice').className = 'notice success'; $('controlNotice').textContent = '会话已删除。'; await refresh(); } catch (error) { $('controlNotice').className = 'notice'; $('controlNotice').textContent = error.message; } finally { renderDetail(); } }
      async function loadQr() { const item = currentItem(); if (['WORKING','CONNECTED'].includes(item?.state)) { syncConnectionPresentation(); return; } const requestedSession = selected; const requestGeneration = ++qrRequestGeneration; const ownsRequest = () => selected === requestedSession && qrRequestGeneration === requestGeneration; setQrState('loading', '正在获取二维码', '请稍候，获取完成后会自动显示。'); $('qrButton').disabled = true; try { const response = await fetch('/api/sessions/' + encodeURIComponent(requestedSession) + '/qr?ts=' + Date.now(), {cache:'no-store'}); const type = response.headers.get('content-type') || ''; if (!response.ok || !type.startsWith('image/')) { const data = type.includes('json') ? await response.json() : {}; throw new Error(data.message || '二维码暂不可用'); } await revealQrImage(await response.blob(), ownsRequest); } catch (error) { if (ownsRequest()) setQrState('error', '二维码获取失败', error.message || '请启动会话，然后点击“刷新二维码”重试。'); } finally { if (ownsRequest()) $('qrButton').disabled = false; } }
@@ -2940,7 +3021,6 @@ def settings_page():
             <div class="range-field"><label for="contextPerSide"><span>每一方的历史消息数</span><output id="contextPerSideValue" for="contextPerSide">5</output></label><input id="contextPerSide" type="range" min="5" max="50" step="1" value="5"><div class="section-note" id="contextExplanation">客户 5 条 + 自己 5 条，共最多 10 条历史上下文。</div></div>
             <div class="switch"><label class="check-label" for="customerMemoryEnabled"><input id="customerMemoryEnabled" type="checkbox">启用客户动态记忆</label><span id="customerMemoryState" class="status-chip off">已关闭</span></div><div class="section-note">按客户保存加密的对话摘要、需求偏好和有效人工回复经验，用于后续 AI 回复；关闭后保留已有记忆并停止更新和使用。</div>
             <fieldset class="media-options"><legend>可触发自动回复的客户媒体</legend><div class="section-note">默认关闭；仅处理私聊客户消息，开启后才会处理对应媒体类型。</div><label for="autoReplyMedia_image"><input id="autoReplyMedia_image" type="checkbox">图片</label><label for="autoReplyMedia_video"><input id="autoReplyMedia_video" type="checkbox">视频</label><label for="autoReplyMedia_audio"><input id="autoReplyMedia_audio" type="checkbox">音频</label><label for="autoReplyMedia_file"><input id="autoReplyMedia_file" type="checkbox">文件</label></fieldset>
-            <label for="defaultText">默认固定回复文案</label><textarea id="defaultText" maxlength="4000"></textarea>
             <label for="persona">人设</label><textarea id="persona" maxlength="4000"></textarea>
             <label for="systemPrompt">系统提示词</label><textarea id="systemPrompt" maxlength="8000"></textarea>
           </div>
@@ -2985,8 +3065,8 @@ def settings_page():
     async function ensureCsrf() { if (csrfToken) return csrfToken; const response = await fetch('/api/security/csrf', {cache:'no-store', credentials:'same-origin'}); const data = await response.json(); if (!response.ok) throw new Error(data.message || '安全校验不可用'); csrfToken = data.csrf_token || ''; return csrfToken; }
     async function mutateFetch(url, options={}) { const headers = new Headers(options.headers || {}); try { await ensureCsrf(); } catch (_) {} if (csrfToken) headers.set('X-CSRF-Token', csrfToken); return fetch(url, {...options, headers, credentials:'same-origin', cache:'no-store'}); }
     async function saveTheme(theme) { applyTheme(theme); try { const response = await mutateFetch('/api/settings' + sessionQuery, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({theme})}); if (!response.ok) { const data = await response.json(); throw new Error(data.message || '主题保存失败'); } } catch (error) { $('settingsNotice').textContent = error.message; } }
-    async function loadSettings() { const response = await fetch('/api/settings' + sessionQuery, {cache:'no-store'}); const data = await response.json(); if (!response.ok) throw new Error(data.message || '读取设置失败'); $('enabled').checked = data.auto_reply_enabled; $('allDay').checked = data.auto_reply_all_day; $('customerMemoryEnabled').checked = Boolean(data.customer_memory_enabled); setEnabledState(); renderSchedule(data.weekly_reply_windows); $('contextPerSide').value = String(data.auto_reply_context_per_side ?? 5); renderContextCount(); for (const name of mediaTypeNames) $('autoReplyMedia_' + name).checked = Boolean(data.auto_reply_media_types?.[name]); $('defaultText').value = data.default_reply_text || ''; $('persona').value = data.persona || ''; $('systemPrompt').value = data.system_prompt || ''; $('aiBaseUrl').value = data.ai_base_url || ''; $('aiModel').value = data.ai_model || ''; $('keyState').textContent = data.ai_api_key_configured ? 'APIKey：已配置（隐藏）' : 'APIKey：未配置'; applyTheme(data.theme); }
-    async function saveSettings(event) { event.preventDefault(); const button = $('saveButton'); button.disabled = true; $('settingsNotice').textContent = ''; renderContextCount(); try { const body = {auto_reply_enabled:$('enabled').checked,auto_reply_all_day:$('allDay').checked,customer_memory_enabled:$('customerMemoryEnabled').checked,weekly_reply_windows:collectWindows(),auto_reply_context_per_side:Number($('contextPerSide').value),auto_reply_media_types:collectMediaTypes(),default_reply_text:$('defaultText').value,persona:$('persona').value,system_prompt:$('systemPrompt').value,ai_base_url:$('aiBaseUrl').value,ai_model:$('aiModel').value,ai_api_key:$('aiKey').value,clear_ai_api_key:$('clearKey').checked,theme:$('themeSelect').value}; const response = await mutateFetch('/api/settings' + sessionQuery, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}); const data = await response.json(); if (!response.ok) throw new Error(data.message || '保存失败'); $('aiKey').value = ''; $('clearKey').checked = false; $('keyState').textContent = data.ai_api_key_configured ? 'APIKey：已配置（隐藏）' : 'APIKey：未配置'; $('settingsNotice').className = 'notice success'; $('settingsNotice').textContent = '设置已保存'; delete document.body.dataset.dirty; } catch (error) { $('settingsNotice').className = 'notice'; $('settingsNotice').textContent = error.message; } finally { button.disabled = false; } }
+    async function loadSettings() { const response = await fetch('/api/settings' + sessionQuery, {cache:'no-store'}); const data = await response.json(); if (!response.ok) throw new Error(data.message || '读取设置失败'); $('enabled').checked = data.auto_reply_enabled; $('allDay').checked = data.auto_reply_all_day; $('customerMemoryEnabled').checked = Boolean(data.customer_memory_enabled); setEnabledState(); renderSchedule(data.weekly_reply_windows); $('contextPerSide').value = String(data.auto_reply_context_per_side ?? 5); renderContextCount(); for (const name of mediaTypeNames) $('autoReplyMedia_' + name).checked = Boolean(data.auto_reply_media_types?.[name]); $('persona').value = data.persona || ''; $('systemPrompt').value = data.system_prompt || ''; $('aiBaseUrl').value = data.ai_base_url || ''; $('aiModel').value = data.ai_model || ''; $('keyState').textContent = data.ai_api_key_configured ? 'APIKey：已配置（隐藏）' : 'APIKey：未配置'; applyTheme(data.theme); }
+    async function saveSettings(event) { event.preventDefault(); const button = $('saveButton'); button.disabled = true; $('settingsNotice').textContent = ''; renderContextCount(); try { const body = {auto_reply_enabled:$('enabled').checked,auto_reply_all_day:$('allDay').checked,customer_memory_enabled:$('customerMemoryEnabled').checked,weekly_reply_windows:collectWindows(),auto_reply_context_per_side:Number($('contextPerSide').value),auto_reply_media_types:collectMediaTypes(),persona:$('persona').value,system_prompt:$('systemPrompt').value,ai_base_url:$('aiBaseUrl').value,ai_model:$('aiModel').value,ai_api_key:$('aiKey').value,clear_ai_api_key:$('clearKey').checked,theme:$('themeSelect').value}; const response = await mutateFetch('/api/settings' + sessionQuery, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}); const data = await response.json(); if (!response.ok) throw new Error(data.message || '保存失败'); $('aiKey').value = ''; $('clearKey').checked = false; $('keyState').textContent = data.ai_api_key_configured ? 'APIKey：已配置（隐藏）' : 'APIKey：未配置'; $('settingsNotice').className = 'notice success'; $('settingsNotice').textContent = '设置已保存'; delete document.body.dataset.dirty; } catch (error) { $('settingsNotice').className = 'notice'; $('settingsNotice').textContent = error.message; } finally { button.disabled = false; } }
     async function addKnowledge(name, content) { $('knowledgeNotice').textContent = ''; const response = await mutateFetch('/api/knowledge' + sessionQuery, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({file_name:name,content})}); const data = await response.json(); if (!response.ok) throw new Error(data.message || '资料保存失败'); $('knowledgeText').value = ''; await loadKnowledge(); }
     async function loadKnowledge() { const response = await fetch('/api/knowledge' + sessionQuery, {cache:'no-store'}); const data = await response.json(); if (!response.ok) throw new Error(data.message || '资料读取失败'); $('knowledgeList').innerHTML = data.items.length ? data.items.map(item => `<div class="knowledge-item"><div><div class="knowledge-name">${esc(item.file_name)}</div><div class="knowledge-meta">${item.characters} 字符 · ${new Date(item.created_at * 1000).toLocaleString()}</div></div><div class="knowledge-actions"><button type="button" data-view="${item.id}">查看</button><button type="button" class="danger" data-delete="${item.id}">删除</button></div></div>`).join('') : '<div class="muted">暂无资料</div>'; document.querySelectorAll('[data-view]').forEach(button => button.addEventListener('click', () => viewKnowledge(button.dataset.view))); document.querySelectorAll('[data-delete]').forEach(button => button.addEventListener('click', () => deleteKnowledge(button.dataset.delete))); }
     async function viewKnowledge(id) { const response = await fetch('/api/knowledge/' + id + sessionQuery, {cache:'no-store'}); const data = await response.json(); if (!response.ok) throw new Error(data.message || '资料读取失败'); $('knowledgePreview').hidden = false; $('knowledgePreview').textContent = data.content; }

@@ -69,6 +69,7 @@ export function createLifetime(root,context){
     get readyState(){return this.source.readyState;}
   }
   const environment={document:documentProxy,window:windowProxy,location:locationProxy,history:historyProxy,fetch:scopedFetch,EventSource:ScopedEventSource,sharedTheme:()=>nativeDocument.documentElement.dataset.theme,
+    navigateSession:name=>{if(active&&!disposed)context.navigate('/?session='+encodeURIComponent(name));},
     setTimeout:(fn,ms,...args)=>schedule(fn,ms,false,args),clearTimeout:cancel,
     setInterval:(fn,ms,...args)=>schedule(fn,ms,true,args),clearInterval:cancel,
     requestAnimationFrame:fn=>{const id=nextId++;if(active)frames.set(id,nativeWindow.requestAnimationFrame(t=>{frames.delete(id);if(active&&!disposed)fn(t);}));return id;},

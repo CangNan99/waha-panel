@@ -158,7 +158,7 @@ def _avatar_url(value):
 
 class ChatService:
     def __init__(self, database_path, client, codec, hmac_secret, logger=None,
-                 clock=None, broker=None, outbound_recorder=None):
+                 clock=None, broker=None, outbound_recorder=None, takeover_changed=None, takeover_lock=None):
         self.database_path = Path(database_path)
         self.client = client
         self.codec = codec
@@ -167,6 +167,8 @@ class ChatService:
         self.clock = clock or time.time
         self.broker = broker or ChatEventBroker(clock=self.clock)
         self.outbound_recorder = outbound_recorder
+        self.takeover_changed = takeover_changed
+        self.takeover_lock = takeover_lock or threading.RLock()
         self._reference_lock = threading.Lock()
         self._chat_reference_cache = {}
         self._message_reference_cache = {}
@@ -470,6 +472,13 @@ class ChatService:
         return self._takeover_state_by_id(session, chat_id)["state"] == "HUMAN_TAKEOVER"
 
     def pause(self, session, chat_id):
+        with self.takeover_lock:
+            result = self._pause(session, chat_id)
+            if self.takeover_changed:
+                self.takeover_changed(_session_name(session), chat_id)
+            return result
+
+    def _pause(self, session, chat_id):
         name = _session_name(session)
         now = int(self.clock())
         key = self._chat_key(name, chat_id)
@@ -501,6 +510,13 @@ class ChatService:
         return self.pause(name, chat_id)
 
     def resume_ai(self, session, chat_ref):
+        with self.takeover_lock:
+            result = self._resume_ai(session, chat_ref)
+            if self.takeover_changed:
+                self.takeover_changed(_session_name(session), self._decode_chat(session, chat_ref))
+            return result
+
+    def _resume_ai(self, session, chat_ref):
         name = _session_name(session)
         chat_id = self._decode_chat(name, chat_ref)
         key = self._chat_key(name, chat_id)
@@ -707,6 +723,13 @@ class ChatService:
         return digest.hexdigest()
 
     def _begin_send(self, session, chat_id, request_id, kind, payload_hash):
+        with self.takeover_lock:
+            result = self._begin_send_locked(session, chat_id, request_id, kind, payload_hash)
+            if result is None and self.takeover_changed:
+                self.takeover_changed(_session_name(session), chat_id)
+            return result
+
+    def _begin_send_locked(self, session, chat_id, request_id, kind, payload_hash):
         name = _session_name(session)
         chat_key = self._chat_key(name, chat_id)
         now = int(self.clock())

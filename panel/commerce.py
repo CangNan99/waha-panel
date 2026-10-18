@@ -690,7 +690,8 @@ class OrderQueryCoordinator:
 
     def _manual(self, request: Dict[str, Any], reason: str, clue: str, source: str = "") -> Dict[str, Any]:
         case = self.cases.create_or_get_case(str(request.get("chat_id", "")), str(request.get("query_type", "order_status")), clue, reason)
-        self.cases.notify_customer_waiting(case)
+        if not request.get("_suppress_customer_notifications"):
+            self.cases.notify_customer_waiting(case)
         self.cases.notify_admin(case)
         self._audit(request, "manual", "", source, reason)
         return {"action": "manual", "reason": reason, "case": case}
