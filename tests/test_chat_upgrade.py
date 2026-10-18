@@ -85,15 +85,17 @@ class UpgradeTestCase(unittest.TestCase):
         self.database = Path(self.temp.name) / "panel.sqlite3"
         init_db(self.database, seed_business=False)
         self.client = getattr(self, "client_class", UpgradeClient)()
-        self.state = PanelState(
-            self.database,
-            self.client,
-            "redacted-test-key",
-            sleep_fn=lambda _seconds: None,
-            uniform_fn=lambda _start, _end: 0,
-            data_encryption_key=Fernet.generate_key().decode("ascii"),
-        )
-        self.state.save_settings({"auto_reply_all_day": True}, "default")
+        with patch('panel.app.time.time', return_value=time.time() - 2):
+            self.state = PanelState(
+                self.database,
+                self.client,
+                "redacted-test-key",
+                sleep_fn=lambda _seconds: None,
+                uniform_fn=lambda _start, _end: 0,
+                data_encryption_key=Fernet.generate_key().decode("ascii"),
+            )
+            self.state.save_settings({"auto_reply_all_day": True}, "default")
+        self.state.clock = time.time
         self.state.last_ai_context = ""
 
         def fake_ai_reply(_settings, _incoming, **kwargs):
@@ -144,6 +146,7 @@ class UpgradeTestCase(unittest.TestCase):
             "type": message_type,
             "hasMedia": has_media,
             "isGroup": is_group,
+            "timestamp": int(time.time()),
         }
         message.update(extra)
         return json.dumps({"event": "message", "session": "default", "payload": message}).encode("utf-8")
