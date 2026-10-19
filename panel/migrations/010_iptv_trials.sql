@@ -1,0 +1,26 @@
+CREATE TABLE IF NOT EXISTS iptv_provider_settings (
+    provider TEXT PRIMARY KEY,
+    config_ciphertext TEXT NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS iptv_session_settings (
+    session_name TEXT PRIMARY KEY,
+    enabled INTEGER NOT NULL DEFAULT 0 CHECK(enabled IN (0,1)),
+    pack TEXT NOT NULL DEFAULT 'all',
+    updated_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS iptv_trials (
+    id TEXT PRIMARY KEY,
+    provider TEXT NOT NULL,
+    customer_key TEXT NOT NULL,
+    session_name TEXT NOT NULL,
+    message_key TEXT NOT NULL,
+    state TEXT NOT NULL CHECK(state IN ('creating','created','sent','unknown','failed','cancelled')),
+    credentials_ciphertext TEXT NOT NULL DEFAULT '',
+    expires_at INTEGER NOT NULL DEFAULT 0,
+    error_code TEXT NOT NULL DEFAULT '',
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    UNIQUE(provider, customer_key)
+);
+CREATE INDEX IF NOT EXISTS idx_iptv_trials_created ON iptv_trials(provider, created_at);

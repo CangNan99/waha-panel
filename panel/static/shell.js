@@ -8,6 +8,18 @@ const translationSettings=document.getElementById('shellTranslationSettings');
 const records=new Map();
 let current=null,routeGeneration=0,authenticated=true,pendingController=null;
 
+// The chat inherits the space below the shell navigation. Safari's keyboard
+// changes the visual viewport without always resizing its layout viewport.
+function syncChatViewport(){
+  const shell=document.getElementById('applicationShell'),viewport=window.visualViewport;
+  if(shell.dataset.view==='chat'&&innerWidth<=820&&viewport&&Math.abs(viewport.scale-1)<.01){
+    shell.style.setProperty('--app-viewport-height',Math.min(innerHeight,viewport.height)+'px');
+  }else shell.style.removeProperty('--app-viewport-height');
+}
+window.addEventListener('resize',syncChatViewport);
+window.visualViewport?.addEventListener('resize',syncChatViewport);
+window.visualViewport?.addEventListener('scroll',syncChatViewport);
+
 function parseRoute(value){
   const url=new URL(value,location.origin);
   if(url.origin!==location.origin)return null;
@@ -23,6 +35,8 @@ function showError(message){errorBox.replaceChildren(document.createTextNode(mes
 function applyTheme(value){const theme=['daylight','night'].includes(value)?value:'daylight';document.documentElement.dataset.theme=theme;themeSelect.value=theme;localStorage.setItem('waha-panel-theme',theme);for(const record of records.values()){record.host.dataset.theme=theme;const select=record.host.shadowRoot.getElementById('themeSelect');if(select)select.value=theme;}}
 function updateMenu(){
   if(!current)return;
+  document.getElementById('applicationShell').dataset.view=current.context.view;
+  syncChatViewport();
   for(const link of menu.querySelectorAll('a')){
     const view=link.dataset.shellNav;
     if(view===current.context.view)link.setAttribute('aria-current','page');else link.removeAttribute('aria-current');

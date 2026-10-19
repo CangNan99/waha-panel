@@ -95,7 +95,7 @@ def controller_source(view):
     else:
         resume = "if(!document.body.dataset.dirty)loadSettings().catch(()=>{});loadKnowledge().catch(()=>{});"
         pause = ""
-        dispose = "csrfToken='';$('aiKey').value='';"
+        dispose = "csrfToken='';$('aiKey').value='';$('iptvKey').value='';"
     # The adapter gives canonical code a root-scoped document and bounded resources.
     return (
         "import {createLegacyView} from '/assets/ui/lifetime.js';\n"
@@ -125,7 +125,7 @@ VIEW_LAYOUT_CSS = r'''
 .window[data-view="chat"] .workspace.chat-grid{grid-column:1;grid-row:1;padding:14px}
 .shell{max-width:none;margin:0;height:100%;overflow:auto;padding:24px}
 .view-body>h1,.view-body>p{margin:24px}
-@media(max-width:820px){.window[data-view="chat"] .workspace.chat-grid{padding:0}.window[data-view="dashboard"]{grid-template-rows:auto minmax(0,1fr)}.shell{padding:16px}}
+@media(max-width:820px){.window[data-view="chat"] .workspace.chat-grid{padding:0}.view-body .window.has-chat .workspace.chat-grid,.view-body .window.has-chat .conversation-pane{height:100%;max-height:100%;min-height:0}.view-body .conversation-pane{min-width:0;width:100%}.view-body .composer-row{min-width:0}.view-body .composer textarea{width:100%;min-width:0}.window[data-view="dashboard"]{grid-template-rows:auto minmax(0,1fr)}.shell{padding:16px}}
 '''
 
 
@@ -162,6 +162,8 @@ html,body{height:100%;min-width:320px}.application-shell{margin:20px 24px;height
 html[data-theme="night"] .application-shell{background:#182034}html[data-theme="night"] .shell-navigation{background:linear-gradient(150deg,#373457,#273d57)}
 @media(max-width:820px){.application-shell{margin:0;height:100dvh;border:0;border-radius:0;grid-template-columns:1fr;grid-template-rows:auto minmax(0,1fr)}.shell-navigation{padding:9px 12px;gap:8px;overflow:visible;border-right:0;border-bottom:1px solid var(--line);display:grid;grid-template-columns:minmax(0,1fr) auto}.shell-brand{padding:0}.shell-brand strong{font-size:12px}.shell-brand span{display:none}.shell-menu{grid-column:1/-1;grid-row:2;display:flex;flex-direction:row;gap:4px}.shell-menu a{flex:1;justify-content:center;font-size:11px;min-height:35px;padding:0 4px;gap:4px}.shell-menu-icon{font-size:17px;width:17px}.shell-context{grid-column:2;grid-row:1;display:flex;gap:5px;align-items:center}.shell-context label{display:none}.shell-context select{width:auto;max-width:115px;min-height:32px;font-size:11px;padding:0 5px}.brand-mark{width:31px;height:31px}.shell-context #shellDirtyNotice{position:absolute;top:80px;right:12px;z-index:20}.shell-content{height:100%}}
 @media(prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
+.application-shell[data-view="chat"]{--app-viewport-height:100dvh}
+@media(max-width:820px){.application-shell[data-view="chat"]{height:var(--app-viewport-height,100dvh)}}
 '''
 
 SHELL_CSS += r'''

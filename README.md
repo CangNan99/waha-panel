@@ -4,7 +4,7 @@
 
 ## 界面预览
 
-1.0.16 修复自动回复的新消息起算边界与会话列表切换，取消默认固定回复和 AI 异常兜底。历史聊天仍可作为上下文。以下界面截图均使用演示数据。
+1.0.17 新增 IPTV 自动试用，每个客户永久仅有一次试用机会，修复手机聊天底部输入框显示。以下界面截图均使用演示数据。
 
 ![状态概览](docs/assets/overview-1.0.15.png)
 
@@ -53,6 +53,7 @@ pwsh -File .\install.ps1
 
 - 多 WhatsApp 会话统一管理
 - AI 自动回复、摘要和标签
+- IPTV 测试账号自动开通、加密保存与重复领取保护（[配置说明](docs/iptv-trials.md)）
 - 聊天列表、消息收发和人工接管
 - 打开聊天时定位最新消息，新消息到达时自动跟随
 - 图片、文字等消息发送
@@ -83,6 +84,7 @@ pwsh -File .\update.ps1 -Component waha
 
 | 版本 | 更新内容 | 详细说明 |
 | --- | --- | --- |
+| 1.0.17 | 新增 IPTV 自动试用、客户永久一次资格及凭据保护；修复手机聊天输入框和键盘视口适配。 | [docs/releases/1.0.17.md](docs/releases/1.0.17.md) |
 | 1.0.16 | 自动回复仅处理当前启用与连接周期的新消息；修复会话卡片切换和异步串号，AI 无有效结果时跳过发送。 | [docs/releases/1.0.16.md](docs/releases/1.0.16.md) |
 | 1.0.15 | 新增独立概览与日志、主菜单无刷新切换；修复二维码裁切、最新消息跟随与聊天背景，统一中文内部资料并增强异步草稿和日志脱敏保护。 | [docs/releases/1.0.15.md](docs/releases/1.0.15.md) |
 | 1.0.14 | 按 Bento Grid 视觉规范重构状态、设置和聊天页面；主题收敛为白天与夜间，不改变业务功能。 | [docs/releases/1.0.14.md](docs/releases/1.0.14.md) |
@@ -120,6 +122,6 @@ pwsh -File .\backup.ps1
 当前镜像版本：
 
 - `devlikeapro/waha:latest-2026.9.1`
-- `docker.io/cangnan88/waha-panel:1.0.16`
+- `docker.io/cangnan88/waha-panel:1.0.17`
 
 如需域名访问，只反代到面板端口 `127.0.0.1:3003`。WAHA API 端口 `3002` 默认不应公开。请在反向代理层启用 HTTPS，并确保代理不会记录 `Authorization`、APIKey 或密码字段。
