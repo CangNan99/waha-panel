@@ -74,6 +74,29 @@ class UIRouteTests(unittest.TestCase):
         self.assertEqual(self.request('/assets/ui/controllers/../../../app.py')[0],404)
         self.assertEqual(self.request('/api/ui/view?view=../../.env')[0],400)
 
+    def test_iptv_check_is_admin_csrf_protected_and_records_hide_credentials(self):
+        self.state.save_settings({'iptv':{'api_key':'synthetic-provider-key','pack':'all','duration_confirmed':True,'enabled':True}})
+        class Supplier:
+            def check(self):return {'account_enabled':True,'packages':[]}
+            def create_trial(self,pack,note):return {'url':'http://stream.example/get.php?username=private-user&password=private-password'}
+        self.state.iptv.client_factory=lambda _key:Supplier()
+        self.state.iptv.create_trial('default','synthetic@c.us','test-event')
+        self.assertEqual(self.request('/api/iptv/trials',False)[0],401)
+        self.assertEqual(self.request('/api/iptv/check',False,method='POST',payload={})[0],401)
+        self.assertEqual(self.request('/api/iptv/check',method='POST',payload={})[0],403)
+        status,_,body=self.request('/api/iptv/check',method='POST',payload={},csrf=True)
+        self.assertEqual(status,200)
+        self.assertTrue(json.loads(body)['account_enabled'])
+        status,_,body=self.request('/api/iptv/trials')
+        self.assertEqual(status,200)
+        self.assertEqual(json.loads(body)['items'][0]['state'],'created')
+        self.assertNotIn('private-password',body)
+        self.assertNotIn('private-user',body)
+        self.assertEqual(self.request('/api/iptv/trials?session=other')[0],403)
+        _,_,settings=self.request('/api/settings')
+        self.assertNotIn('synthetic-provider-key',settings)
+        self.assertTrue(json.loads(settings)['iptv']['api_key_configured'])
+
     def test_overview_and_log_filters_validate_scope(self):
         status,_,body=self.request('/api/overview?scope=all')
         self.assertEqual(status,200)

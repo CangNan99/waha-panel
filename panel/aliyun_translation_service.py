@@ -52,12 +52,13 @@ def is_pure_chinese(text):
 class AliyunTranslationService:
     """Alibaba machine translation; never uses the panel's AI transport."""
 
-    def __init__(self, database_path, cipher, logger=None, clock=None, sdk_client_factory=None):
+    def __init__(self, database_path, cipher, logger=None, clock=None, sdk_client_factory=None, text_sanitizer=None):
         self.database_path = str(database_path)
         self.cipher = cipher
         self.logger = logger
         self.clock = clock or time.time
         self.sdk_client_factory = sdk_client_factory
+        self.text_sanitizer = text_sanitizer
         self._slots = threading.BoundedSemaphore(5)
         self._rate_lock = threading.Lock()
         self._request_times = deque()
@@ -184,6 +185,11 @@ class AliyunTranslationService:
             return row
 
     def _sdk_request(self, text, settings):
+        if self.text_sanitizer is not None:
+            try:
+                text = self.text_sanitizer(text)
+            except Exception:
+                raise AliyunTranslationError("SENSITIVE_CONTEXT_UNAVAILABLE", "敏感信息过滤暂不可用，已停止机器翻译请求") from None
         try:
             from alibabacloud_alimt20181012.client import Client
             from alibabacloud_alimt20181012.models import TranslateGeneralRequest

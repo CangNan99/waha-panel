@@ -30,6 +30,11 @@ except ImportError:
     from auto_reply_policy import AutoReplyPolicy, active_window_start, message_timestamp
 
 try:
+    from .iptv_service import IptvService, IptvError, LANGUAGES as IPTV_LANGUAGES, explicit_trial_request
+except ImportError:
+    from iptv_service import IptvService, IptvError, LANGUAGES as IPTV_LANGUAGES, explicit_trial_request
+
+try:
     from .monitoring_service import MonitoringService, safe_log_message
 except ImportError:
     from monitoring_service import MonitoringService, safe_log_message
@@ -841,7 +846,7 @@ class PanelState:
         self.admin_service = AdminService(self.database_path)
         self._admin_db_auth = as_bool(os.environ.get("PANEL_ADMIN_DB_AUTH", "0"))
         self._update_service = UpdateService(
-            current_panel=os.environ.get("PANEL_VERSION", "1.0.16"),
+            current_panel=os.environ.get("PANEL_VERSION", "1.0.17"),
             current_waha=os.environ.get("WAHA_IMAGE_TAG", "latest-2026.9.1"),
         )
         self.sleep_fn = sleep_fn or time.sleep
@@ -854,6 +859,7 @@ class PanelState:
         self.memory = None
         self.aliyun_translation = None
         self.data_cipher = None
+        self.iptv = None
         self.csrf_token = None
         self.chat_capability_error = "面板数据加密密钥未配置"
         self._translation_limit_lock = threading.Lock()
@@ -970,6 +976,7 @@ class PanelState:
         ).digest()
         codec = ReferenceCodec(cipher)
         self.data_cipher = cipher
+        self.iptv = IptvService(self.database_path, cipher, secret, clock=self.clock)
         self.csrf_token = derive_csrf_token(secret)
         self.chat = ChatService(
             self.database_path,
@@ -987,6 +994,7 @@ class PanelState:
         self.translation = TranslationService(
             self.database_path,
             cipher,
+            text_sanitizer=self.iptv.sanitize_external_text,
             logger=lambda level, message: self.log(
                 str(level or "INFO").upper(), "translation.service", message, DEFAULT_SESSION_NAME
             ),
@@ -1015,6 +1023,7 @@ class PanelState:
         self.aliyun_translation = AliyunTranslationService(
             self.database_path,
             cipher,
+            text_sanitizer=self.iptv.sanitize_external_text,
             logger=lambda level, message: self.log(
                 str(level or "INFO").upper(), "aliyun.translation", message, DEFAULT_SESSION_NAME
             ),
@@ -1251,6 +1260,7 @@ class PanelState:
                 values.get("auto_reply_media_types", DEFAULT_AUTO_REPLY_MEDIA_TYPES)
             ),
             "timezone": "Asia/Shanghai",
+            "iptv": self.iptv.settings_payload(name) if self.iptv is not None else None,
         }
 
     def save_settings(self, payload, session_name=DEFAULT_SESSION_NAME):
@@ -1309,11 +1319,17 @@ class PanelState:
             updates["ai_api_key"] = ""
         elif str(payload.get("ai_api_key", "")):
             updates["ai_api_key"] = str(payload["ai_api_key"])
-        if not updates:
+        if not updates and "iptv" not in payload:
             return self.settings_payload(name)
         now = int(time.time())
         connection = sqlite3.connect(self.database_path)
         try:
+            connection.execute("BEGIN IMMEDIATE")
+            if "iptv" in payload:
+                if self.iptv is None:
+                    raise ValueError("IPTV 功能需要面板数据加密配置")
+                prepared = self.iptv.prepare_settings(name, payload["iptv"], connection)
+                self.iptv.persist_settings(name, prepared, connection)
             connection.executemany(
                 "INSERT INTO session_settings(session_name, key, value, updated_at) VALUES (?, ?, ?, ?) "
                 "ON CONFLICT(session_name, key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
@@ -1703,6 +1719,8 @@ class PanelState:
         name = normalize_session_name(session_name)
         message_key = str(message_id or "").strip()
         text = sanitize_context_content(content)
+        if self.iptv is not None:
+            text = self.iptv.sanitize_context(str(chat_id), text)
         if not message_key or not text:
             return False
         timestamp = int(created_at or self.clock())
@@ -1715,7 +1733,7 @@ class PanelState:
             ).rowcount
             if inserted:
                 source = str(origin or "unknown").strip().lower()
-                if source not in {"manual", "auto_ai", "automation", "unknown"}:
+                if source not in {"manual", "auto_ai", "automation", "iptv_trial", "unknown"}:
                     source = "unknown"
                 connection.execute(
                     "INSERT INTO conversation_messages(session_name, chat_id, direction, message_id, content, created_at, origin) "
@@ -1875,6 +1893,9 @@ class PanelState:
             "temperature": 0,
             "max_tokens": 800,
         }
+        if self.iptv is not None:
+            request_payload["messages"] = [{**message, "content": self.iptv.sanitize_external_text(message["content"])}
+                                           for message in request_payload["messages"]]
         request = Request(
             endpoint,
             data=json.dumps(request_payload, ensure_ascii=False).encode("utf-8"),
@@ -1940,6 +1961,18 @@ class PanelState:
             ) if business_context else "",
             business_rules if business_context else "",
         ) if part]
+        iptv_enabled = bool(include_tools and self.iptv is not None and self.iptv.settings_payload(name)["enabled"])
+        if iptv_enabled:
+            system_parts.append(
+                "IPTV TRIAL RULES: Only call create_iptv_trial when the current customer explicitly requests "
+                "an IPTV trial/test. Questions about pricing, descriptions, playback faults, quoted text, "
+                "historical requests or a refusal do not authorize creation. Use the customer's language. "
+                "Each customer has one trial opportunity for life. An unexpired account may be reused, "
+                "but never renew it or create another account after expiry. "
+                "Never invent account details or claim that a trial was created. The server creates and "
+                "sends the real credentials after the tool succeeds. Do not include a customer ID, "
+                "package, duration, API key or password in tool arguments."
+            )
         request_payload = {
             "model": model,
             "messages": [
@@ -1947,8 +1980,9 @@ class PanelState:
                 {"role": "user", "content": incoming_text},
             ],
         }
+        tools = []
         if include_tools and self.commerce_config.enabled:
-            request_payload["tools"] = [{
+            tools.append({
                 "type": "function",
                 "function": {
                     "name": "query_order",
@@ -1965,7 +1999,23 @@ class PanelState:
                         "required": ["query_type"],
                     },
                 },
-            }]
+            })
+        if iptv_enabled:
+            tools.append({"type": "function", "function": {
+                "name": "create_iptv_trial",
+                "description": "客户明确要求 IPTV 试用时申请测试账号，每位客户永久仅限一次；后台决定套餐与时长并发送真实凭据",
+                "parameters": {"type": "object", "additionalProperties": False,
+                    "properties": {"language": {"type": "string", "enum": list(IPTV_LANGUAGES)}},
+                    "required": ["language"]},
+            }})
+        if tools:
+            request_payload["tools"] = tools
+        if self.iptv is not None:
+            try:
+                request_payload["messages"] = [{**message, "content": self.iptv.sanitize_external_text(message["content"])}
+                                               for message in request_payload["messages"]]
+            except IptvError:
+                return "", "ai_sensitive_context_unavailable"
         payload = json.dumps(request_payload).encode("utf-8")
         request = Request(endpoint, data=payload, headers={
             "Accept": "application/json", "Content-Type": "application/json",
@@ -1980,17 +2030,25 @@ class PanelState:
                 return "", "ai_invalid_result"
             tool_calls = message_result.get("tool_calls") or []
             if tool_calls:
-                if not include_tools or not self.commerce_config.enabled or not isinstance(tool_calls, list):
+                if not include_tools or not isinstance(tool_calls, list) or len(tool_calls) != 1:
                     return "", "ai_invalid_tool"
                 for tool_call in tool_calls:
                     function = tool_call.get("function") if isinstance(tool_call, dict) else None
-                    if not isinstance(function, dict) or function.get("name") != "query_order":
+                    if not isinstance(function, dict):
                         continue
                     try:
                         arguments = json.loads(function.get("arguments") or "{}")
                     except (TypeError, ValueError):
                         continue
-                    if not isinstance(arguments, dict) or set(arguments) - {"query_type", "order_id", "email", "selected_order_id"}:
+                    if not isinstance(arguments, dict):
+                        continue
+                    if function.get("name") == "create_iptv_trial" and iptv_enabled:
+                        if set(arguments) == {"language"} and arguments.get("language") in IPTV_LANGUAGES:
+                            return json.dumps(arguments), "iptv_trial_tool"
+                        continue
+                    if function.get("name") != "query_order" or not self.commerce_config.enabled:
+                        continue
+                    if set(arguments) - {"query_type", "order_id", "email", "selected_order_id"}:
                         continue
                     if arguments.get("query_type") not in {"order_status", "payment_status"}:
                         continue
@@ -2002,6 +2060,44 @@ class PanelState:
         except Exception as error:
             self.log("ERROR", "ai.reply", redact_error(error, api_key), name)
             return "", "ai_error"
+
+    def _execute_iptv_trial(self, session, chat_id, message_id, original_timestamp,
+                            ticket, policy_token, arguments, incoming, context, dispatch):
+        if not dispatch or self.iptv is None or not policy_token or not explicit_trial_request(incoming, context):
+            return {"action": "ignored", "reason": "IPTV 开通条件不满足", "session": session}
+        try:
+            args = json.loads(arguments)
+            if not isinstance(args, dict) or set(args) != {"language"} or args.get("language") not in IPTV_LANGUAGES:
+                raise ValueError()
+        except (ValueError, TypeError):
+            return {"action": "ignored", "reason": "IPTV 工具参数无效", "session": session}
+
+        def allowed():
+            return (self._reply_ticket(session, original_timestamp, chat_id) == ticket
+                    and self.iptv.policy_token(session) == policy_token
+                    and self.iptv.settings_payload(session)["enabled"])
+
+        result = None
+        try:
+            result = self.iptv.create_trial(session, chat_id, message_id, allowed=allowed)
+            reply = self.iptv.reply_text(result, args["language"])
+            with self.reply_policy.lock:
+                if not allowed():
+                    self.log("INFO", "iptv.cancelled", "试用已保存，发送前条件变化，取消发送", session)
+                    return {"action": "ignored", "reason": "发送前回复条件已变化", "session": session}
+                self._send_text(session, chat_id, reply, origin="iptv_trial")
+                self.iptv.mark_delivery(result["id"], True)
+            self.log("INFO", "iptv.sent", "已发送 IPTV 试用（复用）" if result["reused"] else "已创建并发送 IPTV 试用", session)
+            # Webhook acknowledgements, logs and model context never get credentials.
+            return {"action": "replied", "mode": "iptv_trial", "session": session,
+                    "trial_id": result["id"], "text": "IPTV 试用信息已发送"}
+        except IptvError as error:
+            self.log("WARN", "iptv." + error.code, error.public_message, session)
+        except Exception:
+            if result is not None:
+                self.iptv.mark_delivery(result["id"], False)
+            self.log("ERROR", "iptv.send_failed", "IPTV 发送结果未确认，已保留原试用记录", session)
+        return {"action": "ignored", "reason": "IPTV 开通或发送未完成，请查看记录", "session": session}
 
     def _record_incoming_activity(self, chat_id, received_at, session_name=DEFAULT_SESSION_NAME):
         name = normalize_session_name(session_name)
@@ -2205,6 +2301,10 @@ class PanelState:
             session_name=session_name,
             per_side=per_side,
         )
+        iptv_token = (self.iptv.policy_token(session_name)
+                      if self.iptv is not None and self.iptv.settings_payload(session_name)["enabled"] else None)
+        if self.iptv is not None:
+            incoming_for_ai = self.iptv.sanitize_context(chat_id, incoming_for_ai)
         reply, mode = self._ai_reply(
             settings,
             incoming_for_ai,
@@ -2213,6 +2313,12 @@ class PanelState:
             include_tools=True,
             session_name=session_name,
         )
+        if mode == "iptv_trial_tool":
+            return self._execute_iptv_trial(session_name, chat_id, message_id, original_timestamp,
+                ticket, iptv_token, reply, incoming_for_ai, context, dispatch)
+        if iptv_token and explicit_trial_request(incoming_for_ai, context):
+            self.log("INFO", "iptv.no_tool", "AI 未返回有效试用工具调用，跳过发送", session_name)
+            return {"action": "ignored", "reason": "AI 未返回有效试用工具调用", "session": session_name}
         if mode == "order_tool" and self.commerce_config.enabled:
             try:
                 tool_request = json.loads(reply)
@@ -3041,7 +3147,22 @@ def settings_page():
             <label class="check-label" for="clearKey"><input id="clearKey" type="checkbox">清除已保存的 APIKey</label>
             <div id="keyState" class="section-note">正在读取 Key 状态...</div>
           </div>
-          <div class="panel"><h2>保存设置</h2><div class="section-note">关闭总开关或不在时间段内时不会回复；未配置完整 AI 模型时使用固定文案。</div><div class="actions"><button class="primary" type="submit" id="saveButton">保存全部设置</button></div><div id="settingsNotice" class="notice" role="status" aria-live="polite"></div></div>
+          <div class="panel" id="iptvPanel" hidden>
+            <div class="panel-head"><h2>IPTV 自动试用</h2><div class="section-note">客户明确申请后开通 M3U 测试账号。每位客户永久仅限一次，有效期间复用原账号，过期后不再开通。</div></div>
+            <label class="check-label" for="iptvEnabled"><input id="iptvEnabled" type="checkbox">为当前会话启用自动开通</label>
+            <label for="iptvKey">供应商 API 密钥</label><input id="iptvKey" type="password" autocomplete="new-password" placeholder="留空保持已保存密钥">
+            <div class="section-note" id="iptvKeyState">正在读取配置...</div>
+            <label class="check-label" for="clearIptvKey"><input id="clearIptvKey" type="checkbox">清除供应商密钥</label>
+            <label for="iptvPack">频道范围</label><input id="iptvPack" type="text" maxlength="12" value="all" placeholder="all 或套餐编号">
+            <div class="section-note">all 包含全部可用频道。频道范围与开关按当前 WhatsApp 会话保存。</div>
+            <label for="iptvDailyLimit">每日自动开通上限</label><input id="iptvDailyLimit" type="number" min="1" max="1000" step="1" value="20">
+            <label class="check-label" for="iptvDurationConfirmed"><input id="iptvDurationConfirmed" type="checkbox">已确认供应商 Demo 设置为 12 小时</label>
+            <div class="section-note">密钥、每日额度和试用时长确认在各会话间共享。先保存设置，再检查接口。</div>
+            <div class="actions"><button id="checkIptv" type="button">检查供应商接口</button><button id="refreshIptvRecords" type="button">刷新开通记录</button></div>
+            <div id="iptvNotice" class="notice" role="status" aria-live="polite"></div>
+            <h3>最近开通记录</h3><div id="iptvRecords" class="knowledge-list"><div class="muted">暂无开通记录</div></div>
+          </div>
+          <div class="panel"><h2>保存设置</h2><div class="section-note">关闭总开关或不在时间段内时不会回复；未配置完整 AI 模型或返回无效内容时不发送。</div><div class="actions"><button class="primary" type="submit" id="saveButton">保存全部设置</button></div><div id="settingsNotice" class="notice" role="status" aria-live="polite"></div></div>
         </section>
       </form>
     </main>
@@ -3051,6 +3172,39 @@ def settings_page():
     const sessionName = new URLSearchParams(location.search).get('session') || 'default';
     const sessionQuery = '?session=' + encodeURIComponent(sessionName);
     let csrfToken = '';
+    let iptvAvailable = false;
+    function renderIptvSettings(data) {
+      iptvAvailable = Boolean(data); $('iptvPanel').hidden = !iptvAvailable; if (!data) return;
+      $('iptvEnabled').checked = Boolean(data.enabled); $('iptvPack').value = data.pack || 'all';
+      $('iptvDailyLimit').value = String(data.daily_limit ?? 20); $('iptvDurationConfirmed').checked = Boolean(data.duration_confirmed);
+      $('iptvKeyState').textContent = data.api_key_configured ? '密钥：已配置（隐藏）' : '密钥：未配置';
+    }
+    function collectIptvSettings() {
+      return {enabled:$('iptvEnabled').checked,pack:$('iptvPack').value.trim(),daily_limit:Number($('iptvDailyLimit').value),duration_confirmed:$('iptvDurationConfirmed').checked,api_key:$('iptvKey').value,clear_api_key:$('clearIptvKey').checked};
+    }
+    async function loadIptvRecords() {
+      if (!iptvAvailable) return;
+      try {
+        const response = await fetch('/api/iptv/trials' + sessionQuery, {cache:'no-store'}), data = await response.json();
+        if (!response.ok) throw new Error(data.message || '读取记录失败');
+        const labels = {creating:'正在开通',created:'已创建，待发送',sent:'已发送',unknown:'结果待核对',failed:'开通失败',cancelled:'已取消'};
+        $('iptvRecords').innerHTML = (data.items || []).map(item => {
+          const status = item.expires_at && item.expires_at * 1000 < Date.now() && ['created','sent'].includes(item.state) ? '已到期' : (labels[item.state] || '待核对');
+          const when = new Date(item.created_at * 1000).toLocaleString('zh-CN', {timeZone:'Asia/Shanghai',hour12:false});
+          return '<div class="knowledge-item"><div><div class="knowledge-name">' + esc(status) + '</div><div class="knowledge-meta">' + esc(when) + ' · ' + esc(String(item.id || '').slice(0,10)) + '</div></div></div>';
+        }).join('') || '<div class="muted">暂无开通记录</div>';
+      } catch (error) { if (error.name !== 'AbortError') $('iptvRecords').textContent = '记录暂不可用，请稍后刷新'; }
+    }
+    async function checkIptv() {
+      const button = $('checkIptv'); button.disabled = true; $('iptvNotice').textContent = '正在检查已保存的供应商配置...';
+      try {
+        const response = await mutateFetch('/api/iptv/check' + sessionQuery, {method:'POST',headers:{'Content-Type':'application/json'},body:'{}'}), data = await response.json();
+        if (!response.ok) throw new Error(data.message || '接口检查失败');
+        $('iptvNotice').className = 'notice success'; $('iptvNotice').textContent = '账号验证成功；' + (data.packages?.length ? '有 ' + data.packages.length + ' 个自定义套餐' : '没有自定义套餐，可使用 all 全部频道');
+      } catch (error) { $('iptvNotice').className = 'notice'; $('iptvNotice').textContent = error.message; }
+      finally { button.disabled = false; }
+    }
+
     const days = [['mon','周一'],['tue','周二'],['wed','周三'],['thu','周四'],['fri','周五'],['sat','周六'],['sun','周日']];
     const mediaTypeNames = ['image','video','audio','file'];
     document.getElementById('backLink').href = '/?session=' + encodeURIComponent(sessionName);
@@ -3065,14 +3219,14 @@ def settings_page():
     async function ensureCsrf() { if (csrfToken) return csrfToken; const response = await fetch('/api/security/csrf', {cache:'no-store', credentials:'same-origin'}); const data = await response.json(); if (!response.ok) throw new Error(data.message || '安全校验不可用'); csrfToken = data.csrf_token || ''; return csrfToken; }
     async function mutateFetch(url, options={}) { const headers = new Headers(options.headers || {}); try { await ensureCsrf(); } catch (_) {} if (csrfToken) headers.set('X-CSRF-Token', csrfToken); return fetch(url, {...options, headers, credentials:'same-origin', cache:'no-store'}); }
     async function saveTheme(theme) { applyTheme(theme); try { const response = await mutateFetch('/api/settings' + sessionQuery, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({theme})}); if (!response.ok) { const data = await response.json(); throw new Error(data.message || '主题保存失败'); } } catch (error) { $('settingsNotice').textContent = error.message; } }
-    async function loadSettings() { const response = await fetch('/api/settings' + sessionQuery, {cache:'no-store'}); const data = await response.json(); if (!response.ok) throw new Error(data.message || '读取设置失败'); $('enabled').checked = data.auto_reply_enabled; $('allDay').checked = data.auto_reply_all_day; $('customerMemoryEnabled').checked = Boolean(data.customer_memory_enabled); setEnabledState(); renderSchedule(data.weekly_reply_windows); $('contextPerSide').value = String(data.auto_reply_context_per_side ?? 5); renderContextCount(); for (const name of mediaTypeNames) $('autoReplyMedia_' + name).checked = Boolean(data.auto_reply_media_types?.[name]); $('persona').value = data.persona || ''; $('systemPrompt').value = data.system_prompt || ''; $('aiBaseUrl').value = data.ai_base_url || ''; $('aiModel').value = data.ai_model || ''; $('keyState').textContent = data.ai_api_key_configured ? 'APIKey：已配置（隐藏）' : 'APIKey：未配置'; applyTheme(data.theme); }
-    async function saveSettings(event) { event.preventDefault(); const button = $('saveButton'); button.disabled = true; $('settingsNotice').textContent = ''; renderContextCount(); try { const body = {auto_reply_enabled:$('enabled').checked,auto_reply_all_day:$('allDay').checked,customer_memory_enabled:$('customerMemoryEnabled').checked,weekly_reply_windows:collectWindows(),auto_reply_context_per_side:Number($('contextPerSide').value),auto_reply_media_types:collectMediaTypes(),persona:$('persona').value,system_prompt:$('systemPrompt').value,ai_base_url:$('aiBaseUrl').value,ai_model:$('aiModel').value,ai_api_key:$('aiKey').value,clear_ai_api_key:$('clearKey').checked,theme:$('themeSelect').value}; const response = await mutateFetch('/api/settings' + sessionQuery, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}); const data = await response.json(); if (!response.ok) throw new Error(data.message || '保存失败'); $('aiKey').value = ''; $('clearKey').checked = false; $('keyState').textContent = data.ai_api_key_configured ? 'APIKey：已配置（隐藏）' : 'APIKey：未配置'; $('settingsNotice').className = 'notice success'; $('settingsNotice').textContent = '设置已保存'; delete document.body.dataset.dirty; } catch (error) { $('settingsNotice').className = 'notice'; $('settingsNotice').textContent = error.message; } finally { button.disabled = false; } }
+    async function loadSettings() { const response = await fetch('/api/settings' + sessionQuery, {cache:'no-store'}); const data = await response.json(); if (!response.ok) throw new Error(data.message || '读取设置失败'); $('enabled').checked = data.auto_reply_enabled; $('allDay').checked = data.auto_reply_all_day; $('customerMemoryEnabled').checked = Boolean(data.customer_memory_enabled); setEnabledState(); renderSchedule(data.weekly_reply_windows); $('contextPerSide').value = String(data.auto_reply_context_per_side ?? 5); renderContextCount(); for (const name of mediaTypeNames) $('autoReplyMedia_' + name).checked = Boolean(data.auto_reply_media_types?.[name]); $('persona').value = data.persona || ''; $('systemPrompt').value = data.system_prompt || ''; $('aiBaseUrl').value = data.ai_base_url || ''; $('aiModel').value = data.ai_model || ''; $('keyState').textContent = data.ai_api_key_configured ? 'APIKey：已配置（隐藏）' : 'APIKey：未配置'; applyTheme(data.theme); renderIptvSettings(data.iptv); loadIptvRecords(); }
+    async function saveSettings(event) { event.preventDefault(); const button = $('saveButton'); button.disabled = true; $('settingsNotice').textContent = ''; renderContextCount(); try { const body = {auto_reply_enabled:$('enabled').checked,auto_reply_all_day:$('allDay').checked,customer_memory_enabled:$('customerMemoryEnabled').checked,weekly_reply_windows:collectWindows(),auto_reply_context_per_side:Number($('contextPerSide').value),auto_reply_media_types:collectMediaTypes(),persona:$('persona').value,system_prompt:$('systemPrompt').value,ai_base_url:$('aiBaseUrl').value,ai_model:$('aiModel').value,ai_api_key:$('aiKey').value,clear_ai_api_key:$('clearKey').checked,theme:$('themeSelect').value}; if (iptvAvailable) body.iptv = collectIptvSettings(); const response = await mutateFetch('/api/settings' + sessionQuery, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}); const data = await response.json(); if (!response.ok) throw new Error(data.message || '保存失败'); $('aiKey').value = ''; $('clearKey').checked = false; $('iptvKey').value = ''; $('clearIptvKey').checked = false; renderIptvSettings(data.iptv); loadIptvRecords(); $('keyState').textContent = data.ai_api_key_configured ? 'APIKey：已配置（隐藏）' : 'APIKey：未配置'; $('settingsNotice').className = 'notice success'; $('settingsNotice').textContent = '设置已保存'; delete document.body.dataset.dirty; } catch (error) { $('settingsNotice').className = 'notice'; $('settingsNotice').textContent = error.message; } finally { button.disabled = false; } }
     async function addKnowledge(name, content) { $('knowledgeNotice').textContent = ''; const response = await mutateFetch('/api/knowledge' + sessionQuery, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({file_name:name,content})}); const data = await response.json(); if (!response.ok) throw new Error(data.message || '资料保存失败'); $('knowledgeText').value = ''; await loadKnowledge(); }
     async function loadKnowledge() { const response = await fetch('/api/knowledge' + sessionQuery, {cache:'no-store'}); const data = await response.json(); if (!response.ok) throw new Error(data.message || '资料读取失败'); $('knowledgeList').innerHTML = data.items.length ? data.items.map(item => `<div class="knowledge-item"><div><div class="knowledge-name">${esc(item.file_name)}</div><div class="knowledge-meta">${item.characters} 字符 · ${new Date(item.created_at * 1000).toLocaleString()}</div></div><div class="knowledge-actions"><button type="button" data-view="${item.id}">查看</button><button type="button" class="danger" data-delete="${item.id}">删除</button></div></div>`).join('') : '<div class="muted">暂无资料</div>'; document.querySelectorAll('[data-view]').forEach(button => button.addEventListener('click', () => viewKnowledge(button.dataset.view))); document.querySelectorAll('[data-delete]').forEach(button => button.addEventListener('click', () => deleteKnowledge(button.dataset.delete))); }
     async function viewKnowledge(id) { const response = await fetch('/api/knowledge/' + id + sessionQuery, {cache:'no-store'}); const data = await response.json(); if (!response.ok) throw new Error(data.message || '资料读取失败'); $('knowledgePreview').hidden = false; $('knowledgePreview').textContent = data.content; }
     async function deleteKnowledge(id) { if (!window.confirm('确认删除这份资料？')) return; const response = await mutateFetch('/api/knowledge/' + id + sessionQuery, {method:'DELETE'}); const data = await response.json(); if (!response.ok) throw new Error(data.message || '删除失败'); $('knowledgePreview').hidden = true; await loadKnowledge(); }
     $('contextPerSide').addEventListener('input', renderContextCount); renderContextCount();
-    const storedTheme = localStorage.getItem('waha-panel-theme'); if (storedTheme) applyTheme(storedTheme); $('themeSelect').addEventListener('change', (event) => saveTheme(event.target.value)); $('enabled').addEventListener('change', setEnabledState); $('allDay').addEventListener('change', setEnabledState); $('customerMemoryEnabled').addEventListener('change', setEnabledState); $('settingsForm').addEventListener('submit', saveSettings); $('addKnowledge').addEventListener('click', async () => { try { await addKnowledge($('knowledgeName').value || '粘贴文字', $('knowledgeText').value); } catch (error) { $('knowledgeNotice').textContent = error.message; } }); $('knowledgeFile').addEventListener('change', () => { const file = $('knowledgeFile').files[0]; if (!file) return; if (!/[.]txt$|[.]md$/i.test(file.name)) { $('knowledgeNotice').textContent = '仅支持 .txt 或 .md 文件'; return; } const reader = new FileReader(); reader.onload = async () => { try { await addKnowledge(file.name, reader.result); $('knowledgeFile').value = ''; } catch (error) { $('knowledgeNotice').textContent = error.message; } }; reader.readAsText(file); });
+    const storedTheme = localStorage.getItem('waha-panel-theme'); if (storedTheme) applyTheme(storedTheme); $('themeSelect').addEventListener('change', (event) => saveTheme(event.target.value)); $('enabled').addEventListener('change', setEnabledState); $('allDay').addEventListener('change', setEnabledState); $('customerMemoryEnabled').addEventListener('change', setEnabledState); $('settingsForm').addEventListener('submit', saveSettings); $('checkIptv').addEventListener('click', checkIptv); $('refreshIptvRecords').addEventListener('click', loadIptvRecords); $('addKnowledge').addEventListener('click', async () => { try { await addKnowledge($('knowledgeName').value || '粘贴文字', $('knowledgeText').value); } catch (error) { $('knowledgeNotice').textContent = error.message; } }); $('knowledgeFile').addEventListener('change', () => { const file = $('knowledgeFile').files[0]; if (!file) return; if (!/[.]txt$|[.]md$/i.test(file.name)) { $('knowledgeNotice').textContent = '仅支持 .txt 或 .md 文件'; return; } const reader = new FileReader(); reader.onload = async () => { try { await addKnowledge(file.name, reader.result); $('knowledgeFile').value = ''; } catch (error) { $('knowledgeNotice').textContent = error.message; } }; reader.readAsText(file); });
     loadSettings().catch(error => { $('settingsNotice').textContent = error.message; }); loadKnowledge().catch(error => { $('knowledgeNotice').textContent = error.message; });
   </script>
 </body>
@@ -4201,6 +4355,16 @@ class PanelHandler(BaseHTTPRequestHandler):
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
+            elif route == "/api/iptv/trials":
+                self.require_admin_auth()
+                query = parse_qs(urlparse(self.path).query)
+                name = query.get("session", [DEFAULT_SESSION_NAME])[0]
+                try:
+                    self.require_waha_session(name)
+                except ChatAccessError:
+                    self.send_json({"message": "无权查看该会话"}, HTTPStatus.FORBIDDEN)
+                    return
+                self.send_json(self.state.iptv.records(name) if self.state.iptv is not None else {"items": []})
             elif route == "/api/settings":
                 self.require_admin_auth()
                 query = parse_qs(urlparse(self.path).query)
@@ -4274,6 +4438,13 @@ class PanelHandler(BaseHTTPRequestHandler):
             elif route == "/api/session/pairing-code":
                 payload = self.read_json()
                 self.send_json(self.state.request_pairing_code(payload.get("phone_number")), HTTPStatus.OK)
+            elif route == "/api/iptv/check":
+                self.require_csrf()
+                query = parse_qs(urlparse(self.path).query)
+                self.require_waha_session(query.get("session", [DEFAULT_SESSION_NAME])[0])
+                if self.state.iptv is None:
+                    raise ValueError("IPTV 功能需要面板数据加密配置")
+                self.send_json(self.state.iptv.check())
             elif route == "/api/settings":
                 query = parse_qs(urlparse(self.path).query)
                 self.send_json(self.state.save_settings(self.read_json(), query.get("session", [DEFAULT_SESSION_NAME])[0]), HTTPStatus.OK)

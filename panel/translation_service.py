@@ -125,6 +125,7 @@ class TranslationService:
         resolver=socket.getaddrinfo,
         clock=time.time,
         logger=None,
+        text_sanitizer=None,
     ):
         self.database_path = str(database_path)
         self.cipher = cipher
@@ -132,6 +133,7 @@ class TranslationService:
         self.resolver = resolver
         self.clock = clock
         self.logger = logger
+        self.text_sanitizer = text_sanitizer
         self._last_cleanup_at = 0
         self._cleanup_cache(force=True)
 
@@ -314,6 +316,11 @@ class TranslationService:
 
     def _request_content(self, configuration, messages):
         endpoint = configuration["base_url"].rstrip("/") + "/chat/completions"
+        if self.text_sanitizer is not None:
+            try:
+                messages = [{**message, "content": self.text_sanitizer(message.get("content", ""))} for message in messages]
+            except Exception:
+                raise TranslationError("SENSITIVE_CONTEXT_UNAVAILABLE", "敏感信息过滤暂不可用，已停止 AI 请求") from None
         payload = json.dumps({
             "model": configuration["model"],
             "temperature": 0.2,
