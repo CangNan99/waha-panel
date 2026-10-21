@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest.mock import patch
 from cryptography.fernet import Fernet
 from panel.app import PanelState, init_db
+from panel.iptv_service import IptvError
 
 
 class Client:
@@ -46,8 +47,8 @@ class IptvIntegrationTests(unittest.TestCase):
         self.now += 2
         self.state.iptv.client_factory = lambda _key: self.supplier
 
-    def event(self, body='Can I get an IPTV trial?', identity='customer@c.us', message_id='event-1', timestamp=None):
-        return json.dumps({'event': 'message', 'session': 'default', 'payload': {
+    def event(self, body='Can I get an IPTV trial?', identity='customer@c.us', message_id='event-1', timestamp=None, session='default'):
+        return json.dumps({'event': 'message', 'session': session, 'payload': {
             'id': message_id, 'from': identity, 'body': body, 'type': 'chat',
             'timestamp': self.now - 1 if timestamp is None else timestamp}}).encode()
 
@@ -71,6 +72,54 @@ class IptvIntegrationTests(unittest.TestCase):
         self.run_event(message_id='event-2')
         self.assertEqual(len(self.supplier.calls), 1)
         self.assertEqual(len(self.client.sent), 2)
+
+    def system_labels(self):
+        with closing(sqlite3.connect(self.db)) as c:
+            return c.execute('SELECT session_name,label FROM customer_system_labels ORDER BY session_name').fetchall()
+
+    def test_successful_trial_adds_system_label_after_delivery(self):
+        events = []
+        mark = self.state.iptv.mark_delivery
+        label = self.state.chat.add_system_label_by_chat_id
+        def mark_delivery(trial_id, success):
+            events.append('delivered')
+            return mark(trial_id, success)
+        def add_label(*args):
+            events.append('labelled')
+            return label(*args)
+        with patch.object(self.state.iptv, 'mark_delivery', side_effect=mark_delivery), patch.object(self.state.chat, 'add_system_label_by_chat_id', side_effect=add_label):
+            self.assertEqual(self.run_event()['action'], 'replied')
+        self.assertEqual(events, ['delivered', 'labelled'])
+        self.assertEqual(self.system_labels(), [('default', 'IPTV测试过')])
+
+    def test_delivery_failure_and_unknown_creation_do_not_add_system_label(self):
+        with patch.object(self.state, '_send_text', side_effect=TimeoutError()):
+            self.assertEqual(self.run_event()['action'], 'ignored')
+        self.assertEqual(self.system_labels(), [])
+        with patch.object(self.supplier, 'create_trial', side_effect=IptvError('upstream_unknown', '结果未知', uncertain=True)):
+            self.assertEqual(self.run_event(identity='other@c.us', message_id='event-other')['action'], 'ignored')
+        self.assertEqual(self.system_labels(), [])
+
+    def test_reused_trial_in_second_session_adds_current_session_label(self):
+        self.assertEqual(self.run_event()['action'], 'replied')
+        self.state.save_settings({'auto_reply_enabled': True, 'auto_reply_all_day': True, 'iptv': {'enabled': True}}, 'sales')
+        self.now += 2
+        self.assertEqual(self.run_event(session='sales', message_id='event-sales')['action'], 'replied')
+        self.assertEqual(len(self.supplier.calls), 1)
+        self.assertEqual(self.system_labels(), [('default', 'IPTV测试过'), ('sales', 'IPTV测试过')])
+
+    def test_repeated_success_is_idempotent(self):
+        self.run_event()
+        self.run_event(message_id='event-2')
+        self.assertEqual(self.system_labels(), [('default', 'IPTV测试过')])
+
+    def test_system_label_failure_preserves_successful_delivery_and_redacts_error(self):
+        with patch.object(self.state.chat, 'add_system_label_by_chat_id', side_effect=RuntimeError('password=private-trial-pass')):
+            self.assertEqual(self.run_event()['action'], 'replied')
+        self.assertEqual(self.state.iptv.records('default')['items'][0]['state'], 'sent')
+        with closing(sqlite3.connect(self.db)) as c:
+            logs = '\n'.join(r[0] for r in c.execute('SELECT message FROM system_logs'))
+        self.assertNotIn('private-trial-pass', logs)
 
     def test_credentials_do_not_reach_archived_context_or_memory_input(self):
         self.run_event()
@@ -193,7 +242,7 @@ class IptvIntegrationTests(unittest.TestCase):
         self.run_event()
         captured = []
         class SDK:
-            def translate_general_with_options(self, request, runtime):
+            def translate_with_options(self, request, runtime):
                 captured.append(request.source_text)
                 return {'body': {'Code': 200, 'Data': {'Translated': '试用信息', 'DetectedLanguage': 'en'}}}
         service = self.state.aliyun_translation

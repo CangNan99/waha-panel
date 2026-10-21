@@ -2107,6 +2107,10 @@ class PanelState:
                     return {"action": "ignored", "reason": "发送前回复条件已变化", "session": session}
                 self._send_text(session, chat_id, reply, origin="iptv_trial")
                 self.iptv.mark_delivery(result["id"], True)
+            try:
+                self.chat.add_system_label_by_chat_id(session, chat_id, "IPTV测试过")
+            except Exception:
+                self.log("WARN", "iptv.system_label_failed", "试用已发送，系统标签写入失败（LABEL_WRITE_FAILED）", session)
             self.log("INFO", "iptv.sent", "已发送 IPTV 试用（复用）" if result["reused"] else "已创建并发送 IPTV 试用", session)
             # Webhook acknowledgements, logs and model context never get credentials.
             return {"action": "replied", "mode": "iptv_trial", "session": session,
