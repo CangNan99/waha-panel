@@ -262,7 +262,7 @@ class ChatServiceEngagementTests(unittest.TestCase):
         support_labels = self.service.customer_labels("support", support_item["chat_ref"])
         self.assertEqual(support_labels["system"], ["IPTV测试过"])
         overview_labels = self.service.overview("default")["items"][0]["labels"]
-        self.assertIn({"source": "system", "label": "IPTV测试过"}, overview_labels)
+        self.assertTrue(any(item["source"] == "system" and item["label"] == "IPTV测试过" for item in overview_labels))
         connection = sqlite3.connect(self.database)
         self.assertEqual(connection.execute("SELECT COUNT(*) FROM customer_system_labels").fetchone()[0], 2)
         connection.close()
