@@ -244,6 +244,22 @@ class UpgradeTestCase(unittest.TestCase):
 
 
 class SettingsAndContextTests(UpgradeTestCase):
+    def test_global_translation_settings_migrate_idempotently_and_default_to_aliyun_professional(self):
+        init_db(self.database, seed_business=False)
+        with sqlite3.connect(self.database) as connection:
+            row = connection.execute(
+                "SELECT provider,scene FROM global_translation_settings WHERE id=1"
+            ).fetchone()
+            tables = {
+                item[0]
+                for item in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                )
+            }
+        self.assertEqual(row, ("aliyun_professional", "communication"))
+        self.assertIn("translation_settings", tables)
+        self.assertIn("aliyun_translation_settings", tables)
+
     def test_customer_memory_defaults_to_disabled(self):
         payload = self.state.settings_payload("default")
         self.assertFalse(payload["customer_memory_enabled"])

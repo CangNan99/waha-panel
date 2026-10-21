@@ -515,6 +515,10 @@ def init_db(path, seed_business=True):
         )
         if "message_id" not in _table_columns(connection, "machine_message_translations"):
             connection.executescript(translation_identity_migration.read_text(encoding="utf-8"))
+        global_translation_migration = (
+            Path(__file__).with_name("migrations") / "011_global_translation_settings.sql"
+        )
+        connection.executescript(global_translation_migration.read_text(encoding="utf-8"))
         _add_column_if_missing(
             connection,
             "customer_memories",
