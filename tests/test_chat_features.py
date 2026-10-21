@@ -397,6 +397,21 @@ class ChatPageRegressionTests(unittest.TestCase):
         self.assertIn('aria-pressed="false"', page)
         self.assertNotIn("/api/translation/translate',", page[page.index("translationToggle"):])
 
+    def test_global_translation_provider_switch_contract(self):
+        page = chat_management_page("default")
+        for token in (
+            'id="translationProvider"',
+            "阿里云机器翻译专业版",
+            "AI 模型翻译",
+            "/api/translation/preferences",
+            "translationProvider",
+            "providerAwareTranslationKey",
+            "loadTranslationPreferences",
+            "stopMachineTranslation",
+        ):
+            self.assertIn(token, page)
+        self.assertIn("切换翻译引擎后", page)
+
     def test_translation_and_takeover_controls_have_breathing_motion_contract(self):
         page = chat_management_page("default")
         self.assertIn("breathing-toggle", page)
@@ -404,8 +419,8 @@ class ChatPageRegressionTests(unittest.TestCase):
         self.assertIn("prefers-reduced-motion", page)
         self.assertIn("setTranslationToggle", page)
         self.assertIn("aria-pressed", page)
-        self.assertIn("请先在翻译设置中配置阿里云机器翻译", page)
-        self.assertIn("if(!state.aliyunConfigured||!translationIsEnabled()", page)
+        self.assertIn("请先配置", page)
+        self.assertIn("if(!state.translationProviders[state.translationProvider]||!translationIsEnabled()", page)
 
     def test_window_reload_restores_completed_translations_without_persisting_toggle(self):
         page = chat_management_page("default")
@@ -416,15 +431,13 @@ class ChatPageRegressionTests(unittest.TestCase):
         self.assertIn("loadFollowUps().catch(()=>{});loadCachedTranslations().catch(()=>{});", page)
         self.assertNotIn("loadFollowUps().catch(()=>{});translateCurrentChat().catch(()=>{});", page)
         self.assertIn("saved?.status==='READY'", page)
-        self.assertNotIn("translationPreferenceKey", page)
-        self.assertNotIn("loadTranslationPreferences", page)
-        self.assertNotIn("persistTranslationPreference", page)
-        self.assertNotIn("localStorage.setItem(translationPreferenceKey", page)
+        self.assertIn("loadTranslationPreferences", page)
+        self.assertIn("providerAwareTranslationKey", page)
 
     def test_cached_translation_remains_visible_when_toggle_is_off(self):
         page = chat_management_page("default")
         self.assertIn("if(!translationIsEnabled()&&saved?.status!=='READY')return;", page)
-        self.assertIn("const enabled=!translationIsEnabled();if(enabled&&!state.aliyunConfigured)", page)
+        self.assertIn("const enabled=!translationIsEnabled();if(enabled&&!state.translationProviders[state.translationProvider])", page)
 
     def test_chat_list_refresh_restores_visible_anchor_and_scroll_offset(self):
         page = chat_management_page("default")
