@@ -521,6 +521,10 @@ def init_db(path, seed_business=True):
             Path(__file__).with_name("migrations") / "011_global_translation_settings.sql"
         )
         connection.executescript(global_translation_migration.read_text(encoding="utf-8"))
+        system_labels_migration = (
+            Path(__file__).with_name("migrations") / "012_customer_system_labels.sql"
+        )
+        connection.executescript(system_labels_migration.read_text(encoding="utf-8"))
         _add_column_if_missing(
             connection,
             "customer_memories",

@@ -81,6 +81,45 @@ class EngagementSchemaTests(unittest.TestCase):
         } <= tables)
         self.assertTrue({"last_manual_sent_at", "auto_resume_at"} <= takeover_columns)
 
+    def test_system_label_schema_is_created_and_idempotent(self):
+        init_db(self.database, seed_business=False)
+        connection = sqlite3.connect(self.database)
+        connection.execute(
+            "INSERT INTO customer_labels(session_name,chat_key_hmac,source,label,created_at,updated_at) "
+            "VALUES ('default','existing-key','MANUAL','保留标签',1,1)"
+        )
+        connection.commit()
+        connection.close()
+        init_db(self.database, seed_business=False)
+        init_db(self.database, seed_business=False)
+        connection = sqlite3.connect(self.database)
+        tables = {
+            row[0] for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+        indexes = {
+            row[1] for row in connection.execute("PRAGMA index_list(customer_system_labels)")
+        }
+        self.assertIn("customer_system_labels", tables)
+        self.assertIn("idx_customer_system_labels_chat", indexes)
+        self.assertEqual(
+            connection.execute(
+                "SELECT label FROM customer_labels WHERE session_name='default' AND chat_key_hmac='existing-key'"
+            ).fetchone()[0],
+            "保留标签",
+        )
+        connection.execute(
+            "INSERT INTO customer_system_labels(session_name,chat_key_hmac,label,created_at,updated_at) "
+            "VALUES ('default','chat-key','IPTV测试过',1,1)"
+        )
+        with self.assertRaises(sqlite3.IntegrityError):
+            connection.execute(
+                "INSERT INTO customer_system_labels(session_name,chat_key_hmac,label,created_at,updated_at) "
+                "VALUES ('default','chat-key','IPTV测试过',1,1)"
+            )
+        connection.close()
+
 
 class ChatServiceEngagementTests(unittest.TestCase):
     def setUp(self):
