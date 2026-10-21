@@ -574,6 +574,21 @@ class ChatService:
                     "source": "manual" if source == "MANUAL" else "ai",
                     "label": _limited_text(label, 100),
                 })
+            system_label_rows = connection.execute(
+                "SELECT id,chat_key_hmac,label FROM customer_system_labels "
+                f"WHERE session_name=? AND chat_key_hmac IN ({placeholders}) "
+                "ORDER BY updated_at, id",
+                [name, *values],
+            ).fetchall()
+            for label_id, chat_key, label in system_label_rows:
+                chat_id = by_key.get(chat_key)
+                if chat_id is None:
+                    continue
+                metadata[chat_id]["labels"].append({
+                    "id": int(label_id),
+                    "source": "system",
+                    "label": _limited_text(label, 100),
+                })
         finally:
             connection.close()
         return metadata
@@ -901,14 +916,35 @@ class ChatService:
             raise ChatServiceError("标签长度必须为 1-100 个字符", "INVALID_LABEL")
         return value
 
+    def add_system_label_by_chat_id(self, session, chat_id, label):
+        name = _session_name(session)
+        value = str(chat_id or "").strip()
+        if not value:
+            raise ChatServiceError("聊天编号无效", "INVALID_CHAT_ID")
+        label_value = self._label_value(label)
+        key = self._chat_key(name, value)
+        now = int(self.clock())
+        connection = sqlite3.connect(self.database_path)
+        try:
+            connection.execute(
+                "INSERT OR IGNORE INTO customer_system_labels "
+                "(session_name,chat_key_hmac,label,created_at,updated_at) VALUES (?,?,?,?,?)",
+                (name, key, label_value, now, now),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
     def customer_labels(self, session, chat_ref):
         name = _session_name(session); chat_id = self._decode_chat(name, chat_ref); key = self._chat_key(name, chat_id)
         connection = sqlite3.connect(self.database_path)
         try:
             rows = connection.execute("SELECT source,label FROM customer_labels WHERE session_name=? AND chat_key_hmac=? ORDER BY id", (name, key)).fetchall()
+            system_rows = connection.execute("SELECT label FROM customer_system_labels WHERE session_name=? AND chat_key_hmac=? ORDER BY updated_at,id", (name, key)).fetchall()
         finally: connection.close()
-        result = {"manual": [], "ai": []}
+        result = {"manual": [], "ai": [], "system": []}
         for source, label in rows: result["manual" if source == "MANUAL" else "ai"].append(label)
+        result["system"] = [label for (label,) in system_rows]
         return result
 
     def customer_label_records(self, session, chat_ref):
@@ -921,13 +957,19 @@ class ChatService:
                 "WHERE session_name=? AND chat_key_hmac=? ORDER BY id",
                 (name, key),
             ).fetchall()
+            system_rows = connection.execute(
+                "SELECT id,label FROM customer_system_labels "
+                "WHERE session_name=? AND chat_key_hmac=? ORDER BY updated_at,id",
+                (name, key),
+            ).fetchall()
         finally:
             connection.close()
-        result = {"manual": [], "ai": []}
+        result = {"manual": [], "ai": [], "system": []}
         for label_id, source, label in rows:
             result["manual" if source == "MANUAL" else "ai"].append(
                 {"id": int(label_id), "label": label}
             )
+        result["system"] = [{"id": int(label_id), "label": label} for label_id, label in system_rows]
         return result
 
     def add_manual_label(self, session, chat_ref, label, source="MANUAL"):
