@@ -78,6 +78,7 @@ try:
     from .chat_page import chat_management_page
     from .customer_memory_service import CustomerMemoryService
     from .aliyun_translation_service import AliyunTranslationError, AliyunTranslationService
+    from .global_translation_service import GlobalTranslationError, GlobalTranslationService
     from .commerce import (
         CommerceConfig,
         CommerceError,
@@ -117,6 +118,7 @@ except ImportError:  # Supports the existing `python app.py` container entrypoin
     from chat_page import chat_management_page
     from customer_memory_service import CustomerMemoryService
     from aliyun_translation_service import AliyunTranslationError, AliyunTranslationService
+    from global_translation_service import GlobalTranslationError, GlobalTranslationService
     from commerce import (
         CommerceConfig,
         CommerceError,
@@ -862,6 +864,7 @@ class PanelState:
         self.automation = None
         self.memory = None
         self.aliyun_translation = None
+        self.global_translation = None
         self.data_cipher = None
         self.iptv = None
         self.csrf_token = None
@@ -1032,6 +1035,15 @@ class PanelState:
                 str(level or "INFO").upper(), "aliyun.translation", message, DEFAULT_SESSION_NAME
             ),
             clock=self.clock,
+        )
+        self.global_translation = GlobalTranslationService(
+            self.database_path,
+            self.aliyun_translation,
+            self.translation,
+            clock=self.clock,
+            logger=lambda level, message: self.log(
+                str(level or "INFO").upper(), "global.translation", message, DEFAULT_SESSION_NAME
+            ),
         )
         self.chat_capability_error = ""
         return self.chat
@@ -3480,6 +3492,11 @@ class PanelHandler(BaseHTTPRequestHandler):
             raise AliyunTranslationError("ALIYUN_TRANSLATION_UNAVAILABLE", "阿里云机器翻译暂不可用")
         return self.state.aliyun_translation
 
+    def require_global_translation_service(self):
+        if self.state.global_translation is None:
+            raise GlobalTranslationError("TRANSLATION_UNAVAILABLE", "全局翻译功能暂不可用")
+        return self.state.global_translation
+
     def require_waha_session(self, session_name, connected=False):
         name = normalize_session_name(session_name)
         sessions = self.state.client.get_sessions()
@@ -3738,12 +3755,25 @@ class PanelHandler(BaseHTTPRequestHandler):
                     "message_ref": message_ref,
                     "message_id": message_id,
                     "text": str(item.get("text") or ""),
+                    "role": "agent" if str(item.get("role") or "").strip().lower() == "agent" else "customer",
                 })
-            translation = self.require_aliyun_translation_service()
+            translation = self.require_global_translation_service()
+            provider = translation.settings_payload().get("provider")
+            ai_request = provider == "ai_model"
+            if ai_request:
+                self.state.begin_translation_request()
             if action == "machine-translations/cache":
-                self.send_json(translation.get_cached_batch(name, chat_key, safe_items))
+                try:
+                    self.send_json(translation.get_cached_batch(name, chat_key, safe_items))
+                finally:
+                    if ai_request:
+                        self.state.end_translation_request()
             else:
-                self.send_json(translation.translate_batch(name, chat_key, safe_items))
+                try:
+                    self.send_json(translation.translate_batch(name, chat_key, safe_items))
+                finally:
+                    if ai_request:
+                        self.state.end_translation_request()
             return
         if action == "send-image":
             form = self.read_image_form()
@@ -3818,6 +3848,9 @@ class PanelHandler(BaseHTTPRequestHandler):
 
     def send_translation_get(self, route):
         self.require_admin_auth()
+        if route == "/api/translation/preferences":
+            self.send_json(self.require_global_translation_service().settings_payload())
+            return
         if route == "/api/translation/aliyun/settings":
             self.send_json(self.require_aliyun_translation_service().settings_payload())
             return
@@ -3828,6 +3861,21 @@ class PanelHandler(BaseHTTPRequestHandler):
 
     def send_translation_write(self, route, method):
         self.require_csrf()
+        if route == "/api/translation/preferences" and method == "PUT":
+            self.send_json(self.require_global_translation_service().save_settings(self.read_api_json()))
+            return
+        if route == "/api/translation/preferences/test" and method == "POST":
+            translation = self.require_global_translation_service()
+            provider = translation.settings_payload().get("provider")
+            ai_request = provider == "ai_model"
+            if ai_request:
+                self.state.begin_translation_request()
+            try:
+                self.send_json(translation.test_connection())
+            finally:
+                if ai_request:
+                    self.state.end_translation_request()
+            return
         if route.startswith("/api/translation/aliyun/"):
             translation = self.require_aliyun_translation_service()
             if route == "/api/translation/aliyun/settings" and method == "PUT":

@@ -463,16 +463,105 @@ class MemoryAndTranslationRouteTests(UpgradeTestCase):
         delete_handler.send_chat_memory_delete("/api/chat/sessions/default/memory")
         self.assertTrue(delete_handler.responses[0][0]["cleared"])
 
+    def test_global_translation_preferences_routes_never_return_credentials_and_switch_provider(self):
+        calls = []
+
+        class GlobalStub:
+            def settings_payload(self):
+                return {
+                    "provider": "aliyun_professional",
+                    "scene": "communication",
+                    "aliyun_configured": True,
+                    "ai_configured": False,
+                    "aliyun_last_test_status": "success",
+                    "ai_last_test_status": "never",
+                }
+
+            def save_settings(self, payload):
+                calls.append(("save", payload))
+                return {"provider": payload["provider"], "scene": "communication"}
+
+            def test_connection(self):
+                calls.append(("test", None))
+                return {"ok": True, "provider": "ai_model"}
+
+        self.state.global_translation = GlobalStub()
+        reader = self.handler(path="/api/translation/preferences")
+        reader.send_translation_get("/api/translation/preferences")
+        self.assertTrue(reader.responses[0][0]["aliyun_configured"])
+        self.assertNotIn("secret", json.dumps(reader.responses[0][0]))
+        writer = self.handler({"provider": "ai_model"})
+        writer.send_translation_write("/api/translation/preferences", "PUT")
+        self.assertEqual(calls[0], ("save", {"provider": "ai_model"}))
+        tester = self.handler({})
+        tester.send_translation_write("/api/translation/preferences/test", "POST")
+        self.assertEqual(tester.responses[0][0]["provider"], "ai_model")
+
+    def test_machine_translation_route_dispatches_to_global_provider(self):
+        message_ref = self.state.chat._encode_message("default", "chat-1@c.us", "m-provider")
+        calls = []
+
+        class GlobalStub:
+            def settings_payload(self):
+                return {"provider": "ai_model"}
+
+            def translate_batch(self, session_name, chat_key, items):
+                calls.append((session_name, chat_key, items))
+                return {
+                    "provider": "ai_model",
+                    "items": [{
+                        "message_ref": items[0]["message_ref"],
+                        "status": "READY",
+                        "translation": "AI译文",
+                        "provider": "ai_model",
+                    }],
+                }
+
+            def get_cached_batch(self, *_args):
+                raise AssertionError("write route must not use cache")
+
+        self.state.global_translation = GlobalStub()
+        handler = self.handler({"chat_ref": self.chat_ref, "items": [{"message_ref": message_ref, "text": "Hello"}]})
+        handler.send_chat_post("/api/chat/sessions/default/machine-translations")
+        self.assertEqual(handler.responses[0][0]["provider"], "ai_model")
+        self.assertEqual(handler.responses[0][0]["items"][0]["translation"], "AI译文")
+        self.assertEqual(calls[0][2][0]["message_id"], "m-provider")
+
+    def test_ai_global_translation_route_releases_request_slot(self):
+        message_ref = self.state.chat._encode_message("default", "chat-1@c.us", "m-guard")
+        events = []
+
+        class GlobalStub:
+            def settings_payload(self):
+                return {"provider": "ai_model"}
+
+            def translate_batch(self, _session_name, _chat_key, _items):
+                events.append("translate")
+                return {"provider": "ai_model", "items": []}
+
+            def get_cached_batch(self, *_args):
+                raise AssertionError("write route must not use cache")
+
+        self.state.global_translation = GlobalStub()
+        self.state.begin_translation_request = lambda: events.append("begin")
+        self.state.end_translation_request = lambda: events.append("end")
+        handler = self.handler({"chat_ref": self.chat_ref, "items": [{"message_ref": message_ref, "text": "Hello"}]})
+        handler.send_chat_post("/api/chat/sessions/default/machine-translations")
+        self.assertEqual(events, ["begin", "translate", "end"])
+
     def test_machine_translation_route_validates_message_reference_and_returns_batch(self):
         message_ref = self.state.chat._encode_message("default", "chat-1@c.us", "m-1")
         calls = []
 
         class TranslationStub:
+            def settings_payload(self):
+                return {"provider": "aliyun_professional"}
+
             def translate_batch(self, session_name, chat_key, items):
                 calls.append((session_name, chat_key, items))
                 return {"items": [{"message_ref": items[0]["message_ref"], "status": "READY", "translation": "你好"}]}
 
-        self.state.aliyun_translation = TranslationStub()
+        self.state.global_translation = TranslationStub()
         handler = self.handler({"chat_ref": self.chat_ref, "items": [{"message_ref": message_ref, "text": "Hello"}]})
         handler.send_chat_post("/api/chat/sessions/default/machine-translations")
         self.assertEqual(handler.responses[0][0]["items"][0]["translation"], "你好")
@@ -484,6 +573,9 @@ class MemoryAndTranslationRouteTests(UpgradeTestCase):
         calls = []
 
         class TranslationStub:
+            def settings_payload(self):
+                return {"provider": "aliyun_professional"}
+
             def get_cached_batch(self, session_name, chat_key, items):
                 calls.append((session_name, chat_key, items))
                 return {"items": [{"message_ref": items[0]["message_ref"], "status": "READY", "translation": "你好"}]}
@@ -491,7 +583,7 @@ class MemoryAndTranslationRouteTests(UpgradeTestCase):
             def translate_batch(self, *_args):
                 raise AssertionError("cache restore must not call Alibaba translation")
 
-        self.state.aliyun_translation = TranslationStub()
+        self.state.global_translation = TranslationStub()
         handler = self.handler(
             {"chat_ref": self.chat_ref, "items": [{"message_ref": message_ref, "text": "Hello"}]}
         )
