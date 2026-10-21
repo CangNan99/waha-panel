@@ -152,6 +152,7 @@ DEFAULT_SETTINGS = {
     "ai_api_key": "",
     "theme": "daylight",
     "auto_reply_context_per_side": "5",
+    "auto_reply_delay_scale": "100",
     "customer_memory_enabled": "0",
     "auto_reply_media_types": json.dumps(
         {"image": False, "video": False, "audio": False, "file": False},
@@ -164,6 +165,9 @@ MIN_TYPING_DELAY_SECONDS = 6.0
 MAX_TYPING_DELAY_SECONDS = 15.0
 CONTEXT_PER_SIDE_MIN = 5
 CONTEXT_PER_SIDE_MAX = 50
+REPLY_DELAY_SCALE_MIN = 0
+REPLY_DELAY_SCALE_MAX = 120
+DEFAULT_REPLY_DELAY_SCALE = 100
 MEDIA_TYPE_KEYS = ("image", "video", "audio", "file")
 DEFAULT_AUTO_REPLY_MEDIA_TYPES = {
     "image": False,
@@ -220,6 +224,27 @@ def normalize_context_per_side(value, default=CONTEXT_PER_SIDE_MIN):
     if number < CONTEXT_PER_SIDE_MIN or number > CONTEXT_PER_SIDE_MAX:
         return default
     return number
+
+
+def parse_reply_delay_scale(value):
+    if isinstance(value, bool):
+        raise ValueError("回复延迟比例必须为 0-120 的整数")
+    if isinstance(value, int):
+        number = value
+    elif isinstance(value, str) and re.fullmatch(r"\d+", value.strip()):
+        number = int(value.strip())
+    else:
+        raise ValueError("回复延迟比例必须为 0-120 的整数")
+    if not REPLY_DELAY_SCALE_MIN <= number <= REPLY_DELAY_SCALE_MAX:
+        raise ValueError("回复延迟比例必须为 0-120")
+    return number
+
+
+def normalize_reply_delay_scale(value, default=DEFAULT_REPLY_DELAY_SCALE):
+    try:
+        return parse_reply_delay_scale(value)
+    except (TypeError, ValueError):
+        return default
 
 
 def normalize_media_types(value, strict=False):
@@ -1275,6 +1300,9 @@ class PanelState:
             "auto_reply_context_per_side": normalize_context_per_side(
                 values.get("auto_reply_context_per_side", CONTEXT_PER_SIDE_MIN)
             ),
+            "auto_reply_delay_scale": normalize_reply_delay_scale(
+                values.get("auto_reply_delay_scale", DEFAULT_REPLY_DELAY_SCALE)
+            ),
             "customer_memory_enabled": as_bool(values.get("customer_memory_enabled", "0")),
             "auto_reply_media_types": normalize_media_types(
                 values.get("auto_reply_media_types", DEFAULT_AUTO_REPLY_MEDIA_TYPES)
@@ -1312,6 +1340,8 @@ class PanelState:
             if not CONTEXT_PER_SIDE_MIN <= context_count <= CONTEXT_PER_SIDE_MAX:
                 raise ValueError("历史消息数必须为 5-50")
             updates["auto_reply_context_per_side"] = str(context_count)
+        if "auto_reply_delay_scale" in payload:
+            updates["auto_reply_delay_scale"] = str(parse_reply_delay_scale(payload["auto_reply_delay_scale"]))
         if "auto_reply_media_types" in payload:
             updates["auto_reply_media_types"] = json.dumps(
                 normalize_media_types(payload["auto_reply_media_types"], strict=True),
@@ -2142,13 +2172,20 @@ class PanelState:
         finally:
             connection.close()
 
-    def _reply_delays(self, _reply, is_hot):
-        pre_delay = self.uniform_fn(1.0, 5.0) if is_hot else self.uniform_fn(20.0, 100.0)
-        typing_delay = self.uniform_fn(MIN_TYPING_DELAY_SECONDS, MAX_TYPING_DELAY_SECONDS)
+    def _reply_delays(self, _reply, is_hot, session_name=DEFAULT_SESSION_NAME):
+        scale = normalize_reply_delay_scale(
+            self._settings(session_name).get("auto_reply_delay_scale", DEFAULT_REPLY_DELAY_SCALE)
+        ) / 100.0
+        pre_min, pre_max = ((1.0, 5.0) if is_hot else (20.0, 100.0))
+        pre_delay = self.uniform_fn(round(pre_min * scale, 3), round(pre_max * scale, 3))
+        typing_delay = self.uniform_fn(
+            round(MIN_TYPING_DELAY_SECONDS * scale, 3),
+            round(MAX_TYPING_DELAY_SECONDS * scale, 3),
+        )
         return pre_delay, typing_delay
 
-    def _wait_before_reply(self, reply, is_hot):
-        pre_delay, typing_delay = self._reply_delays(reply, is_hot)
+    def _wait_before_reply(self, reply, is_hot, session_name=DEFAULT_SESSION_NAME):
+        pre_delay, typing_delay = self._reply_delays(reply, is_hot, session_name)
         self.sleep_fn(pre_delay)
         self.sleep_fn(typing_delay)
         return pre_delay, typing_delay
@@ -2370,7 +2407,7 @@ class PanelState:
             self.log("INFO", "auto_reply.ignored", "AI 未产生有效回复（" + mode + "）", session_name)
             return {"action": "ignored", "reason": "AI 未产生有效回复", "mode": mode, "session": session_name}
         if dispatch:
-            self._wait_before_reply(reply, is_hot)
+            self._wait_before_reply(reply, is_hot, session_name)
             with self.reply_policy.lock:
                 if self._reply_ticket(session_name, original_timestamp, chat_id) != ticket:
                     self.log("INFO", "auto_reply.ignored", "发送前回复条件已变化，取消发送", session_name)
@@ -3149,6 +3186,7 @@ def settings_page():
             <div class="switch"><label class="check-label" for="enabled"><input id="enabled" type="checkbox">按时间段自动回复</label><span id="enabledState" class="status-chip off">已关闭</span></div>
             <h3>每周回复时间段</h3><div class="section-note">开启上面的全局总开关时全天回复；否则仅在启用的时间段内回复。</div><div class="schedule" id="schedule"></div><p class="rule-note">结束时间早于开始时间表示跨天，例如 20:00 → 11:00，覆盖当日晚上及次日凌晨。</p>
             <div class="range-field"><label for="contextPerSide"><span>每一方的历史消息数</span><output id="contextPerSideValue" for="contextPerSide">5</output></label><input id="contextPerSide" type="range" min="5" max="50" step="1" value="5"><div class="section-note" id="contextExplanation">客户 5 条 + 自己 5 条，共最多 10 条历史上下文。</div></div>
+             <div class="range-field"><label for="replyDelayScale"><span>自动回复延迟强度</span><output id="replyDelayScaleValue" for="replyDelayScale">100 · 当前默认</output></label><input id="replyDelayScale" type="range" min="0" max="120" step="5" value="100" aria-valuenow="100" aria-valuetext="100% · 当前默认"><div class="section-note" id="replyDelayExplanation">100% 使用当前热对话、冷对话和输入模拟延迟。</div></div>
             <div class="switch"><label class="check-label" for="customerMemoryEnabled"><input id="customerMemoryEnabled" type="checkbox">启用客户动态记忆</label><span id="customerMemoryState" class="status-chip off">已关闭</span></div><div class="section-note">按客户保存加密的对话摘要、需求偏好和有效人工回复经验，用于后续 AI 回复；关闭后保留已有记忆并停止更新和使用。</div>
             <fieldset class="media-options"><legend>可触发自动回复的客户媒体</legend><div class="section-note">默认关闭；仅处理私聊客户消息，开启后才会处理对应媒体类型。</div><label for="autoReplyMedia_image"><input id="autoReplyMedia_image" type="checkbox">图片</label><label for="autoReplyMedia_video"><input id="autoReplyMedia_video" type="checkbox">视频</label><label for="autoReplyMedia_audio"><input id="autoReplyMedia_audio" type="checkbox">音频</label><label for="autoReplyMedia_file"><input id="autoReplyMedia_file" type="checkbox">文件</label></fieldset>
             <label for="persona">人设</label><textarea id="persona" maxlength="4000"></textarea>
@@ -3197,6 +3235,7 @@ def settings_page():
     const sessionQuery = '?session=' + encodeURIComponent(sessionName);
     let csrfToken = '';
     let iptvAvailable = false;
+    let loadedReplyDelayScale = 100;
     function renderIptvSettings(data) {
       iptvAvailable = Boolean(data); $('iptvPanel').hidden = !iptvAvailable; if (!data) return;
       $('iptvEnabled').checked = Boolean(data.enabled); $('iptvPack').value = data.pack || 'all';
@@ -3236,6 +3275,7 @@ def settings_page():
     function renderSchedule(windows) { $('schedule').innerHTML = days.map(([key,label]) => { const item = (windows[key] || [])[0] || {start:'09:00',end:'18:00'}; const active = Boolean((windows[key] || []).length); return `<div class="day-row"><label for="${key}Enabled">${label}</label><input id="${key}Enabled" type="checkbox" ${active ? 'checked' : ''} aria-label="启用${label}"><input id="${key}Start" type="time" value="${esc(item.start)}" ${active ? '' : 'disabled'} aria-label="${label}开始时间"><input id="${key}End" type="time" value="${esc(item.end)}" ${active ? '' : 'disabled'} aria-label="${label}结束时间"></div>`; }).join(''); days.forEach(([key]) => $(key+'Enabled').addEventListener('change', () => { const on = $(key+'Enabled').checked; $(key+'Start').disabled = !on; $(key+'End').disabled = !on; })); }
     function collectWindows() { const result = {}; days.forEach(([key]) => { if ($(key+'Enabled').checked) result[key] = [{start:$(key+'Start').value,end:$(key+'End').value}]; }); return result; }
     function renderContextCount() { const count = Math.max(5, Math.min(50, Number($('contextPerSide').value) || 5)); $('contextPerSide').value = String(count); $('contextPerSideValue').textContent = String(count); $('contextExplanation').textContent = `客户 ${count} 条 + 自己 ${count} 条，共最多 ${count * 2} 条历史上下文。`; }
+    function renderReplyDelayScale(value) { const scale = Math.max(0, Math.min(120, Number(value) || 0)); $('replyDelayScale').value = String(scale); $('replyDelayScaleValue').textContent = String(scale) + (scale === 100 ? ' · 当前默认' : ' · 延迟强度'); $('replyDelayScale').setAttribute('aria-valuenow', String(scale)); $('replyDelayScale').setAttribute('aria-valuetext', String(scale) + (scale === 100 ? '% · 当前默认' : '% · 延迟强度')); $('replyDelayExplanation').textContent = scale === 0 ? '0% 不等待，适合测试；不会改变人工发送和 IPTV 试用流程。' : String(scale) + '% 按比例缩放热对话、冷对话和输入模拟延迟。'; }
     function collectMediaTypes() { return Object.fromEntries(mediaTypeNames.map((name) => [name, $('autoReplyMedia_' + name).checked])); }
     function setChip(id, checked) { $(id).textContent = checked ? '已开启' : '已关闭'; $(id).className = 'status-chip' + (checked ? '' : ' off'); }
     function setEnabledState() { setChip('enabledState', $('enabled').checked); setChip('allDayState', $('allDay').checked); setChip('customerMemoryState', $('customerMemoryEnabled').checked); }
@@ -3243,13 +3283,13 @@ def settings_page():
     async function ensureCsrf() { if (csrfToken) return csrfToken; const response = await fetch('/api/security/csrf', {cache:'no-store', credentials:'same-origin'}); const data = await response.json(); if (!response.ok) throw new Error(data.message || '安全校验不可用'); csrfToken = data.csrf_token || ''; return csrfToken; }
     async function mutateFetch(url, options={}) { const headers = new Headers(options.headers || {}); try { await ensureCsrf(); } catch (_) {} if (csrfToken) headers.set('X-CSRF-Token', csrfToken); return fetch(url, {...options, headers, credentials:'same-origin', cache:'no-store'}); }
     async function saveTheme(theme) { applyTheme(theme); try { const response = await mutateFetch('/api/settings' + sessionQuery, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({theme})}); if (!response.ok) { const data = await response.json(); throw new Error(data.message || '主题保存失败'); } } catch (error) { $('settingsNotice').textContent = error.message; } }
-    async function loadSettings() { const response = await fetch('/api/settings' + sessionQuery, {cache:'no-store'}); const data = await response.json(); if (!response.ok) throw new Error(data.message || '读取设置失败'); $('enabled').checked = data.auto_reply_enabled; $('allDay').checked = data.auto_reply_all_day; $('customerMemoryEnabled').checked = Boolean(data.customer_memory_enabled); setEnabledState(); renderSchedule(data.weekly_reply_windows); $('contextPerSide').value = String(data.auto_reply_context_per_side ?? 5); renderContextCount(); for (const name of mediaTypeNames) $('autoReplyMedia_' + name).checked = Boolean(data.auto_reply_media_types?.[name]); $('persona').value = data.persona || ''; $('systemPrompt').value = data.system_prompt || ''; $('aiBaseUrl').value = data.ai_base_url || ''; $('aiModel').value = data.ai_model || ''; $('keyState').textContent = data.ai_api_key_configured ? 'APIKey：已配置（隐藏）' : 'APIKey：未配置'; applyTheme(data.theme); renderIptvSettings(data.iptv); loadIptvRecords(); }
-    async function saveSettings(event) { event.preventDefault(); const button = $('saveButton'); button.disabled = true; $('settingsNotice').textContent = ''; renderContextCount(); try { const body = {auto_reply_enabled:$('enabled').checked,auto_reply_all_day:$('allDay').checked,customer_memory_enabled:$('customerMemoryEnabled').checked,weekly_reply_windows:collectWindows(),auto_reply_context_per_side:Number($('contextPerSide').value),auto_reply_media_types:collectMediaTypes(),persona:$('persona').value,system_prompt:$('systemPrompt').value,ai_base_url:$('aiBaseUrl').value,ai_model:$('aiModel').value,ai_api_key:$('aiKey').value,clear_ai_api_key:$('clearKey').checked,theme:$('themeSelect').value}; if (iptvAvailable) body.iptv = collectIptvSettings(); const response = await mutateFetch('/api/settings' + sessionQuery, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}); const data = await response.json(); if (!response.ok) throw new Error(data.message || '保存失败'); $('aiKey').value = ''; $('clearKey').checked = false; $('iptvKey').value = ''; $('clearIptvKey').checked = false; renderIptvSettings(data.iptv); loadIptvRecords(); $('keyState').textContent = data.ai_api_key_configured ? 'APIKey：已配置（隐藏）' : 'APIKey：未配置'; $('settingsNotice').className = 'notice success'; $('settingsNotice').textContent = '设置已保存'; delete document.body.dataset.dirty; } catch (error) { $('settingsNotice').className = 'notice'; $('settingsNotice').textContent = error.message; } finally { button.disabled = false; } }
+    async function loadSettings() { const response = await fetch('/api/settings' + sessionQuery, {cache:'no-store'}); const data = await response.json(); if (!response.ok) throw new Error(data.message || '读取设置失败'); $('enabled').checked = data.auto_reply_enabled; $('allDay').checked = data.auto_reply_all_day; $('customerMemoryEnabled').checked = Boolean(data.customer_memory_enabled); setEnabledState(); renderSchedule(data.weekly_reply_windows); $('contextPerSide').value = String(data.auto_reply_context_per_side ?? 5); renderContextCount(); loadedReplyDelayScale = Math.max(0, Math.min(120, Number(data.auto_reply_delay_scale ?? 100) || 100)); renderReplyDelayScale(loadedReplyDelayScale); for (const name of mediaTypeNames) $('autoReplyMedia_' + name).checked = Boolean(data.auto_reply_media_types?.[name]); $('persona').value = data.persona || ''; $('systemPrompt').value = data.system_prompt || ''; $('aiBaseUrl').value = data.ai_base_url || ''; $('aiModel').value = data.ai_model || ''; $('keyState').textContent = data.ai_api_key_configured ? 'APIKey：已配置（隐藏）' : 'APIKey：未配置'; applyTheme(data.theme); renderIptvSettings(data.iptv); loadIptvRecords(); }
+    async function saveSettings(event) { event.preventDefault(); const button = $('saveButton'); button.disabled = true; $('settingsNotice').textContent = ''; renderContextCount(); const previousReplyDelayScale = loadedReplyDelayScale; try { const body = {auto_reply_enabled:$('enabled').checked,auto_reply_all_day:$('allDay').checked,customer_memory_enabled:$('customerMemoryEnabled').checked,weekly_reply_windows:collectWindows(),auto_reply_context_per_side:Number($('contextPerSide').value),auto_reply_delay_scale:Number($('replyDelayScale').value),auto_reply_media_types:collectMediaTypes(),persona:$('persona').value,system_prompt:$('systemPrompt').value,ai_base_url:$('aiBaseUrl').value,ai_model:$('aiModel').value,ai_api_key:$('aiKey').value,clear_ai_api_key:$('clearKey').checked,theme:$('themeSelect').value}; if (iptvAvailable) body.iptv = collectIptvSettings(); const response = await mutateFetch('/api/settings' + sessionQuery, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}); const data = await response.json(); if (!response.ok) throw new Error(data.message || '保存失败'); loadedReplyDelayScale = Math.max(0, Math.min(120, Number(data.auto_reply_delay_scale ?? body.auto_reply_delay_scale) || 100)); renderReplyDelayScale(loadedReplyDelayScale); $('aiKey').value = ''; $('clearKey').checked = false; $('iptvKey').value = ''; $('clearIptvKey').checked = false; renderIptvSettings(data.iptv); loadIptvRecords(); $('keyState').textContent = data.ai_api_key_configured ? 'APIKey：已配置（隐藏）' : 'APIKey：未配置'; $('settingsNotice').className = 'notice success'; $('settingsNotice').textContent = '设置已保存'; delete document.body.dataset.dirty; } catch (error) { loadedReplyDelayScale = previousReplyDelayScale; renderReplyDelayScale(previousReplyDelayScale); $('settingsNotice').className = 'notice'; $('settingsNotice').textContent = error.message; } finally { button.disabled = false; } }
     async function addKnowledge(name, content) { $('knowledgeNotice').textContent = ''; const response = await mutateFetch('/api/knowledge' + sessionQuery, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({file_name:name,content})}); const data = await response.json(); if (!response.ok) throw new Error(data.message || '资料保存失败'); $('knowledgeText').value = ''; await loadKnowledge(); }
     async function loadKnowledge() { const response = await fetch('/api/knowledge' + sessionQuery, {cache:'no-store'}); const data = await response.json(); if (!response.ok) throw new Error(data.message || '资料读取失败'); $('knowledgeList').innerHTML = data.items.length ? data.items.map(item => `<div class="knowledge-item"><div><div class="knowledge-name">${esc(item.file_name)}</div><div class="knowledge-meta">${item.characters} 字符 · ${new Date(item.created_at * 1000).toLocaleString()}</div></div><div class="knowledge-actions"><button type="button" data-view="${item.id}">查看</button><button type="button" class="danger" data-delete="${item.id}">删除</button></div></div>`).join('') : '<div class="muted">暂无资料</div>'; document.querySelectorAll('[data-view]').forEach(button => button.addEventListener('click', () => viewKnowledge(button.dataset.view))); document.querySelectorAll('[data-delete]').forEach(button => button.addEventListener('click', () => deleteKnowledge(button.dataset.delete))); }
     async function viewKnowledge(id) { const response = await fetch('/api/knowledge/' + id + sessionQuery, {cache:'no-store'}); const data = await response.json(); if (!response.ok) throw new Error(data.message || '资料读取失败'); $('knowledgePreview').hidden = false; $('knowledgePreview').textContent = data.content; }
     async function deleteKnowledge(id) { if (!window.confirm('确认删除这份资料？')) return; const response = await mutateFetch('/api/knowledge/' + id + sessionQuery, {method:'DELETE'}); const data = await response.json(); if (!response.ok) throw new Error(data.message || '删除失败'); $('knowledgePreview').hidden = true; await loadKnowledge(); }
-    $('contextPerSide').addEventListener('input', renderContextCount); renderContextCount();
+    $('contextPerSide').addEventListener('input', renderContextCount); $('replyDelayScale').addEventListener('input', (event) => renderReplyDelayScale(event.target.value)); renderContextCount(); renderReplyDelayScale(loadedReplyDelayScale);
     const storedTheme = localStorage.getItem('waha-panel-theme'); if (storedTheme) applyTheme(storedTheme); $('themeSelect').addEventListener('change', (event) => saveTheme(event.target.value)); $('enabled').addEventListener('change', setEnabledState); $('allDay').addEventListener('change', setEnabledState); $('customerMemoryEnabled').addEventListener('change', setEnabledState); $('settingsForm').addEventListener('submit', saveSettings); $('checkIptv').addEventListener('click', checkIptv); $('refreshIptvRecords').addEventListener('click', loadIptvRecords); $('addKnowledge').addEventListener('click', async () => { try { await addKnowledge($('knowledgeName').value || '粘贴文字', $('knowledgeText').value); } catch (error) { $('knowledgeNotice').textContent = error.message; } }); $('knowledgeFile').addEventListener('change', () => { const file = $('knowledgeFile').files[0]; if (!file) return; if (!/[.]txt$|[.]md$/i.test(file.name)) { $('knowledgeNotice').textContent = '仅支持 .txt 或 .md 文件'; return; } const reader = new FileReader(); reader.onload = async () => { try { await addKnowledge(file.name, reader.result); $('knowledgeFile').value = ''; } catch (error) { $('knowledgeNotice').textContent = error.message; } }; reader.readAsText(file); });
     loadSettings().catch(error => { $('settingsNotice').textContent = error.message; }); loadKnowledge().catch(error => { $('knowledgeNotice').textContent = error.message; });
   </script>

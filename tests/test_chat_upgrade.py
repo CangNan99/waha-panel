@@ -270,6 +270,22 @@ class SettingsAndContextTests(UpgradeTestCase):
         self.assertFalse(self.state.settings_payload("default")["customer_memory_enabled"])
         self.assertTrue(self.state.settings_payload("sales")["customer_memory_enabled"])
 
+    def test_reply_delay_scale_defaults_and_round_trips_per_session(self):
+        self.assertEqual(self.state.settings_payload("default")["auto_reply_delay_scale"], 100)
+        self.assertEqual(self.state.settings_payload("sales")["auto_reply_delay_scale"], 100)
+        for value in (0, 50, 100, 120):
+            saved = self.state.save_settings({"auto_reply_delay_scale": value}, "sales")
+            self.assertEqual(saved["auto_reply_delay_scale"], value)
+        self.assertEqual(self.state.settings_payload("default")["auto_reply_delay_scale"], 100)
+
+    def test_invalid_reply_delay_scale_is_rejected_without_overwriting(self):
+        self.state.save_settings({"auto_reply_delay_scale": 50}, "default")
+        before = self.state.settings_payload("default")
+        for value in (-1, 121, 50.0, "50.0", "not-a-number"):
+            with self.assertRaises(ValueError):
+                self.state.save_settings({"auto_reply_delay_scale": value}, "default")
+            self.assertEqual(self.state.settings_payload("default"), before)
+
     def test_message_origin_and_new_storage_tables_are_migrated(self):
         with sqlite3.connect(self.database) as connection:
             connection.execute(
@@ -431,6 +447,18 @@ class SettingsApiTests(UpgradeTestCase):
         self.assertIn('id="customerMemoryEnabled"', page)
         self.assertIn("customer_memory_enabled", page)
         self.assertIn("APIKey：已配置（隐藏）", page)
+
+    def test_settings_page_exposes_reply_delay_slider(self):
+        page = settings_page()
+        self.assertIn('id="replyDelayScale"', page)
+        self.assertIn('type="range"', page)
+        self.assertIn('min="0"', page)
+        self.assertIn('max="120"', page)
+        self.assertIn('step="5"', page)
+        self.assertIn("auto_reply_delay_scale", page)
+        self.assertIn("aria-valuenow", page)
+        self.assertIn("previousReplyDelayScale", page)
+        self.assertIn("renderReplyDelayScale(event.target.value)", page)
 
 
 class MemoryAndTranslationRouteTests(UpgradeTestCase):
