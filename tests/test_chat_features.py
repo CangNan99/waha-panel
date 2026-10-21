@@ -397,6 +397,14 @@ class ChatPageRegressionTests(unittest.TestCase):
         self.assertIn('aria-pressed="false"', page)
         self.assertNotIn("/api/translation/translate',", page[page.index("translationToggle"):])
 
+    def test_system_labels_are_read_only(self):
+        page = chat_management_page("default")
+        self.assertIn('id="systemLabels"', page)
+        self.assertIn("系统标签为只读", page)
+        self.assertIn("state.labels.system", page)
+        self.assertIn("source:'system'", page)
+        self.assertNotIn("/system-labels", page)
+
     def test_global_translation_provider_switch_contract(self):
         page = chat_management_page("default")
         for token in (

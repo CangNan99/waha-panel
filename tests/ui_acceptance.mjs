@@ -101,6 +101,26 @@ try {
     await fetch(base+'/__fixture__/control',{method:'POST',body:JSON.stringify({delay_note_save:0})});
     console.log('PASS Chinese note rejection, preview, confirmation and stale-response isolation');
   }
+  if(mode==='system_labels'){
+    await page.setViewportSize({width:1440,height:900});
+    await page.route('**/api/chat/sessions/support/labels*', route => route.fulfill({
+      status:200,
+      contentType:'application/json',
+      body:JSON.stringify({manual:[],ai:[],system:[{id:17,label:'IPTV测试过'}]})
+    }));
+    await page.goto(base+'/sessions/support/chats?chat=customer-a');
+    await page.locator('.message-row').last().waitFor();
+    await page.locator('#conversationLabels .chat-label.system').filter({hasText:'IPTV测试过'}).waitFor();
+    await page.locator('#labelButton').click();
+    await page.locator('#labelDialog').waitFor({state:'visible'});
+    await page.locator('#systemLabels .label-row.system').filter({hasText:'IPTV测试过'}).waitFor();
+    assert.equal(await page.locator('#systemLabels .label-row.system button').count(),0,'system labels have no edit/delete controls');
+    assert.equal(await page.locator('#systemLabels').textContent().then(text=>text.includes('只读')),true,'system labels are visibly read-only');
+    await page.locator('#closeLabelDialog').click();
+    await page.locator('#labelDialog').waitFor({state:'hidden'});
+    await page.unroute('**/api/chat/sessions/support/labels*');
+    console.log('PASS IPTV system label appears in header and read-only dialog group');
+  }
   if(mode==='mobile'){
     await page.setViewportSize({width:375,height:812});
     await page.goto(base+'/sessions/support/chats?chat=customer-a');
