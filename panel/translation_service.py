@@ -486,6 +486,79 @@ class TranslationService:
         result["cached"] = False
         return result
 
+    def translate_display(self, text, force=False, role="customer"):
+        """Normalize the structured AI translation for global message display."""
+        result = self.translate(text, force=force, role=role)
+        return {
+            "status": "SKIPPED" if result.get("already_zh") else "READY",
+            "translation": str(result.get("chinese_translation") or ""),
+            "detected_language": str(result.get("source_language_code") or "") or None,
+            "cached": bool(result.get("cached")),
+            "error_code": None,
+        }
+
+    def get_cached_display(self, text, role="customer"):
+        """Read a completed display translation without contacting the AI service."""
+        speaker_role = normalize_translation_role(role)
+        source = _normalized_text(text)
+        if not source:
+            return None
+        if self._looks_chinese(source):
+            return {
+                "status": "SKIPPED",
+                "translation": source,
+                "detected_language": "zh",
+                "cached": False,
+                "error_code": None,
+            }
+        if len(source) > MAX_TRANSLATION_CHARS:
+            return {"status": "FAILED", "translation": None, "detected_language": None,
+                    "cached": False, "error_code": "TEXT_TOO_LONG"}
+        self._cleanup_cache()
+        source_hash = _sha256(source)
+        prompt_version = f"{TRANSLATION_PROMPT_VERSION}:{speaker_role}"
+        now = int(self.clock())
+        with closing(self._connect()) as connection:
+            row = connection.execute(
+                "SELECT source_hash, model_fingerprint, prompt_version, target_language, result_ciphertext "
+                "FROM message_translation_cache WHERE source_hash=? AND prompt_version=? "
+                "AND target_language='zh-CN' AND expires_at>? ORDER BY last_accessed_at DESC LIMIT 1",
+                (source_hash, prompt_version, now),
+            ).fetchone()
+            if not row:
+                return None
+            cache_key = (
+                row["source_hash"], row["model_fingerprint"], row["prompt_version"], row["target_language"]
+            )
+            try:
+                result = self._validate_result(
+                    self.cipher.decrypt_json(row["result_ciphertext"]),
+                    TRANSLATION_FIELDS,
+                    "TRANSLATION_RESULT_INVALID",
+                )
+            except (DataCipherError, TranslationError):
+                connection.execute(
+                    "DELETE FROM message_translation_cache WHERE source_hash=? AND model_fingerprint=? "
+                    "AND prompt_version=? AND target_language=?",
+                    cache_key,
+                )
+                connection.commit()
+                return None
+            connection.execute(
+                "UPDATE message_translation_cache SET last_accessed_at=? WHERE source_hash=? "
+                "AND model_fingerprint=? AND prompt_version=? AND target_language=?",
+                (now,) + cache_key,
+            )
+            connection.commit()
+        result = self._with_speaker_metadata(result, speaker_role)
+        return {
+            "status": "SKIPPED" if result.get("already_zh") else "READY",
+            "translation": str(result.get("chinese_translation") or ""),
+            "detected_language": str(result.get("source_language_code") or "") or None,
+            "cached": True,
+            "error_code": None,
+        }
+
     @staticmethod
     def _bounded_messages(messages):
         candidates = []
