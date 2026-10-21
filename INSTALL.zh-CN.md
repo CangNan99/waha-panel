@@ -240,14 +240,16 @@ API Key 只在后端持久化并由后端调用 AI，不会在设置回显、二
 
 聊天窗口打开或切换客户时会保留完整历史，但视图会定位到最新一条消息。收到新消息或发送消息时，如果当前已经在底部附近，窗口会自动跟随；如果正在查看较早消息，页面会保留当前位置并显示“有新消息 · 回到最新”。没有正文、标题、媒体或其他可展示内容的空记录不会生成空白气泡，正常文本和媒体消息仍会显示。
 
-聊天页面顶部的“翻译设置”分为两类，销售辅助 AI 与阿里云机器翻译彼此独立：
+聊天页面顶部的“翻译设置”提供两个可以手动切换的全局翻译引擎。切换只影响当前登录面板的后续翻译请求，不会修改销售自动回复模型。
 
-1. **阿里云机器翻译**：填写 Endpoint、地域、AccessKey ID 和 AccessKey Secret，保存后点击“测试连接”。默认 Endpoint 为 `mt.cn-hangzhou.aliyuncs.com`，地域为 `cn-hangzhou`。凭据只在后端加密保存，读取设置时不会回显；表单留空表示保留已有凭据，勾选清除才会删除。
-2. **销售辅助 AI**：用于销售回复建议、草稿优化和当前总结，仍使用单独的 OpenAI 兼容服务地址、模型名和 API Key。它不会参与聊天顶部的全局机器翻译。
+1. **阿里云机器翻译专业版**：填写 Endpoint、地域、AccessKey ID 和 AccessKey Secret，保存后点击“测试当前引擎”或“测试阿里云配置”。默认 Endpoint 为 `mt.cn-hangzhou.aliyuncs.com`，地域为 `cn-hangzhou`。后端使用阿里云 Python SDK 的专业版 `Translate` 接口，自动识别源语言并翻译为中文；凭据只在后端加密保存，读取设置时不会回显；表单留空表示保留已有凭据，勾选清除才会删除。阿里云账号需要具备机器翻译调用权限。
+2. **AI 模型翻译**：点击“销售辅助 AI 设置”，填写 OpenAI 兼容服务地址、模型名和 API Key，保存并测试连接后，在“翻译引擎”下拉框选择“AI 模型翻译”。该配置同时用于销售回复建议、草稿优化和当前总结。请确认服务地址、模型和 Key 具备实际调用权限，并按服务商规则处理客户内容。
 
-阿里云机器翻译的开关按客户独立保存，默认关闭。打开某个聊天顶部的“全局翻译：关闭”后，只翻译当前打开的聊天中已加载的非中文消息，客户原文、AI 回复和人工回复都会以“原文 + 中文翻译”双行显示。切换客户、返回最近聊天或关闭页面会停止当前请求，未打开的聊天不会发送给阿里云；纯中文内容会直接跳过翻译。翻译结果会在面板中加密缓存，原文发生变化时重新翻译，可在“翻译设置”中清空缓存。
+翻译引擎不会自动互相回退。当前引擎未配置或测试失败时，打开聊天顶部的“全局翻译”会提示先完成该引擎配置；需要使用另一个引擎时，先在下拉框中手动切换。切换会取消进行中的旧请求，按新引擎重新读取当前聊天译文，并分别使用对应引擎的缓存。
 
-翻译批次通过阿里云机器翻译接口发送，内容仅限当前聊天加载的消息文本。请按阿里云账号的最小权限原则创建访问凭据，并遵循阿里云机器翻译的 SDK 与 `TranslateGeneral` 接口参数说明：<https://www.alibabacloud.com/help/en/machine-translation/developer-reference/python-sdk>、<https://www.alibabacloud.com/help/en/machine-translation/developer-reference/api-reference-machine-translation-universal-version-call-guide>。
+全局翻译开关按客户独立保存，默认关闭。打开后只翻译当前聊天中已加载的非中文消息，客户原文、AI 回复和人工回复都会以“原文 + 中文翻译”双行显示；纯中文内容会直接跳过。切换客户、返回最近聊天或关闭页面会停止当前请求，未打开的聊天不会发送到翻译服务。翻译结果会在面板中加密缓存，原文发生变化时重新翻译，可在“翻译设置”中清空当前引擎缓存。
+
+阿里云批次内容仅限当前聊天已加载的消息文本，并通过专业版 `Translate` 接口发送。请按阿里云账号的最小权限原则创建访问凭据，并参考阿里云机器翻译的 SDK 与接口文档：<https://www.alibabacloud.com/help/en/machine-translation/developer-reference/python-sdk>、<https://www.alibabacloud.com/help/en/machine-translation/developer-reference/api-reference-machine-translation-universal-version-call-guide>。
 
 生成销售建议、优化草稿和总结时，最近对话及相关知识会发送到配置的第三方 AI 服务；生成内容只是可编辑建议，不会未经人工确认自动发送。
 
