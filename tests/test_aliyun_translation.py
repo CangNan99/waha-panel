@@ -15,12 +15,26 @@ from panel.aliyun_translation_service import AliyunTranslationService, is_pure_c
 class FakeClient:
     def __init__(self):
         self.requests = []
+        self.method_calls = []
         self.failure = False
+        self.response_code = 200
 
-    def translate_general_with_options(self, request, runtime):
+    def translate_with_options(self, request, runtime):
+        self.method_calls.append("translate_with_options")
         self.requests.append(request)
         if self.failure:
             raise RuntimeError("credential-secret source-private-text")
+        if self.response_code != 200:
+            return {"body": {"Code": self.response_code, "Message": "private upstream detail"}}
+        return {"body": {"Code": 200, "Data": {"Translated": "你好", "DetectedLanguage": "en"}}}
+
+    def translate_general_with_options(self, request, runtime):
+        self.method_calls.append("translate_general_with_options")
+        self.requests.append(request)
+        if self.failure:
+            raise RuntimeError("credential-secret source-private-text")
+        if self.response_code != 200:
+            return {"body": {"Code": self.response_code, "Message": "private upstream detail"}}
         return {"body": {"Code": 200, "Data": {"Translated": "你好", "DetectedLanguage": "en"}}}
 
 
@@ -67,16 +81,17 @@ class AliyunTranslationTests(unittest.TestCase):
         self.assertTrue(is_pure_chinese("您好！😊"))
         self.assertFalse(is_pure_chinese("hello 你好"))
 
-    def test_non_chinese_uses_general_auto_to_zh_plain_text(self):
+    def test_non_chinese_uses_professional_auto_to_zh_communication(self):
         self.configure()
         result = self.translate()
         self.assertEqual(result["status"], "READY")
         self.assertEqual(result["translation"], "你好")
         request = self.client.requests[0]
+        self.assertEqual(self.client.method_calls, ["translate_with_options"])
         self.assertEqual(request.source_language, "auto")
         self.assertEqual(request.target_language, "zh")
         self.assertEqual(request.format_type, "text")
-        self.assertEqual(request.scene, "general")
+        self.assertEqual(request.scene, "communication")
 
     def test_mixed_text_is_translated(self):
         self.configure()
@@ -148,6 +163,14 @@ class AliyunTranslationTests(unittest.TestCase):
         self.assertEqual(result["status"], "FAILED")
         self.assertEqual(result["error_code"], "TEXT_TOO_LONG")
         self.assertEqual(self.client.requests, [])
+
+    def test_professional_permission_error_is_sanitized(self):
+        self.configure()
+        self.client.response_code = 10009
+        result = self.translate("Permission failure")
+        self.assertEqual(result["status"], "FAILED")
+        self.assertEqual(result["error_code"], "ALIYUN_PERMISSION")
+        self.assertNotIn("private upstream detail", json.dumps(self.logs))
 
     def test_errors_do_not_log_credentials_or_source(self):
         self.configure()
