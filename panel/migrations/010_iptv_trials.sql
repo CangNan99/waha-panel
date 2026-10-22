@@ -21,6 +21,6 @@ CREATE TABLE IF NOT EXISTS iptv_trials (
     error_code TEXT NOT NULL DEFAULT '',
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL,
-    UNIQUE(provider, customer_key)
+    UNIQUE(provider, session_name, customer_key)
 );
 CREATE INDEX IF NOT EXISTS idx_iptv_trials_created ON iptv_trials(provider, created_at);

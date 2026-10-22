@@ -133,17 +133,18 @@ class IptvServiceTests(unittest.TestCase):
         self.assertNotIn('synthetic-reseller-key', raw)
         self.assertEqual(self.cipher.decrypt_json(raw)['api_key'], 'synthetic-reseller-key')
 
-    def test_same_customer_across_sessions_reuses_encrypted_account(self):
+    def test_same_customer_in_separate_chat_windows_gets_separate_accounts(self):
         first = self.create()
         second = self.create('123456789@s.whatsapp.net', 'support')
-        self.assertEqual(first['id'], second['id'])
+        self.assertNotEqual(first['id'], second['id'])
         self.assertEqual(second['account']['username'], 'trial-user')
-        self.assertEqual(len(self.supplier.calls), 1)
-        row = self.rows()[0]
-        self.assertNotIn('123456789', json.dumps(row))
-        self.assertNotIn('trial-pass', json.dumps(row))
-        self.assertEqual(row['expires_at'], 1800043200)
-        self.assertEqual(self.cipher.decrypt_json(row['credentials_ciphertext'])['password'], 'trial-pass')
+        self.assertEqual(len(self.supplier.calls), 2)
+        rows = self.rows()
+        self.assertEqual(len(rows), 2)
+        self.assertNotIn('123456789', json.dumps(rows))
+        self.assertNotIn('trial-pass', json.dumps(rows))
+        self.assertTrue(all(row['expires_at'] == 1800043200 for row in rows))
+        self.assertTrue(all(self.cipher.decrypt_json(row['credentials_ciphertext'])['password'] == 'trial-pass' for row in rows))
 
     def test_unknown_creation_is_durable_and_never_retried(self):
         self.supplier.fail = IptvError('upstream_unknown', '供应商响应不确定', uncertain=True)
@@ -162,21 +163,51 @@ class IptvServiceTests(unittest.TestCase):
                 self.now = 1800000000 + elapsed
                 reopened = IptvService(self.path, self.cipher, b'h' * 32,
                     clock=lambda: self.now, client_factory=lambda _key: self.supplier)
-                reopened.save_settings('support', {'enabled': False})
-                reopened.save_settings('support', {'enabled': True, 'api_key': 'replacement-reseller-key'})
+                reopened.save_settings('sales', {'enabled': False})
+                reopened.save_settings('sales', {'enabled': True, 'api_key': 'replacement-reseller-key'})
                 with self.assertRaises(IptvError) as caught:
-                    reopened.create_trial('support', '123456789@s.whatsapp.net', 'new-event-' + str(elapsed))
+                    reopened.create_trial('sales', '123456789@c.us', 'new-event-' + str(elapsed))
                 self.assertEqual(caught.exception.code, 'trial_expired')
                 self.assertEqual(self.rows()[0]['id'], first['id'])
         self.assertEqual(len(self.supplier.calls), 1)
         self.assertEqual(len(self.rows()), 1)
 
-    def test_unverified_lid_cannot_allocate_a_trial(self):
-        with self.assertRaises(IptvError) as caught:
-            self.create('987654321@lid')
-        self.assertEqual(caught.exception.code, 'customer_unverified')
-        self.assertEqual(self.supplier.calls, [])
-        self.assertEqual(self.rows(), [])
+    def test_lid_chat_window_allocates_once_and_reuses(self):
+        first = self.create('987654321@lid')
+        second = self.create('987654321@lid')
+        self.assertEqual(first['id'], second['id'])
+        self.assertEqual(len(self.supplier.calls), 1)
+        self.assertEqual(len(self.rows()), 1)
+
+    def test_existing_global_trial_constraint_migrates_to_chat_window_scope(self):
+        old_path = Path(self.temp.name) / 'legacy.sqlite3'
+        with closing(sqlite3.connect(old_path)) as connection:
+            connection.executescript('''
+                CREATE TABLE iptv_trials (
+                    id TEXT PRIMARY KEY,
+                    provider TEXT NOT NULL,
+                    customer_key TEXT NOT NULL,
+                    session_name TEXT NOT NULL,
+                    message_key TEXT NOT NULL,
+                    state TEXT NOT NULL,
+                    credentials_ciphertext TEXT NOT NULL DEFAULT '',
+                    expires_at INTEGER NOT NULL DEFAULT 0,
+                    error_code TEXT NOT NULL DEFAULT '',
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL,
+                    UNIQUE(provider, customer_key)
+                );
+                INSERT INTO iptv_trials VALUES ('legacy','activationpanel','same-key','sales','message','created','',0,'',1,1);
+            ''')
+        IptvService(old_path, self.cipher, b'h' * 32, clock=lambda: self.now, client_factory=lambda _key: self.supplier)
+        with closing(sqlite3.connect(old_path)) as connection:
+            unique_indexes = []
+            for index_id, index_name, unique, _origin, _partial in connection.execute('PRAGMA index_list(iptv_trials)'):
+                if unique:
+                    unique_indexes.append([
+                        row[2] for row in connection.execute('PRAGMA index_info(' + repr(index_name) + ')')
+                    ])
+            self.assertIn(['provider', 'session_name', 'customer_key'], unique_indexes)
 
     def test_daily_limit_is_global_across_sessions(self):
         self.create('111111111@c.us')
@@ -208,7 +239,7 @@ class IptvServiceTests(unittest.TestCase):
         thread = threading.Thread(target=restore); thread.start()
         try:
             self.assertTrue(self.supplier.entered.wait(2))
-            with self.assertRaises(IptvError): self.service.create_trial('support', '123456789@c.us', 'fresh-two')
+            with self.assertRaises(IptvError): self.service.create_trial('sales', '123456789@c.us', 'fresh-two')
         finally:
             self.supplier.release.set(); thread.join(4)
         self.assertEqual(len(completed), 1)
@@ -233,7 +264,7 @@ class IptvServiceTests(unittest.TestCase):
         thread.start()
         self.assertTrue(self.supplier.entered.wait(3))
         try:
-            with self.assertRaises(IptvError): self.create(session='support')
+            with self.assertRaises(IptvError): self.create()
         finally:
             self.supplier.release.set()
             thread.join(4)
@@ -243,7 +274,7 @@ class IptvServiceTests(unittest.TestCase):
     def test_delivery_failure_reuses_created_result_and_public_records_are_safe(self):
         result = self.create()
         self.service.mark_delivery(result['id'], False)
-        reused = self.create(session='support')
+        reused = self.create()
         self.service.mark_delivery(reused['id'], True)
         self.assertEqual(len(self.supplier.calls), 1)
         public = json.dumps(self.service.records('sales'))

@@ -100,12 +100,12 @@ class IptvIntegrationTests(unittest.TestCase):
             self.assertEqual(self.run_event(identity='other@c.us', message_id='event-other')['action'], 'ignored')
         self.assertEqual(self.system_labels(), [])
 
-    def test_reused_trial_in_second_session_adds_current_session_label(self):
+    def test_separate_chat_window_trial_adds_current_session_label(self):
         self.assertEqual(self.run_event()['action'], 'replied')
         self.state.save_settings({'auto_reply_enabled': True, 'auto_reply_all_day': True, 'iptv': {'enabled': True}}, 'sales')
         self.now += 2
         self.assertEqual(self.run_event(session='sales', message_id='event-sales')['action'], 'replied')
-        self.assertEqual(len(self.supplier.calls), 1)
+        self.assertEqual(len(self.supplier.calls), 2)
         self.assertEqual(self.system_labels(), [('default', 'IPTV测试过'), ('sales', 'IPTV测试过')])
 
     def test_repeated_success_is_idempotent(self):

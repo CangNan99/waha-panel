@@ -1770,7 +1770,7 @@ class PanelState:
         message_key = str(message_id or "").strip()
         text = sanitize_context_content(content)
         if self.iptv is not None:
-            text = self.iptv.sanitize_context(str(chat_id), text)
+            text = self.iptv.sanitize_context(str(chat_id), text, session=name)
         if not message_key or not text:
             return False
         timestamp = int(created_at or self.clock())
@@ -2017,8 +2017,8 @@ class PanelState:
                 "IPTV TRIAL RULES: Only call create_iptv_trial when the current customer explicitly requests "
                 "an IPTV trial/test. Questions about pricing, descriptions, playback faults, quoted text, "
                 "historical requests or a refusal do not authorize creation. Use the customer's language. "
-                "Each customer has one trial opportunity for life. An unexpired account may be reused, "
-                "but never renew it or create another account after expiry. "
+                "Each chat window has one trial opportunity. An unexpired account in this chat window may be reused, "
+                "but never renew it or create another account in that chat window after expiry. "
                 "Never invent account details or claim that a trial was created. The server creates and "
                 "sends the real credentials after the tool succeeds. Do not include a customer ID, "
                 "package, duration, API key or password in tool arguments."
@@ -2053,7 +2053,7 @@ class PanelState:
         if iptv_enabled:
             tools.append({"type": "function", "function": {
                 "name": "create_iptv_trial",
-                "description": "客户明确要求 IPTV 试用时申请测试账号，每位客户永久仅限一次；后台决定套餐与时长并发送真实凭据",
+                "description": "客户明确要求 IPTV 试用时申请测试账号；每个聊天窗口仅限一次，后台决定套餐与时长并发送真实凭据",
                 "parameters": {"type": "object", "additionalProperties": False,
                     "properties": {"language": {"type": "string", "enum": list(IPTV_LANGUAGES)}},
                     "required": ["language"]},
@@ -2365,7 +2365,7 @@ class PanelState:
         iptv_token = (self.iptv.policy_token(session_name)
                       if self.iptv is not None and self.iptv.settings_payload(session_name)["enabled"] else None)
         if self.iptv is not None:
-            incoming_for_ai = self.iptv.sanitize_context(chat_id, incoming_for_ai)
+            incoming_for_ai = self.iptv.sanitize_context(chat_id, incoming_for_ai, session=session_name)
         reply, mode = self._ai_reply(
             settings,
             incoming_for_ai,
@@ -3210,7 +3210,7 @@ def settings_page():
             <div id="keyState" class="section-note">正在读取 Key 状态...</div>
           </div>
           <div class="panel" id="iptvPanel" hidden>
-            <div class="panel-head"><h2>IPTV 自动试用</h2><div class="section-note">客户明确申请后开通 M3U 测试账号。每位客户永久仅限一次，有效期间复用原账号，过期后不再开通。</div></div>
+            <div class="panel-head"><h2>IPTV 自动试用</h2><div class="section-note">客户明确申请后开通 M3U 测试账号。每个聊天窗口仅限一次，有效期间复用当前窗口账号，过期后不再开通。</div></div>
             <label class="check-label" for="iptvEnabled"><input id="iptvEnabled" type="checkbox">为当前会话启用自动开通</label>
             <label for="iptvKey">供应商 API 密钥</label><input id="iptvKey" type="password" autocomplete="new-password" placeholder="留空保持已保存密钥">
             <div class="section-note" id="iptvKeyState">正在读取配置...</div>

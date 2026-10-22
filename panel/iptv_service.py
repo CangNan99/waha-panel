@@ -153,11 +153,41 @@ class IptvService:
         self._external_secret_cache = (None, ())
         with closing(self._connect()) as connection:
             connection.executescript(Path(__file__).with_name('migrations').joinpath('010_iptv_trials.sql').read_text('utf-8'))
+        self._ensure_trial_scope_schema()
 
     def _connect(self):
         connection = sqlite3.connect(self.database_path, timeout=10)
         connection.row_factory = sqlite3.Row
         return connection
+
+    def _ensure_trial_scope_schema(self):
+        with closing(self._connect()) as connection:
+            indexes = connection.execute('PRAGMA index_list(iptv_trials)').fetchall()
+            scoped = False
+            for index in indexes:
+                if not int(index['unique']):
+                    continue
+                columns = [
+                    row['name']
+                    for row in connection.execute('PRAGMA index_info(' + repr(index['name']) + ')').fetchall()
+                ]
+                if columns == ['provider', 'session_name', 'customer_key']:
+                    scoped = True
+                    break
+            if scoped:
+                return
+            migration = Path(__file__).with_name('migrations').joinpath('013_iptv_trial_per_chat_window.sql')
+            connection.executescript(migration.read_text('utf-8'))
+            connection.execute('BEGIN IMMEDIATE')
+            connection.execute(
+                'INSERT OR IGNORE INTO iptv_trials_scoped '
+                'SELECT id,provider,customer_key,session_name,message_key,state,credentials_ciphertext,'
+                'expires_at,error_code,created_at,updated_at FROM iptv_trials'
+            )
+            connection.execute('DROP TABLE iptv_trials')
+            connection.execute('ALTER TABLE iptv_trials_scoped RENAME TO iptv_trials')
+            connection.execute('CREATE INDEX IF NOT EXISTS idx_iptv_trials_created ON iptv_trials(provider, created_at)')
+            connection.commit()
 
     def _hash(self, value):
         return hmac.new(self._secret, ('iptv-v1\0' + value).encode(), hashlib.sha256).hexdigest()
@@ -256,17 +286,16 @@ class IptvService:
     def create_trial(self, session, chat_id, message_id, allowed=lambda: True):
         if not self._allowed(allowed): raise IptvError('cancelled', '自动开通条件已变化')
         customer_key, now = self._customer_key(chat_id), int(self.clock())
-        if str(chat_id).lower().endswith('@lid'):
-            # An opaque LID cannot be linked safely to a previous phone-based
-            # claim. Do not allocate until the customer's phone is verified.
-            raise IptvError('customer_unverified', '暂无法确认客户手机号，请人工核对；系统不会自动开通试用')
         with closing(self._connect()) as connection, connection:
             connection.execute('BEGIN IMMEDIATE')
             config = self._config(connection)
             setting = connection.execute('SELECT enabled,pack FROM iptv_session_settings WHERE session_name=?', (session,)).fetchone()
             if not setting or not setting['enabled'] or not config.get('api_key') or not config.get('duration_confirmed'):
                 raise IptvError('not_enabled', '当前会话的 IPTV 自动开通未就绪')
-            previous = connection.execute('SELECT * FROM iptv_trials WHERE provider=? AND customer_key=?', (PROVIDER, customer_key)).fetchone()
+            previous = connection.execute(
+                'SELECT * FROM iptv_trials WHERE provider=? AND session_name=? AND customer_key=?',
+                (PROVIDER, session, customer_key),
+            ).fetchone()
             if previous:
                 if previous['state'] in ('created', 'sent') and previous['credentials_ciphertext']:
                     if previous['expires_at'] <= now:
@@ -335,12 +364,21 @@ class IptvService:
                 '\n' + labels[1] + ': ' + account['username'] + '\n' + labels[2] + ': ' + account['password'] +
                 '\nM3U: ' + account['url'] + '\n' + labels[3] + ': ' + expiry + ' (UTC+8)')
 
-    def sanitize_context(self, chat_id, text):
+    def sanitize_context(self, chat_id, text, session=None):
         value = str(text or '')
         try:
             customer_key = self._customer_key(chat_id)
             with closing(self._connect()) as connection:
-                row = connection.execute('SELECT credentials_ciphertext FROM iptv_trials WHERE provider=? AND customer_key=?', (PROVIDER, customer_key)).fetchone()
+                if session:
+                    row = connection.execute(
+                        'SELECT credentials_ciphertext FROM iptv_trials WHERE provider=? AND session_name=? AND customer_key=?',
+                        (PROVIDER, str(session), customer_key),
+                    ).fetchone()
+                else:
+                    row = connection.execute(
+                        'SELECT credentials_ciphertext FROM iptv_trials WHERE provider=? AND customer_key=? ORDER BY updated_at DESC LIMIT 1',
+                        (PROVIDER, customer_key),
+                    ).fetchone()
             if row and row[0]:
                 account = self.cipher.decrypt_json(row[0])
                 for field in ('url', 'password', 'username'):
