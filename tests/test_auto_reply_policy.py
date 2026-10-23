@@ -47,6 +47,36 @@ class AutoReplyPolicyTests(unittest.TestCase):
         return PanelState(self.database, self.client, "synthetic-key", sleep_fn=lambda _: None,
                           uniform_fn=lambda *_: 0)
 
+    def test_reply_delay_scale_preserves_current_default_ranges(self):
+        calls = []
+        self.state.uniform_fn = lambda start, end: calls.append((start, end)) or start
+        expected = {
+            100: [(1.0, 5.0), (6.0, 15.0)],
+            50: [(0.5, 2.5), (3.0, 7.5)],
+            120: [(1.2, 6.0), (7.2, 18.0)],
+            0: [(0.0, 0.0), (0.0, 0.0)],
+        }
+        for scale, ranges in expected.items():
+            with self.subTest(scale=scale):
+                calls.clear()
+                self.state.save_settings({"auto_reply_delay_scale": scale}, "default")
+                self.state._reply_delays("回复", True, "default")
+                self.assertEqual(calls, ranges)
+                calls.clear()
+                self.state._reply_delays("回复", False, "default")
+                self.assertEqual(calls, ([(20.0, 100.0)] if scale == 100 else [(20.0 * scale / 100, 100.0 * scale / 100)]) + [ranges[1]])
+
+    def test_reply_delay_scale_is_session_scoped(self):
+        calls = []
+        self.state.uniform_fn = lambda start, end: calls.append((start, end)) or start
+        self.state.save_settings({"auto_reply_delay_scale": 0}, "default")
+        self.state.save_settings({"auto_reply_delay_scale": 120}, "sales")
+        self.state._reply_delays("回复", True, "default")
+        self.assertEqual(calls, [(0.0, 0.0), (0.0, 0.0)])
+        calls.clear()
+        self.state._reply_delays("回复", True, "sales")
+        self.assertEqual(calls, [(1.2, 6.0), (7.2, 18.0)])
+
     def event(self, timestamp="new", session="default", message_id="incoming-1"):
         payload = {"id": message_id, "from": "synthetic@c.us", "body": "请报价", "type": "chat"}
         if timestamp is not None:

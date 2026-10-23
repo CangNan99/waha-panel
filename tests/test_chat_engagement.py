@@ -13,7 +13,7 @@ from urllib.request import Request, urlopen
 
 from panel.app import PanelHandler, PanelState, init_db
 from panel.chat_automation import AutomationError, ChatAutomationService
-from panel.chat_service import ChatSendError, ChatService
+from panel.chat_service import ChatSendError, ChatService, ChatServiceError
 from panel.translation_service import TranslationError, TranslationService
 
 
@@ -80,6 +80,45 @@ class EngagementSchemaTests(unittest.TestCase):
             "follow_up_tasks", "customer_labels", "conversation_summaries", "automated_send_requests"
         } <= tables)
         self.assertTrue({"last_manual_sent_at", "auto_resume_at"} <= takeover_columns)
+
+    def test_system_label_schema_is_created_and_idempotent(self):
+        init_db(self.database, seed_business=False)
+        connection = sqlite3.connect(self.database)
+        connection.execute(
+            "INSERT INTO customer_labels(session_name,chat_key_hmac,source,label,created_at,updated_at) "
+            "VALUES ('default','existing-key','MANUAL','保留标签',1,1)"
+        )
+        connection.commit()
+        connection.close()
+        init_db(self.database, seed_business=False)
+        init_db(self.database, seed_business=False)
+        connection = sqlite3.connect(self.database)
+        tables = {
+            row[0] for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+        indexes = {
+            row[1] for row in connection.execute("PRAGMA index_list(customer_system_labels)")
+        }
+        self.assertIn("customer_system_labels", tables)
+        self.assertIn("idx_customer_system_labels_chat", indexes)
+        self.assertEqual(
+            connection.execute(
+                "SELECT label FROM customer_labels WHERE session_name='default' AND chat_key_hmac='existing-key'"
+            ).fetchone()[0],
+            "保留标签",
+        )
+        connection.execute(
+            "INSERT INTO customer_system_labels(session_name,chat_key_hmac,label,created_at,updated_at) "
+            "VALUES ('default','chat-key','IPTV测试过',1,1)"
+        )
+        with self.assertRaises(sqlite3.IntegrityError):
+            connection.execute(
+                "INSERT INTO customer_system_labels(session_name,chat_key_hmac,label,created_at,updated_at) "
+                "VALUES ('default','chat-key','IPTV测试过',1,1)"
+            )
+        connection.close()
 
 
 class ChatServiceEngagementTests(unittest.TestCase):
@@ -205,6 +244,33 @@ class ChatServiceEngagementTests(unittest.TestCase):
         with self.assertRaises(Exception): self.service.add_manual_label("default", self.item["chat_ref"], "VIP", source="AI")
         with self.assertRaises(Exception): self.service.add_manual_label("default", self.item["chat_ref"], "x" * 101)
         with self.assertRaises(Exception): self.service.update_manual_label("default", self.item["chat_ref"], "AI", "VIP", source="AI")
+
+    def test_system_label_is_idempotent_and_isolated(self):
+        self.service.add_manual_label("default", self.item["chat_ref"], "VIP")
+        self.service.save_summary_and_ai_labels("default", self.item["chat_ref"], {"summary": "中文总结"}, ["高意向"])
+        self.service.add_system_label_by_chat_id("default", "chat-1@c.us", "IPTV测试过")
+        self.service.add_system_label_by_chat_id("default", "chat-1@c.us", "IPTV测试过")
+        support_item = self.service.overview("support")["items"][0]
+        self.service.add_system_label_by_chat_id("support", "chat-1@c.us", "IPTV测试过")
+        labels = self.service.customer_labels("default", self.item["chat_ref"])
+        records = self.service.customer_label_records("default", self.item["chat_ref"])
+        self.assertEqual(labels["manual"], ["VIP"])
+        self.assertEqual(labels["ai"], ["高意向"])
+        self.assertEqual(labels["system"], ["IPTV测试过"])
+        self.assertEqual(len(records["system"]), 1)
+        self.assertEqual(records["system"][0]["label"], "IPTV测试过")
+        support_labels = self.service.customer_labels("support", support_item["chat_ref"])
+        self.assertEqual(support_labels["system"], ["IPTV测试过"])
+        overview_labels = self.service.overview("default")["items"][0]["labels"]
+        self.assertTrue(any(item["source"] == "system" and item["label"] == "IPTV测试过" for item in overview_labels))
+        connection = sqlite3.connect(self.database)
+        self.assertEqual(connection.execute("SELECT COUNT(*) FROM customer_system_labels").fetchone()[0], 2)
+        connection.close()
+
+    def test_system_label_rejects_invalid_values(self):
+        for value in ("", "x" * 101):
+            with self.assertRaises(ChatServiceError):
+                self.service.add_system_label_by_chat_id("default", "chat-1@c.us", value)
 
     def test_summary_and_labels_roll_back_together(self):
         self.service.save_summary_and_ai_labels("default", self.item["chat_ref"], {"summary": "旧总结"}, ["旧标签"])

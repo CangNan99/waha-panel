@@ -29,7 +29,7 @@ class AliyunTranslationError(TranslationError):
     def __init__(self, code, public_message):
         self.code = str(code)
         self.public_message = str(public_message)
-        super().__init__(self.public_message)
+        super().__init__(self.code, self.public_message)
 
 
 def _is_han(character):
@@ -184,7 +184,7 @@ class AliyunTranslationService:
                 connection.commit()
             return row
 
-    def _sdk_request(self, text, settings):
+    def _sdk_request(self, text, settings, scene="communication"):
         if self.text_sanitizer is not None:
             try:
                 text = self.text_sanitizer(text)
@@ -192,17 +192,17 @@ class AliyunTranslationService:
                 raise AliyunTranslationError("SENSITIVE_CONTEXT_UNAVAILABLE", "敏感信息过滤暂不可用，已停止机器翻译请求") from None
         try:
             from alibabacloud_alimt20181012.client import Client
-            from alibabacloud_alimt20181012.models import TranslateGeneralRequest
+            from alibabacloud_alimt20181012.models import TranslateRequest
             from alibabacloud_tea_openapi.models import Config
             from alibabacloud_tea_util.models import RuntimeOptions
         except ImportError as error:
             if self.sdk_client_factory is None:
                 raise AliyunTranslationError("ALIYUN_SDK_MISSING", "阿里云机器翻译 SDK 未安装") from error
             Client, Config = None, None
-            TranslateGeneralRequest = RuntimeOptions = SimpleNamespace
-        request = TranslateGeneralRequest(
+            TranslateRequest = RuntimeOptions = SimpleNamespace
+        request = TranslateRequest(
             source_language="auto", target_language="zh", source_text=text,
-            format_type="text", scene="general",
+            format_type="text", scene=str(scene or "communication"),
         )
         runtime = RuntimeOptions(connect_timeout=5000, read_timeout=15000, autoretry=False)
         if self.sdk_client_factory is not None:
@@ -213,12 +213,24 @@ class AliyunTranslationService:
                 region_id=settings["region_id"], endpoint=settings["endpoint"], protocol="https",
             )
             client = Client(config)
-        response = client.translate_general_with_options(request, runtime)
+        response = client.translate_with_options(request, runtime)
         if hasattr(response, "to_map"):
             response = response.to_map()
         body = response.get("body", response) if isinstance(response, dict) else {}
         if not isinstance(body, dict) or str(body.get("Code")) != "200":
-            raise AliyunTranslationError("ALIYUN_TRANSLATION_FAILED", "阿里云翻译暂不可用")
+            code = str(body.get("Code") or "") if isinstance(body, dict) else ""
+            error_codes = {
+                "10008": ("ALIYUN_TEXT_TOO_LONG", "阿里云翻译文本过长"),
+                "10009": ("ALIYUN_PERMISSION", "阿里云机器翻译权限不足"),
+                "10010": ("ALIYUN_SERVICE_UNAVAILABLE", "阿里云机器翻译服务未开通"),
+                "10011": ("ALIYUN_SERVICE_UNAVAILABLE", "阿里云机器翻译服务不可用"),
+                "10012": ("ALIYUN_TRANSLATION_FAILED", "阿里云翻译暂不可用"),
+                "10013": ("ALIYUN_ACCOUNT_UNAVAILABLE", "阿里云机器翻译账号不可用"),
+            }
+            error_code, message = error_codes.get(
+                code, ("ALIYUN_TRANSLATION_FAILED", "阿里云翻译暂不可用")
+            )
+            raise AliyunTranslationError(error_code, message)
         data = body.get("Data") or {}
         translated = str(data.get("Translated") or "").strip()
         language = str(data.get("DetectedLanguage") or "").strip()[:40] or None
@@ -229,9 +241,9 @@ class AliyunTranslationService:
     def _take_rate_slot(self):
         now = self.clock()
         with self._rate_lock:
-            while self._request_times and now - self._request_times[0] >= 60:
+            while self._request_times and now - self._request_times[0] >= 1:
                 self._request_times.popleft()
-            if len(self._request_times) >= 300:
+            if len(self._request_times) >= 45:
                 raise AliyunTranslationError("ALIYUN_RATE_LIMIT", "机器翻译请求较多，请稍后重试")
             self._request_times.append(now)
 

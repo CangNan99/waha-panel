@@ -244,6 +244,22 @@ class UpgradeTestCase(unittest.TestCase):
 
 
 class SettingsAndContextTests(UpgradeTestCase):
+    def test_global_translation_settings_migrate_idempotently_and_default_to_aliyun_professional(self):
+        init_db(self.database, seed_business=False)
+        with sqlite3.connect(self.database) as connection:
+            row = connection.execute(
+                "SELECT provider,scene FROM global_translation_settings WHERE id=1"
+            ).fetchone()
+            tables = {
+                item[0]
+                for item in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                )
+            }
+        self.assertEqual(row, ("aliyun_professional", "communication"))
+        self.assertIn("translation_settings", tables)
+        self.assertIn("aliyun_translation_settings", tables)
+
     def test_customer_memory_defaults_to_disabled(self):
         payload = self.state.settings_payload("default")
         self.assertFalse(payload["customer_memory_enabled"])
@@ -253,6 +269,22 @@ class SettingsAndContextTests(UpgradeTestCase):
         self.assertTrue(saved["customer_memory_enabled"])
         self.assertFalse(self.state.settings_payload("default")["customer_memory_enabled"])
         self.assertTrue(self.state.settings_payload("sales")["customer_memory_enabled"])
+
+    def test_reply_delay_scale_defaults_and_round_trips_per_session(self):
+        self.assertEqual(self.state.settings_payload("default")["auto_reply_delay_scale"], 100)
+        self.assertEqual(self.state.settings_payload("sales")["auto_reply_delay_scale"], 100)
+        for value in (0, 50, 100, 120):
+            saved = self.state.save_settings({"auto_reply_delay_scale": value}, "sales")
+            self.assertEqual(saved["auto_reply_delay_scale"], value)
+        self.assertEqual(self.state.settings_payload("default")["auto_reply_delay_scale"], 100)
+
+    def test_invalid_reply_delay_scale_is_rejected_without_overwriting(self):
+        self.state.save_settings({"auto_reply_delay_scale": 50}, "default")
+        before = self.state.settings_payload("default")
+        for value in (-1, 121, 50.0, "50.0", "not-a-number"):
+            with self.assertRaises(ValueError):
+                self.state.save_settings({"auto_reply_delay_scale": value}, "default")
+            self.assertEqual(self.state.settings_payload("default"), before)
 
     def test_message_origin_and_new_storage_tables_are_migrated(self):
         with sqlite3.connect(self.database) as connection:
@@ -416,6 +448,18 @@ class SettingsApiTests(UpgradeTestCase):
         self.assertIn("customer_memory_enabled", page)
         self.assertIn("APIKey：已配置（隐藏）", page)
 
+    def test_settings_page_exposes_reply_delay_slider(self):
+        page = settings_page()
+        self.assertIn('id="replyDelayScale"', page)
+        self.assertIn('type="range"', page)
+        self.assertIn('min="0"', page)
+        self.assertIn('max="120"', page)
+        self.assertIn('step="5"', page)
+        self.assertIn("auto_reply_delay_scale", page)
+        self.assertIn("aria-valuenow", page)
+        self.assertIn("previousReplyDelayScale", page)
+        self.assertIn("renderReplyDelayScale(event.target.value)", page)
+
 
 class MemoryAndTranslationRouteTests(UpgradeTestCase):
     def handler(self, payload=None, path=""):
@@ -447,16 +491,105 @@ class MemoryAndTranslationRouteTests(UpgradeTestCase):
         delete_handler.send_chat_memory_delete("/api/chat/sessions/default/memory")
         self.assertTrue(delete_handler.responses[0][0]["cleared"])
 
+    def test_global_translation_preferences_routes_never_return_credentials_and_switch_provider(self):
+        calls = []
+
+        class GlobalStub:
+            def settings_payload(self):
+                return {
+                    "provider": "aliyun_professional",
+                    "scene": "communication",
+                    "aliyun_configured": True,
+                    "ai_configured": False,
+                    "aliyun_last_test_status": "success",
+                    "ai_last_test_status": "never",
+                }
+
+            def save_settings(self, payload):
+                calls.append(("save", payload))
+                return {"provider": payload["provider"], "scene": "communication"}
+
+            def test_connection(self):
+                calls.append(("test", None))
+                return {"ok": True, "provider": "ai_model"}
+
+        self.state.global_translation = GlobalStub()
+        reader = self.handler(path="/api/translation/preferences")
+        reader.send_translation_get("/api/translation/preferences")
+        self.assertTrue(reader.responses[0][0]["aliyun_configured"])
+        self.assertNotIn("secret", json.dumps(reader.responses[0][0]))
+        writer = self.handler({"provider": "ai_model"})
+        writer.send_translation_write("/api/translation/preferences", "PUT")
+        self.assertEqual(calls[0], ("save", {"provider": "ai_model"}))
+        tester = self.handler({})
+        tester.send_translation_write("/api/translation/preferences/test", "POST")
+        self.assertEqual(tester.responses[0][0]["provider"], "ai_model")
+
+    def test_machine_translation_route_dispatches_to_global_provider(self):
+        message_ref = self.state.chat._encode_message("default", "chat-1@c.us", "m-provider")
+        calls = []
+
+        class GlobalStub:
+            def settings_payload(self):
+                return {"provider": "ai_model"}
+
+            def translate_batch(self, session_name, chat_key, items):
+                calls.append((session_name, chat_key, items))
+                return {
+                    "provider": "ai_model",
+                    "items": [{
+                        "message_ref": items[0]["message_ref"],
+                        "status": "READY",
+                        "translation": "AI译文",
+                        "provider": "ai_model",
+                    }],
+                }
+
+            def get_cached_batch(self, *_args):
+                raise AssertionError("write route must not use cache")
+
+        self.state.global_translation = GlobalStub()
+        handler = self.handler({"chat_ref": self.chat_ref, "items": [{"message_ref": message_ref, "text": "Hello"}]})
+        handler.send_chat_post("/api/chat/sessions/default/machine-translations")
+        self.assertEqual(handler.responses[0][0]["provider"], "ai_model")
+        self.assertEqual(handler.responses[0][0]["items"][0]["translation"], "AI译文")
+        self.assertEqual(calls[0][2][0]["message_id"], "m-provider")
+
+    def test_ai_global_translation_route_releases_request_slot(self):
+        message_ref = self.state.chat._encode_message("default", "chat-1@c.us", "m-guard")
+        events = []
+
+        class GlobalStub:
+            def settings_payload(self):
+                return {"provider": "ai_model"}
+
+            def translate_batch(self, _session_name, _chat_key, _items):
+                events.append("translate")
+                return {"provider": "ai_model", "items": []}
+
+            def get_cached_batch(self, *_args):
+                raise AssertionError("write route must not use cache")
+
+        self.state.global_translation = GlobalStub()
+        self.state.begin_translation_request = lambda: events.append("begin")
+        self.state.end_translation_request = lambda: events.append("end")
+        handler = self.handler({"chat_ref": self.chat_ref, "items": [{"message_ref": message_ref, "text": "Hello"}]})
+        handler.send_chat_post("/api/chat/sessions/default/machine-translations")
+        self.assertEqual(events, ["begin", "translate", "end"])
+
     def test_machine_translation_route_validates_message_reference_and_returns_batch(self):
         message_ref = self.state.chat._encode_message("default", "chat-1@c.us", "m-1")
         calls = []
 
         class TranslationStub:
+            def settings_payload(self):
+                return {"provider": "aliyun_professional"}
+
             def translate_batch(self, session_name, chat_key, items):
                 calls.append((session_name, chat_key, items))
                 return {"items": [{"message_ref": items[0]["message_ref"], "status": "READY", "translation": "你好"}]}
 
-        self.state.aliyun_translation = TranslationStub()
+        self.state.global_translation = TranslationStub()
         handler = self.handler({"chat_ref": self.chat_ref, "items": [{"message_ref": message_ref, "text": "Hello"}]})
         handler.send_chat_post("/api/chat/sessions/default/machine-translations")
         self.assertEqual(handler.responses[0][0]["items"][0]["translation"], "你好")
@@ -468,6 +601,9 @@ class MemoryAndTranslationRouteTests(UpgradeTestCase):
         calls = []
 
         class TranslationStub:
+            def settings_payload(self):
+                return {"provider": "aliyun_professional"}
+
             def get_cached_batch(self, session_name, chat_key, items):
                 calls.append((session_name, chat_key, items))
                 return {"items": [{"message_ref": items[0]["message_ref"], "status": "READY", "translation": "你好"}]}
@@ -475,7 +611,7 @@ class MemoryAndTranslationRouteTests(UpgradeTestCase):
             def translate_batch(self, *_args):
                 raise AssertionError("cache restore must not call Alibaba translation")
 
-        self.state.aliyun_translation = TranslationStub()
+        self.state.global_translation = TranslationStub()
         handler = self.handler(
             {"chat_ref": self.chat_ref, "items": [{"message_ref": message_ref, "text": "Hello"}]}
         )
