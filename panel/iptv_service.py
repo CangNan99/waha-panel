@@ -49,10 +49,43 @@ class _NoRedirect(HTTPRedirectHandler):
         return None
 
 
+def _public_http_origin(parsed):
+    host = (parsed.hostname or '').rstrip('.').lower()
+    if (parsed.scheme not in ('http', 'https') or not host or parsed.username is not None
+            or parsed.password is not None or (parsed.port is not None and parsed.port == 0)):
+        raise ValueError('invalid origin')
+    if host == 'localhost' or host.endswith('.localhost'):
+        raise ValueError('local origin')
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        address = None
+    if address is not None:
+        if not address.is_global:
+            raise ValueError('local origin')
+    elif (len(host) > 253 or not all(re.fullmatch(r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?', label)
+                                   for label in host.split('.'))):
+        raise ValueError('invalid host')
+    return parsed.scheme + '://' + parsed.netloc
+
+
+def _playback_server(value):
+    if not isinstance(value, str) or len(value) > 512 or any(ord(c) < 32 or ord(c) == 127 for c in value):
+        raise ValueError('invalid playback server')
+    value = value.strip()
+    if not value:
+        return ''
+    parsed = urlparse(value)
+    if parsed.path not in ('', '/') or '?' in value or '#' in value:
+        raise ValueError('playback server must be an origin')
+    return _public_http_origin(parsed)
+
+
 class ActivationClient:
-    def __init__(self, api_key, transport=None):
+    def __init__(self, api_key, transport=None, playback_server=''):
         self._key = str(api_key)
         self._open = transport or build_opener(_NoRedirect()).open
+        self._playback_server = playback_server
 
     def _request(self, action, **params):
         creating = action == 'new'
@@ -78,7 +111,7 @@ class ActivationClient:
                             uncertain=creating) from None
 
     @staticmethod
-    def account_from_response(row):
+    def account_from_response(row, playback_server=''):
         state = str(row.get('status', '')).lower()
         if state in ('false', 'error', 'failed'):
             raise IptvError('supplier_rejected', '供应商拒绝创建试用，请检查试用额度及账号状态')
@@ -86,35 +119,37 @@ class ActivationClient:
             if state != 'true':
                 raise ValueError('missing status')
             url = str(row['url'])
-            if any(ord(c) < 32 for c in url) or len(url) > 4000:
+            if any(ord(c) < 32 or ord(c) == 127 for c in url) or len(url) > 4000:
                 raise ValueError('invalid playlist')
             parsed = urlparse(url)
-            host = parsed.hostname or ''
-            if parsed.scheme not in ('http', 'https') or not host or parsed.username or parsed.password or parsed.fragment:
+            if parsed.scheme not in ('http', 'https') or parsed.fragment:
                 raise ValueError('invalid playlist')
-            if host == 'localhost' or host.endswith('.localhost'):
-                raise ValueError('local playlist')
-            try:
-                address = ipaddress.ip_address(host)
-            except ValueError:
-                address = None
-            if address is not None and not address.is_global:
-                raise ValueError('local playlist')
-            query = parse_qs(parsed.query, max_num_fields=30)
+            if not parsed.netloc:
+                # Repair only the supplier's successful http:///get.php shape.
+                # Never replace an authority supplied by the upstream service.
+                origin = _playback_server(playback_server)
+                if not origin or parsed.path != '/get.php' or not url.startswith(parsed.scheme + ':///'):
+                    raise ValueError('missing playlist origin')
+                base = urlparse(origin)
+                parsed = parsed._replace(scheme=base.scheme, netloc=base.netloc)
+                url = parsed.geturl()
+            server = _public_http_origin(parsed)
+            query = parse_qs(parsed.query, keep_blank_values=True, max_num_fields=30)
             if len(query.get('username', [])) != 1 or len(query.get('password', [])) != 1:
                 raise ValueError('missing credentials')
             username, password = query['username'][0], query['password'][0]
-            if not username or not password or any(ord(c) < 32 for c in username + password):
+            if not username or not password or any(ord(c) < 32 or ord(c) == 127 for c in username + password):
                 raise ValueError('invalid credentials')
             if len(username) > 256 or len(password) > 256:
                 raise ValueError('invalid credentials')
-            return {'url': url, 'server': parsed.scheme + '://' + parsed.netloc,
+            return {'url': url, 'server': server,
                     'username': username, 'password': password, 'user_id': str(row.get('user_id', ''))[:128]}
         except (KeyError, TypeError, ValueError):
             raise IptvError('upstream_unknown', '试用可能已创建，但返回数据无法核实，请人工核对', uncertain=True) from None
 
     def create_trial(self, pack, note):
-        return self.account_from_response(self._request('new', type='m3u', sub='99', pack=pack, note=note))
+        return self.account_from_response(self._request('new', type='m3u', sub='99', pack=pack, note=note),
+                                          playback_server=self._playback_server)
 
     def check(self):
         row = self._request('reseller_info')
@@ -148,7 +183,7 @@ class IptvService:
         self.cipher = cipher
         self._secret = bytes(hmac_secret)
         self.clock = clock or time.time
-        self.client_factory = client_factory or ActivationClient
+        self.client_factory = client_factory
         self._external_secret_lock = threading.Lock()
         self._external_secret_cache = (None, ())
         with closing(self._connect()) as connection:
@@ -215,6 +250,7 @@ class IptvService:
             row = connection.execute('SELECT enabled,pack FROM iptv_session_settings WHERE session_name=?', (session,)).fetchone()
         return {'enabled': bool(row['enabled']) if row else False, 'pack': row['pack'] if row else 'all',
                 'api_key_configured': bool(config.get('api_key')), 'daily_limit': int(config.get('daily_limit', 20)),
+                'playback_server': config.get('playback_server', ''),
                 'duration_confirmed': bool(config.get('duration_confirmed')), 'sub': 99, 'trial_hours': 12,
                 'api_host': 'activationpanel.ru'}
 
@@ -225,9 +261,14 @@ class IptvService:
         return self._hash((provider[0] if provider else '') + '\0' + json.dumps(list(setting) if setting else []))
 
     def prepare_settings(self, session, payload, connection):
-        if not isinstance(payload, dict) or set(payload) - {'enabled', 'pack', 'api_key', 'clear_api_key', 'daily_limit', 'duration_confirmed'}:
+        if not isinstance(payload, dict) or set(payload) - {'enabled', 'pack', 'api_key', 'clear_api_key', 'daily_limit', 'duration_confirmed', 'playback_server'}:
             raise IptvError('settings_invalid', 'IPTV 设置格式无效')
         config = dict(self._config(connection))
+        if 'playback_server' in payload:
+            try:
+                config['playback_server'] = _playback_server(payload['playback_server'])
+            except ValueError:
+                raise IptvError('settings_invalid', '播放服务器须为公开的 HTTP(S) 地址，不含账号、路径、参数或片段') from None
         row = connection.execute('SELECT enabled,pack FROM iptv_session_settings WHERE session_name=?', (session,)).fetchone()
         enabled = bool(row[0]) if row else False
         pack = row[1] if row else 'all'
@@ -276,7 +317,12 @@ class IptvService:
         with closing(self._connect()) as connection:
             config = self._config(connection)
         if not config.get('api_key'): raise IptvError('not_configured', '请先保存 IPTV 密钥')
-        return self.client_factory(config['api_key']).check()
+        return self._client(config).check()
+
+    def _client(self, config):
+        if self.client_factory is not None:
+            return self.client_factory(config['api_key'])
+        return ActivationClient(config['api_key'], playback_server=config.get('playback_server', ''))
 
     @staticmethod
     def _allowed(allowed):
@@ -320,7 +366,7 @@ class IptvService:
             self._set_state(trial_id, 'cancelled', 'cancelled')
             raise IptvError('cancelled', '自动开通条件已变化')
         try:
-            account = self.client_factory(config['api_key']).create_trial(setting['pack'], 'waha-' + trial_id)
+            account = self._client(config).create_trial(setting['pack'], 'waha-' + trial_id)
             account = ActivationClient.account_from_response({'status': 'true', **account})
             expires = now + TRIAL_SECONDS
             encrypted = self.cipher.encrypt_json(account)

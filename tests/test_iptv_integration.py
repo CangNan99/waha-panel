@@ -66,6 +66,26 @@ class IptvIntegrationTests(unittest.TestCase):
         self.assertNotIn('private-trial-pass', json.dumps(result))
         self.assertEqual(len(self.supplier.calls), 1)
 
+    def test_hostless_supplier_success_sends_complete_account_once_and_labels_after_delivery(self):
+        self.state.iptv.save_settings('default', {'playback_server': 'http://playback.example'})
+        self.state.iptv.client_factory = None
+        response = {'status': 'true', 'user_id': '100', 'url':
+                    'http:///get.php?username=only-this-customer&password=private-trial-pass&type=m3u_plus&output=ts'}
+        with patch('panel.iptv_service.build_opener') as opener:
+            opener.return_value.open.side_effect = lambda *_a, **_kw: io.BytesIO(json.dumps(response).encode())
+            first = self.run_event(identity='opaque-customer@lid')
+            second = self.run_event(identity='opaque-customer@lid', message_id='event-2')
+        self.assertEqual((first['action'], second['action']), ('replied', 'replied'))
+        self.assertEqual(opener.return_value.open.call_count, 1)
+        self.assertIn('http://playback.example', self.client.sent[0][2])
+        self.assertNotIn('http:///get.php', self.client.sent[0][2])
+        self.assertEqual(self.system_labels(), [('default', 'IPTV测试过')])
+        with closing(sqlite3.connect(self.db)) as connection:
+            rows = connection.execute('SELECT state,credentials_ciphertext FROM iptv_trials').fetchall()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0][0], 'sent')
+        self.assertNotIn('private-trial-pass', rows[0][1])
+
     def test_duplicate_webhook_is_ignored_and_fresh_request_reuses_account(self):
         self.run_event()
         self.assertEqual(self.run_event()['action'], 'ignored')
