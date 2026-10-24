@@ -5,6 +5,7 @@ import sqlite3
 import tempfile
 import threading
 import unittest
+from unittest.mock import patch
 from contextlib import closing
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -16,6 +17,7 @@ from panel.iptv_service import ActivationClient, IptvError, IptvService, explici
 
 ACCOUNT = {'status': 'true', 'user_id': '100', 'url':
            'http://stream.example/get.php?username=trial-user&password=trial-pass&type=m3u_plus&output=ts'}
+HOSTLESS_ACCOUNT = {**ACCOUNT, 'url': ACCOUNT['url'].replace('stream.example', '')}
 
 
 class Response(io.BytesIO):
@@ -44,6 +46,49 @@ class Supplier:
 
 
 class ActivationClientTests(unittest.TestCase):
+    def test_successful_hostless_playlist_uses_configured_origin_once(self):
+        requests = []
+        def transport(request, timeout):
+            requests.append(request)
+            return Response(json.dumps([HOSTLESS_ACCOUNT]).encode())
+        client = ActivationClient('synthetic-reseller-key', transport=transport,
+                                  playback_server='https://playback.example:8443/')
+        account = client.create_trial('all', 'opaque-id')
+        self.assertEqual(account['url'], ACCOUNT['url'].replace('http://stream.example', 'https://playback.example:8443'))
+        self.assertEqual(account['server'], 'https://playback.example:8443')
+        self.assertEqual((account['username'], account['password']), ('trial-user', 'trial-pass'))
+        self.assertEqual(len(requests), 1)
+
+    def test_configured_origin_never_overrides_a_complete_supplier_url(self):
+        account = ActivationClient.account_from_response(ACCOUNT, playback_server='https://playback.example')
+        self.assertEqual(account['url'], ACCOUNT['url'])
+        self.assertEqual(account['server'], 'http://stream.example')
+
+    def test_missing_host_fallback_remains_strict_and_requires_configuration(self):
+        bad_rows = [
+            HOSTLESS_ACCOUNT,
+            {**HOSTLESS_ACCOUNT, 'status': 'false'},
+            {**HOSTLESS_ACCOUNT, 'status': ''},
+            {**HOSTLESS_ACCOUNT, 'url': 'http:///get.php?username=a'},
+            {**HOSTLESS_ACCOUNT, 'url': 'http:///get.php?username=a&password=b&password='},
+            {**HOSTLESS_ACCOUNT, 'url': 'http:////evil.example/get.php?username=a&password=b'},
+            {**HOSTLESS_ACCOUNT, 'url': 'http:///other.php?username=a&password=b'},
+            {**HOSTLESS_ACCOUNT, 'url': 'http:///get.php?username=a&password=b#fragment'},
+            {**HOSTLESS_ACCOUNT, 'url': 'http:///get.php?username=a&password=%0A'},
+            {**HOSTLESS_ACCOUNT, 'url': 'http://127.0.0.1/get.php?username=a&password=b'},
+            {**HOSTLESS_ACCOUNT, 'url': 'http://bad.example:invalid/get.php?username=a&password=b'},
+        ]
+        for index, row in enumerate(bad_rows):
+            with self.subTest(index=index), self.assertRaises(IptvError):
+                ActivationClient.account_from_response(row, playback_server='' if index == 0 else 'http://playback.example')
+
+    def test_numeric_loopback_aliases_are_not_public_supplier_or_fallback_origins(self):
+        for host in ('127.1', '2130706433', '0x7f000001', '0177.0.0.1', '0x', '127.0x', '127.0.0.0x'):
+            for row, origin in (({**ACCOUNT, 'url': ACCOUNT['url'].replace('stream.example', host)}, ''),
+                                (HOSTLESS_ACCOUNT, 'http://' + host)):
+                with self.subTest(host=host, fallback=bool(origin)), self.assertRaises(IptvError):
+                    ActivationClient.account_from_response(row, playback_server=origin)
+
     def test_creation_is_one_fixed_demo_request(self):
         requests = []
         def transport(request, timeout):
@@ -132,6 +177,55 @@ class IptvServiceTests(unittest.TestCase):
             raw = c.execute('SELECT config_ciphertext FROM iptv_provider_settings').fetchone()[0]
         self.assertNotIn('synthetic-reseller-key', raw)
         self.assertEqual(self.cipher.decrypt_json(raw)['api_key'], 'synthetic-reseller-key')
+
+    def test_playback_server_is_shared_optional_and_preserves_other_config(self):
+        self.assertEqual(self.service.settings_payload('sales')['playback_server'], '')
+        self.service.save_settings('sales', {'playback_server': 'https://playback.example:8443/'})
+        self.assertEqual(self.service.settings_payload('support')['playback_server'], 'https://playback.example:8443')
+        self.service.save_settings('support', {'pack': '12'})
+        with closing(sqlite3.connect(self.path)) as connection:
+            config = self.cipher.decrypt_json(connection.execute('SELECT config_ciphertext FROM iptv_provider_settings').fetchone()[0])
+        self.assertEqual(config['api_key'], 'synthetic-reseller-key')
+        self.assertEqual(config['daily_limit'], 2)
+        self.assertTrue(config['duration_confirmed'])
+        self.assertEqual(config['playback_server'], 'https://playback.example:8443')
+        self.service.save_settings('sales', {'playback_server': ''})
+        self.assertEqual(self.service.settings_payload('support')['playback_server'], '')
+
+    def test_invalid_playback_origins_are_rejected_without_changing_saved_settings(self):
+        self.service.save_settings('sales', {'playback_server': 'https://playback.example'})
+        for value in (None, 42, 'ftp://playback.example', 'http://localhost', 'http://localhost.',
+                      'http://127.0.0.1', 'http://127.1', 'http://2130706433', 'http://0x7f000001',
+                      'http://0177.0.0.1', 'http://0x', 'http://127.0x', 'http://127.0.0.0x',
+                      'http://[::1]', 'http://10.0.0.1', 'http://user:pass@playback.example',
+                      'http://playback.example/path', 'http://playback.example?username=a',
+                      'http://playback.example#fragment', 'http://playback.example:bad',
+                      'http://playback.example:0', 'http://playback.example:99999', 'http://bad host.example',
+                      'http://playback.example\n', 'http://playback.example\\evil', 'http://playback.example%2Fevil'):
+            with self.subTest(value=value), self.assertRaises(IptvError) as caught:
+                self.service.save_settings('sales', {'playback_server': value})
+            self.assertEqual(caught.exception.code, 'settings_invalid')
+            self.assertEqual(self.service.settings_payload('sales')['playback_server'], 'https://playback.example')
+
+    def test_default_client_receives_saved_origin_and_trial_is_encrypted_and_reused(self):
+        self.service.save_settings('sales', {'playback_server': 'https://playback.example'})
+        self.service.client_factory = None
+        requests = []
+        def transport(request, timeout):
+            requests.append(request)
+            return Response(json.dumps(HOSTLESS_ACCOUNT).encode())
+        with patch('panel.iptv_service.build_opener') as opener:
+            opener.return_value.open = transport
+            first = self.create()
+            second = self.create()
+        self.assertEqual(first['id'], second['id'])
+        self.assertTrue(second['reused'])
+        self.assertEqual(len(requests), 1)
+        self.assertEqual(first['account']['server'], 'https://playback.example')
+        row = self.rows()[0]
+        self.assertEqual(row['state'], 'created')
+        self.assertNotIn('trial-pass', row['credentials_ciphertext'])
+        self.assertEqual(self.cipher.decrypt_json(row['credentials_ciphertext']), first['account'])
 
     def test_same_customer_in_separate_chat_windows_gets_separate_accounts(self):
         first = self.create()

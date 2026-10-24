@@ -881,7 +881,7 @@ class PanelState:
         self.admin_service = AdminService(self.database_path)
         self._admin_db_auth = as_bool(os.environ.get("PANEL_ADMIN_DB_AUTH", "0"))
         self._update_service = UpdateService(
-            current_panel=os.environ.get("PANEL_VERSION", "1.0.18"),
+            current_panel=os.environ.get("PANEL_VERSION", "1.0.19"),
             current_waha=os.environ.get("WAHA_IMAGE_TAG", "latest-2026.9.1"),
         )
         self.sleep_fn = sleep_fn or time.sleep
@@ -3215,11 +3215,13 @@ def settings_page():
             <label for="iptvKey">供应商 API 密钥</label><input id="iptvKey" type="password" autocomplete="new-password" placeholder="留空保持已保存密钥">
             <div class="section-note" id="iptvKeyState">正在读取配置...</div>
             <label class="check-label" for="clearIptvKey"><input id="clearIptvKey" type="checkbox">清除供应商密钥</label>
+            <label for="iptvPlaybackServer">播放服务器地址</label><input id="iptvPlaybackServer" type="url" maxlength="512" placeholder="https://playback.example" aria-describedby="iptvPlaybackHelp">
+            <div class="section-note" id="iptvPlaybackHelp">仅在供应商返回的播放链接缺少域名时补全。填写公开的 HTTP(S) 服务器地址，可包含端口；留空关闭补全。</div>
             <label for="iptvPack">频道范围</label><input id="iptvPack" type="text" maxlength="12" value="all" placeholder="all 或套餐编号">
             <div class="section-note">all 包含全部可用频道。频道范围与开关按当前 WhatsApp 会话保存。</div>
             <label for="iptvDailyLimit">每日自动开通上限</label><input id="iptvDailyLimit" type="number" min="1" max="1000" step="1" value="20">
             <label class="check-label" for="iptvDurationConfirmed"><input id="iptvDurationConfirmed" type="checkbox">已确认供应商 Demo 设置为 12 小时</label>
-            <div class="section-note">密钥、每日额度和试用时长确认在各会话间共享。先保存设置，再检查接口。</div>
+            <div class="section-note">密钥、播放服务器、每日额度和试用时长确认在各会话间共享。先保存设置，再检查接口。</div>
             <div class="actions"><button id="checkIptv" type="button">检查供应商接口</button><button id="refreshIptvRecords" type="button">刷新开通记录</button></div>
             <div id="iptvNotice" class="notice" role="status" aria-live="polite"></div>
             <h3>最近开通记录</h3><div id="iptvRecords" class="knowledge-list"><div class="muted">暂无开通记录</div></div>
@@ -3239,11 +3241,12 @@ def settings_page():
     function renderIptvSettings(data) {
       iptvAvailable = Boolean(data); $('iptvPanel').hidden = !iptvAvailable; if (!data) return;
       $('iptvEnabled').checked = Boolean(data.enabled); $('iptvPack').value = data.pack || 'all';
+      $('iptvPlaybackServer').value = data.playback_server || '';
       $('iptvDailyLimit').value = String(data.daily_limit ?? 20); $('iptvDurationConfirmed').checked = Boolean(data.duration_confirmed);
       $('iptvKeyState').textContent = data.api_key_configured ? '密钥：已配置（隐藏）' : '密钥：未配置';
     }
     function collectIptvSettings() {
-      return {enabled:$('iptvEnabled').checked,pack:$('iptvPack').value.trim(),daily_limit:Number($('iptvDailyLimit').value),duration_confirmed:$('iptvDurationConfirmed').checked,api_key:$('iptvKey').value,clear_api_key:$('clearIptvKey').checked};
+      return {enabled:$('iptvEnabled').checked,pack:$('iptvPack').value.trim(),playback_server:$('iptvPlaybackServer').value.trim(),daily_limit:Number($('iptvDailyLimit').value),duration_confirmed:$('iptvDurationConfirmed').checked,api_key:$('iptvKey').value,clear_api_key:$('clearIptvKey').checked};
     }
     async function loadIptvRecords() {
       if (!iptvAvailable) return;
