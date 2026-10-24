@@ -82,6 +82,13 @@ class ActivationClientTests(unittest.TestCase):
             with self.subTest(index=index), self.assertRaises(IptvError):
                 ActivationClient.account_from_response(row, playback_server='' if index == 0 else 'http://playback.example')
 
+    def test_numeric_loopback_aliases_are_not_public_supplier_or_fallback_origins(self):
+        for host in ('127.1', '2130706433', '0x7f000001', '0177.0.0.1'):
+            for row, origin in (({**ACCOUNT, 'url': ACCOUNT['url'].replace('stream.example', host)}, ''),
+                                (HOSTLESS_ACCOUNT, 'http://' + host)):
+                with self.subTest(host=host, fallback=bool(origin)), self.assertRaises(IptvError):
+                    ActivationClient.account_from_response(row, playback_server=origin)
+
     def test_creation_is_one_fixed_demo_request(self):
         requests = []
         def transport(request, timeout):
@@ -188,7 +195,8 @@ class IptvServiceTests(unittest.TestCase):
     def test_invalid_playback_origins_are_rejected_without_changing_saved_settings(self):
         self.service.save_settings('sales', {'playback_server': 'https://playback.example'})
         for value in (None, 42, 'ftp://playback.example', 'http://localhost', 'http://localhost.',
-                      'http://127.0.0.1', 'http://[::1]', 'http://10.0.0.1', 'http://user:pass@playback.example',
+                      'http://127.0.0.1', 'http://127.1', 'http://2130706433', 'http://0x7f000001',
+                      'http://0177.0.0.1', 'http://[::1]', 'http://10.0.0.1', 'http://user:pass@playback.example',
                       'http://playback.example/path', 'http://playback.example?username=a',
                       'http://playback.example#fragment', 'http://playback.example:bad',
                       'http://playback.example:0', 'http://playback.example:99999', 'http://bad host.example',

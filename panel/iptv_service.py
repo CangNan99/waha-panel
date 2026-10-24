@@ -63,7 +63,10 @@ def _public_http_origin(parsed):
     if address is not None:
         if not address.is_global:
             raise ValueError('local origin')
-    elif (len(host) > 253 or not all(re.fullmatch(r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?', label)
+    # Browsers interpret numeric final labels as legacy IPv4 (127.1,
+    # octal/hex forms or one integer). Do not accept those as DNS names.
+    elif (re.fullmatch(r'(?:[0-9]+|0x[0-9a-f]+)', host.split('.')[-1])
+          or len(host) > 253 or not all(re.fullmatch(r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?', label)
                                    for label in host.split('.'))):
         raise ValueError('invalid host')
     return parsed.scheme + '://' + parsed.netloc

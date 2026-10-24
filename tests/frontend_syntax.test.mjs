@@ -8,6 +8,29 @@ const appSource = await readFile(new URL('../panel/app.py', import.meta.url), 'u
 const chatSource = await readFile(new URL('../panel/chat_page.py', import.meta.url), 'utf8');
 const scripts = [...appSource.matchAll(/<script>\s*([\s\S]*?)\s*<\/script>/g)];
 
+test('IPTV shared playback server is labeled, restored, and included in settings saves', () => {
+  assert.ok(/<label for="iptvPlaybackServer">播放服务器地址<\/label><input id="iptvPlaybackServer" type="url"/.test(appSource), 'expected a labeled playback server URL input');
+  const source = scripts.find(([, body]) => body.includes('function collectIptvSettings()'))?.[1];
+  const render = source?.match(/    function renderIptvSettings\(data\) \{[\s\S]*?\n    \}/)?.[0];
+  const collect = source?.match(/    function collectIptvSettings\(\) \{[\s\S]*?\n    \}/)?.[0];
+  assert.ok(render && collect);
+  const nodes = new Map(['iptvPanel','iptvEnabled','iptvPack','iptvDailyLimit','iptvDurationConfirmed',
+    'iptvKeyState','iptvKey','clearIptvKey','iptvPlaybackServer'].map(id => [id, {value:'',checked:false}]));
+  const context = vm.createContext({$: id => nodes.get(id)});
+  vm.runInContext(`let iptvAvailable = false; ${render}\n${collect}`, context);
+  context.config = {enabled:true,pack:'all',daily_limit:20,duration_confirmed:true,api_key_configured:true,
+    playback_server:'http://playback.example'};
+  vm.runInContext('renderIptvSettings(config)', context);
+  assert.equal(nodes.get('iptvPlaybackServer').value, 'http://playback.example');
+  nodes.get('iptvPlaybackServer').value = ' https://other.example:8443 ';
+  const payload = vm.runInContext('collectIptvSettings()', context);
+  assert.equal(payload.playback_server, 'https://other.example:8443');
+  assert.equal(payload.api_key, '');
+  delete context.config.playback_server;
+  vm.runInContext('renderIptvSettings(config)', context);
+  assert.equal(nodes.get('iptvPlaybackServer').value, '');
+});
+
 test('every inline script in panel/app.py has valid JavaScript syntax', () => {
   assert.doesNotThrow(() => checkInlineScripts(appSource), 'all inline scripts should parse');
   assert.ok(scripts.length >= 3, 'expected the panel templates to contain inline scripts');
