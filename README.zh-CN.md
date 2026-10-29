@@ -4,7 +4,7 @@
 
 ## 界面预览
 
-1.0.19 新增共享播放服务器配置，修复供应商已创建 IPTV 试用、返回链接缺少域名时的校验失败。以下界面截图均使用演示数据。
+1.0.20 优化 IPTV 多语言测试意图、自动失败重试和手动卡密生成，并修复加载更多聊天在实时刷新后缩回的问题。以下界面截图均使用演示数据。
 
 ![状态概览](docs/assets/overview-1.0.15.png)
 
@@ -96,6 +96,7 @@ pwsh -File .\update.ps1 -Component waha
 
 | 版本 | 更新内容 | 详细说明 |
 | --- | --- | --- |
+| 1.0.20 | 优化 IPTV 多语言测试意图、持久化失败重试、手动五档卡密和聊天分页刷新；保留共享播放服务器地址校验。 | [docs/releases/1.0.20.md](docs/releases/1.0.20.md) |
 | 1.0.19 | 新增共享播放服务器地址，兼容供应商成功返回但缺少域名的 IPTV 播放链接，并加强地址校验。 | [docs/releases/1.0.19.md](docs/releases/1.0.19.md) |
 | 1.0.18 | 默认使用阿里云机器翻译专业版，支持手动切换 AI 模型翻译；新增按聊天窗口限领的 IPTV 试用、只读系统标签、回复延迟滑杆和凭据保护。 | [docs/releases/1.0.18.md](docs/releases/1.0.18.md) |
 | 1.0.16 | 自动回复仅处理当前启用与连接周期的新消息；修复会话卡片切换和异步串号，AI 无有效结果时跳过发送。 | [docs/releases/1.0.16.md](docs/releases/1.0.16.md) |
@@ -135,6 +136,6 @@ pwsh -File .\backup.ps1
 当前镜像版本：
 
 - `devlikeapro/waha:latest-2026.9.1`
-- `docker.io/cangnan88/waha-panel:1.0.19`
+- `docker.io/cangnan88/waha-panel:1.0.20`
 
 如需域名访问，只反代到面板端口 `127.0.0.1:3003`。WAHA API 端口 `3002` 默认不应公开。请在反向代理层启用 HTTPS，并确保代理不会记录 `Authorization`、APIKey 或密码字段。

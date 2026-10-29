@@ -12,7 +12,14 @@ from urllib.parse import parse_qs, urlparse
 
 from cryptography.fernet import Fernet
 from panel.chat_security import DataCipher
-from panel.iptv_service import ActivationClient, IptvError, IptvService, explicit_trial_request
+from panel.iptv_service import (
+    ActivationClient,
+    IptvError,
+    IptvService,
+    classify_trial_intent,
+    explicit_trial_request,
+    infer_trial_language,
+)
 
 
 ACCOUNT = {'status': 'true', 'user_id': '100', 'url':
@@ -36,6 +43,13 @@ class Supplier:
         if self.entered:
             self.entered.set()
             self.release.wait(4)
+        if self.fail:
+            raise self.fail
+        return {'url': ACCOUNT['url'], 'username': 'trial-user', 'password': 'trial-pass',
+                'server': 'http://stream.example', 'user_id': '100'}
+
+    def create_account(self, pack, subscription, note):
+        self.calls.append((pack, str(subscription), note))
         if self.fail:
             raise self.fail
         return {'url': ACCOUNT['url'], 'username': 'trial-user', 'password': 'trial-pass',
@@ -144,6 +158,36 @@ class ActivationClientTests(unittest.TestCase):
                      'I do not want an IPTV trial', 'hello', 'My IPTV is not working'):
             self.assertFalse(explicit_trial_request(text), text)
 
+    def test_multilingual_intent_and_context_confirmation_are_normalized(self):
+        accepted = (
+            ('我想测试 IPTV', 'zh'),
+            ('Can I get an IPTV trial?', 'en'),
+            ('Quero um teste IPTV', 'pt'),
+            ('¿Me das una prueba de IPTV?', 'es'),
+            ('Je voudrais essayer IPTV', 'fr'),
+            ('أريد تجربة IPTV', 'ar'),
+            ('Kann ich IPTV testen?', 'de'),
+            ('Можно тест IPTV?', 'ru'),
+            ('Posso provare IPTV?', 'it'),
+            ('IPTVを試したいです', 'en'),
+            ('IPTV 테스트 부탁합니다', 'en'),
+            ('Mag ik IPTV proberen?', 'en'),
+            ('Tôi muốn thử IPTV', 'en'),
+            ('Saya ingin coba IPTV', 'en'),
+        )
+        for text, language in accepted:
+            with self.subTest(text=text):
+                result = classify_trial_intent(text)
+                self.assertTrue(result['requested'])
+                self.assertEqual(infer_trial_language(text), language)
+        invitation = '[IPTV_TRIAL_INVITATION] Would you like an IPTV trial?'
+        self.assertTrue(classify_trial_intent('yes please', invitation)['requested'])
+        self.assertFalse(classify_trial_intent('yes please', 'manual card sent with credentials')['requested'])
+        for text in ('IPTV多少钱？', 'My IPTV is not working', '不要给我开通 IPTV 试用'):
+            with self.subTest(text=text):
+                self.assertFalse(classify_trial_intent(text)['requested'])
+        self.assertEqual(infer_trial_language('', '客户：Quero um teste IPTV'), 'pt')
+
 
 class IptvServiceTests(unittest.TestCase):
     def setUp(self):
@@ -240,15 +284,46 @@ class IptvServiceTests(unittest.TestCase):
         self.assertTrue(all(row['expires_at'] == 1800043200 for row in rows))
         self.assertTrue(all(self.cipher.decrypt_json(row['credentials_ciphertext'])['password'] == 'trial-pass' for row in rows))
 
-    def test_unknown_creation_is_durable_and_never_retried(self):
+    def test_unknown_creation_is_queued_and_retried_after_restart(self):
         self.supplier.fail = IptvError('upstream_unknown', '供应商响应不确定', uncertain=True)
         with self.assertRaises(IptvError): self.create()
         self.supplier.fail = None
         reopened = IptvService(self.path, self.cipher, b'h' * 32,
                             clock=lambda: self.now, client_factory=lambda _key: self.supplier)
-        with self.assertRaises(IptvError): reopened.create_trial('sales', '123456789@c.us', 'event-2')
+        self.now += 3600
+        retried = reopened.retry_due_once(send_callback=lambda *_args: True)
+        self.assertEqual(len(retried), 1)
+        self.assertEqual(len(self.supplier.calls), 2)
+        self.assertEqual(self.rows()[0]['state'], 'sent')
+
+    def test_manual_cards_can_repeat_after_automatic_trial_and_are_idempotent_per_request(self):
+        self.create()
+        first = self.service.create_manual_card('sales', '123456789@c.us', 'manual-1', '1', 'request-1')
+        repeated = self.service.create_manual_card('sales', '123456789@c.us', 'manual-1', '1', 'request-1')
+        second = self.service.create_manual_card('sales', '123456789@c.us', 'manual-2', '3', 'request-2')
+        self.assertEqual(first['id'], repeated['id'])
+        self.assertNotEqual(first['id'], second['id'])
+        self.assertEqual(first['subscription'], '1')
+        self.assertEqual(second['subscription'], '3')
+        with closing(sqlite3.connect(self.path)) as connection:
+            self.assertEqual(connection.execute('SELECT count(*) FROM iptv_manual_cards').fetchone()[0], 2)
+        self.assertGreaterEqual(len(self.supplier.calls), 3)
+
+    def test_manual_request_id_is_scoped_to_the_customer_chat(self):
+        first = self.service.create_manual_card('sales', '111111111@c.us', 'manual-a', '1', 'same-request')
+        second = self.service.create_manual_card('sales', '222222222@c.us', 'manual-b', '12', 'same-request')
+        self.assertNotEqual(first['id'], second['id'])
+        self.assertEqual(first['subscription'], '1')
+        self.assertEqual(second['subscription'], '12')
+        self.assertEqual(len(self.supplier.calls), 2)
+
+    def test_manual_creation_failure_is_terminal_until_a_new_request(self):
+        self.supplier.fail = IptvError('supplier_rejected', '供应商拒绝创建试用')
+        with self.assertRaises(IptvError):
+            self.service.create_manual_card('sales', '123456789@c.us', 'manual-1', '12', 'request-1')
+        with closing(sqlite3.connect(self.path)) as connection:
+            self.assertEqual(connection.execute('SELECT state FROM iptv_manual_cards').fetchone()[0], 'failed')
         self.assertEqual(len(self.supplier.calls), 1)
-        self.assertEqual(self.rows()[0]['state'], 'unknown')
 
     def test_expired_trial_does_not_create_another(self):
         first = self.create()
@@ -377,6 +452,31 @@ class IptvServiceTests(unittest.TestCase):
         self.assertNotIn('123456789', public)
         self.assertEqual(self.rows()[0]['state'], 'sent')
 
+    def test_create_retry_switches_to_send_after_supplier_success(self):
+        self.supplier.fail = IptvError('upstream_unknown', '结果未知', uncertain=True)
+        with self.assertRaises(IptvError):
+            self.create(customer='retry-send@c.us')
+        self.supplier.fail = None
+        sent = []
+
+        def fail_send(*_args, **_kwargs):
+            raise TimeoutError('fixture send failed')
+
+        self.now += 3600
+        self.assertEqual(self.service.retry_due_once(send_callback=fail_send), [])
+        with closing(sqlite3.connect(self.path)) as connection:
+            connection.row_factory = sqlite3.Row
+            retry = connection.execute(
+                "SELECT phase,attempt_count FROM iptv_trial_retries WHERE record_type='automatic'"
+            ).fetchone()
+        self.assertEqual(retry['phase'], 'send')
+        self.now += 2 * 60
+        self.assertEqual(
+            len(self.service.retry_due_once(send_callback=lambda *args, **kwargs: sent.append(args))), 1
+        )
+        self.assertEqual(len(self.supplier.calls), 2)
+        self.assertEqual(len(sent), 1)
+
     def test_context_redacts_known_credentials_but_send_template_keeps_them(self):
         result = self.create()
         message = self.service.reply_text(result, 'en')
@@ -387,6 +487,19 @@ class IptvServiceTests(unittest.TestCase):
         self.assertNotIn('trial-user', safe)
         self.assertNotIn('trial-pass', safe)
         self.assertNotIn(ACCOUNT['url'], safe)
+
+    def test_monthly_reply_uses_the_requested_language(self):
+        result = {
+            'subscription': '1',
+            'expires_at': self.now + 31 * 24 * 60 * 60,
+            'account': {'server': 'https://stream.example', 'username': 'user',
+                        'password': 'pass', 'url': 'https://stream.example/get.php'},
+        }
+        english = self.service.reply_text(result, 'en')
+        chinese = self.service.reply_text(result, 'zh')
+        self.assertIn('1 month', english)
+        self.assertNotIn('个月', english)
+        self.assertIn('1个月', chinese)
 
     def test_clear_key_requires_disabling_and_cannot_leave_other_session_enabled(self):
         with self.assertRaises(IptvError): self.service.save_settings('sales', {'clear_api_key': True})

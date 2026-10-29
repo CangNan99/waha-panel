@@ -30,9 +30,23 @@ except ImportError:
     from auto_reply_policy import AutoReplyPolicy, active_window_start, message_timestamp
 
 try:
-    from .iptv_service import IptvService, IptvError, LANGUAGES as IPTV_LANGUAGES, explicit_trial_request
+    from .iptv_service import (
+        IptvService,
+        IptvError,
+        LANGUAGES as IPTV_LANGUAGES,
+        classify_trial_intent,
+        explicit_trial_request,
+        infer_trial_language,
+    )
 except ImportError:
-    from iptv_service import IptvService, IptvError, LANGUAGES as IPTV_LANGUAGES, explicit_trial_request
+    from iptv_service import (
+        IptvService,
+        IptvError,
+        LANGUAGES as IPTV_LANGUAGES,
+        classify_trial_intent,
+        explicit_trial_request,
+        infer_trial_language,
+    )
 
 try:
     from .monitoring_service import MonitoringService, safe_log_message
@@ -881,7 +895,7 @@ class PanelState:
         self.admin_service = AdminService(self.database_path)
         self._admin_db_auth = as_bool(os.environ.get("PANEL_ADMIN_DB_AUTH", "0"))
         self._update_service = UpdateService(
-            current_panel=os.environ.get("PANEL_VERSION", "1.0.19"),
+            current_panel=os.environ.get("PANEL_VERSION", "1.0.20"),
             current_waha=os.environ.get("WAHA_IMAGE_TAG", "latest-2026.9.1"),
         )
         self.sleep_fn = sleep_fn or time.sleep
@@ -1012,7 +1026,15 @@ class PanelState:
         ).digest()
         codec = ReferenceCodec(cipher)
         self.data_cipher = cipher
-        self.iptv = IptvService(self.database_path, cipher, secret, clock=self.clock)
+        self.iptv = IptvService(
+            self.database_path,
+            cipher,
+            secret,
+            clock=self.clock,
+            send_callback=self._send_text,
+            label_callback=self._iptv_retry_label,
+            retry_allowed=self._iptv_retry_allowed,
+        )
         self.csrf_token = derive_csrf_token(secret)
         self.chat = ChatService(
             self.database_path,
@@ -1078,6 +1100,8 @@ class PanelState:
         return self.chat
 
     def start_background_services(self):
+        if self.iptv is not None and hasattr(self.iptv, "start"):
+            self.iptv.start()
         memory = self.memory
         if memory is not None and hasattr(memory, "start"):
             memory.start()
@@ -1086,6 +1110,8 @@ class PanelState:
             automation.start()
 
     def stop_background_services(self):
+        if self.iptv is not None and hasattr(self.iptv, "stop"):
+            self.iptv.stop()
         memory = self.memory
         if memory is not None and hasattr(memory, "stop"):
             memory.stop()
@@ -1105,6 +1131,23 @@ class PanelState:
             raise TranslationError("AI_BUSY", "已有两项 AI 请求正在处理，请稍后重试")
         with self._translation_limit_lock:
             self._translation_request_times.append(now)
+
+    def _iptv_retry_allowed(self, session_name, chat_id, record_type):
+        try:
+            if session_record(self.client.get_sessions(), session_name) is None:
+                return 'deleted'
+            if record_type == 'manual':
+                return self.chat is not None
+            if self.iptv is None or not self.iptv.settings_payload(session_name).get('enabled'):
+                return False
+            return self.chat is None or not self.chat.is_human_takeover(session_name, chat_id)
+        except Exception:
+            return False
+
+    def _iptv_retry_label(self, session_name, chat_id):
+        if self.chat is None:
+            return
+        self.chat.add_system_label_by_chat_id(session_name, chat_id, 'IPTV测试过')
 
     def end_translation_request(self):
         self._translation_slots.release()
@@ -1724,7 +1767,7 @@ class PanelState:
             return [
                 dict(row)
                 for row in connection.execute(
-                    "SELECT id,direction,message_id,content,created_at FROM conversation_messages "
+                    "SELECT id,direction,message_id,content,created_at,origin FROM conversation_messages "
                     "WHERE session_name=? AND chat_id=? AND direction=? "
                     "AND (? IS NULL OR message_id IS NULL OR message_id != ?) "
                     "ORDER BY id DESC LIMIT ?",
@@ -1746,6 +1789,14 @@ class PanelState:
         lines = [
             ("客户" if row["direction"] == "inbound" else "客服")
             + "："
+            + (
+                "[IPTV_TRIAL_INVITATION] "
+                if row["direction"] == "outbound"
+                and str(row.get("origin") or "") == "auto_ai"
+                and re.search(r"\biptv\b", str(row["content"] or ""), re.I)
+                and re.search(r"试用|测试|体验|\b(?:trial|test|try)\b", str(row["content"] or ""), re.I)
+                else ""
+            )
             + str(row["content"] or "").strip()
             for row in rows
             if str(row["content"] or "").strip()
@@ -2129,14 +2180,21 @@ class PanelState:
 
         result = None
         try:
-            result = self.iptv.create_trial(session, chat_id, message_id, allowed=allowed)
+            result = self.iptv.create_trial(session, chat_id, message_id, allowed=allowed, language=args["language"])
             reply = self.iptv.reply_text(result, args["language"])
-            with self.reply_policy.lock:
-                if not allowed():
-                    self.log("INFO", "iptv.cancelled", "试用已保存，发送前条件变化，取消发送", session)
-                    return {"action": "ignored", "reason": "发送前回复条件已变化", "session": session}
-                self._send_text(session, chat_id, reply, origin="iptv_trial")
-                self.iptv.mark_delivery(result["id"], True)
+            retry_was_pending = self.iptv.retry_pending("automatic", result["id"])
+            with self.iptv.delivery_attempt("automatic", result["id"]):
+                if retry_was_pending and self.iptv.delivery_state("automatic", result["id"]) == "sent":
+                    return {"action": "ignored", "reason": "IPTV 试用已发送", "session": session}
+                with self.reply_policy.lock:
+                    if not allowed():
+                        self.log("INFO", "iptv.cancelled", "试用已保存，发送前条件变化，取消发送", session)
+                        return {"action": "ignored", "reason": "发送前回复条件已变化", "session": session}
+                    self._send_text(session, chat_id, reply, origin="iptv_trial")
+                    try:
+                        self.iptv.mark_delivery(result["id"], True, session=session, chat_id=chat_id, language=args["language"])
+                    except TypeError:
+                        self.iptv.mark_delivery(result["id"], True)
             try:
                 self.chat.add_system_label_by_chat_id(session, chat_id, "IPTV测试过")
             except Exception:
@@ -2149,7 +2207,13 @@ class PanelState:
             self.log("WARN", "iptv." + error.code, error.public_message, session)
         except Exception:
             if result is not None:
-                self.iptv.mark_delivery(result["id"], False)
+                with self.iptv.delivery_attempt("automatic", result["id"]):
+                    if self.iptv.delivery_state("automatic", result["id"]) != "sent":
+                        try:
+                            self.iptv.mark_delivery(result["id"], False, session=session, chat_id=chat_id,
+                                                     language=(result.get("language") if isinstance(result, dict) else "en"))
+                        except TypeError:
+                            self.iptv.mark_delivery(result["id"], False)
             self.log("ERROR", "iptv.send_failed", "IPTV 发送结果未确认，已保留原试用记录", session)
         return {"action": "ignored", "reason": "IPTV 开通或发送未完成，请查看记录", "session": session}
 
@@ -2377,9 +2441,13 @@ class PanelState:
         if mode == "iptv_trial_tool":
             return self._execute_iptv_trial(session_name, chat_id, message_id, original_timestamp,
                 ticket, iptv_token, reply, incoming_for_ai, context, dispatch)
-        if iptv_token and explicit_trial_request(incoming_for_ai, context):
-            self.log("INFO", "iptv.no_tool", "AI 未返回有效试用工具调用，跳过发送", session_name)
-            return {"action": "ignored", "reason": "AI 未返回有效试用工具调用", "session": session_name}
+        if iptv_token:
+            intent = classify_trial_intent(incoming_for_ai, context)
+            if intent.get("requested"):
+                self.log("INFO", "iptv.fallback", "AI 未返回工具调用，后端按明确测试请求兜底", session_name)
+                fallback_args = json.dumps({"language": intent.get("language") or infer_trial_language(incoming_for_ai, context)})
+                return self._execute_iptv_trial(session_name, chat_id, message_id, original_timestamp,
+                    ticket, iptv_token, fallback_args, incoming_for_ai, context, dispatch)
         if mode == "order_tool" and self.commerce_config.enabled:
             try:
                 tool_request = json.loads(reply)
@@ -3577,6 +3645,7 @@ class PanelHandler(BaseHTTPRequestHandler):
             "send-text", "send-image", "takeover", "resume-ai", "note",
             "follow-ups", "labels", "summary", "memory", "memory/rebuild", "notes/normalize",
             "machine-translations", "machine-translations/cache",
+            "iptv/manual-card",
         }
         if action not in allowed and not (
             len(parts) == 4 and parts[1] == "follow-ups" and parts[2] and parts[3] == "cancel"
@@ -3719,6 +3788,52 @@ class PanelHandler(BaseHTTPRequestHandler):
         chat = self.require_chat_service()
         name, action = self.chat_route(route)
         self.require_waha_session(name, connected=action in {"send-text", "send-image"})
+        if action == "iptv/manual-card":
+            self.require_waha_session(name, connected=True)
+            if self.state.iptv is None:
+                raise ChatServiceError("IPTV 功能需要面板数据加密配置", "IPTV_UNAVAILABLE")
+            payload = self.read_api_json()
+            chat_ref = str(payload.get("chat_ref") or "")
+            request_id = str(payload.get("client_request_id") or "").strip()
+            if not chat_ref or not request_id or len(request_id) > 200:
+                raise ValueError("缺少聊天引用或请求编号")
+            chat_id = chat._decode_chat(name, chat_ref)
+            language = payload.get("language", "auto")
+            if language == "auto":
+                try:
+                    context = self.state._conversation_context(chat_id, session_name=name)
+                except Exception:
+                    context = ""
+                language = infer_trial_language("", context)
+            card = self.state.iptv.create_manual_card(
+                name,
+                chat_id,
+                request_id,
+                payload.get("subscription"),
+                request_id,
+                language,
+            )
+            with self.state.iptv.delivery_attempt("manual", card["id"]):
+                if self.state.iptv.delivery_state("manual", card["id"]) == "sent":
+                    self.send_json({"status": "sent", "card_id": card["id"]})
+                    return
+                try:
+                    self.state._send_text(
+                        name,
+                        chat_id,
+                        self.state.iptv.reply_text(card, card.get("language", "en")),
+                        origin="iptv_manual",
+                    )
+                except Exception:
+                    self.state.iptv.mark_manual_delivery(card["id"], False, name, chat_id, card.get("language", "en"))
+                    self.state.log("ERROR", "iptv.manual_send_failed", "手动卡密发送失败，已安排重发", name)
+                    self.send_json({"status": "send_retrying", "card_id": card["id"]}, HTTPStatus.ACCEPTED)
+                    return
+                self.state.iptv.mark_manual_delivery(card["id"], True)
+                chat.broker.publish(name, {"type": "refresh", "reason": action})
+                self.state.log("INFO", "iptv.manual_sent", "已发送手动 IPTV 卡密", name)
+                self.send_json({"status": "sent", "card_id": card["id"]})
+            return
         if action == "labels":
             self.send_chat_labels_write(route, "POST")
             return

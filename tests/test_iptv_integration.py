@@ -27,6 +27,9 @@ class Supplier:
         self.calls.append((pack, note))
         if self.during: self.during()
         return {'url': 'http://stream.example/get.php?username=only-this-customer&password=private-trial-pass&type=m3u_plus', 'user_id': '100'}
+    def create_account(self, pack, subscription, note):
+        self.calls.append((pack, str(subscription), note))
+        return {'url': 'http://stream.example/get.php?username=only-this-customer&password=private-trial-pass&type=m3u_plus', 'user_id': '100'}
     def check(self): return {'account_enabled': True, 'packages': []}
 
 
@@ -65,6 +68,53 @@ class IptvIntegrationTests(unittest.TestCase):
         self.assertIn('private-trial-pass', self.client.sent[0][2])
         self.assertNotIn('private-trial-pass', json.dumps(result))
         self.assertEqual(len(self.supplier.calls), 1)
+
+    def test_explicit_request_without_model_tool_uses_backend_fallback(self):
+        with patch.object(self.state, '_ai_reply', return_value=('I will prepare the IPTV test for you.', 'ai')):
+            result = self.state.handle_webhook(self.event('Can I get an IPTV trial?', message_id='fallback-1'), dispatch=True)
+        self.assertEqual(result['action'], 'replied')
+        self.assertEqual(result['mode'], 'iptv_trial')
+        self.assertEqual(len(self.supplier.calls), 1)
+        self.assertEqual(self.client.sent[0][:2], ('default', 'customer@c.us'))
+
+    def test_failed_automatic_trial_is_retried_and_sent_after_restart(self):
+        original = self.supplier.create_trial
+        attempts = {'count': 0}
+        def fail_once(pack, note):
+            attempts['count'] += 1
+            if attempts['count'] == 1:
+                raise IptvError('upstream_unknown', '结果未知', uncertain=True)
+            return original(pack, note)
+        with patch.object(self.supplier, 'create_trial', side_effect=fail_once):
+            self.assertEqual(self.run_event(identity='retry@c.us', message_id='retry-1')['action'], 'ignored')
+        self.now += 3600
+        processed = self.state.iptv.retry_due_once(
+            send_callback=self.state._send_text,
+            label_callback=self.state.chat.add_system_label_by_chat_id,
+        )
+        self.assertEqual(len(processed), 1)
+        self.assertEqual(len(self.client.sent), 1)
+        self.assertEqual(self.system_labels(), [('default', 'IPTV测试过')])
+        with closing(sqlite3.connect(self.db)) as connection:
+            self.assertEqual(connection.execute('SELECT state FROM iptv_trials WHERE customer_key != ""').fetchone()[0], 'sent')
+
+    def test_retry_pauses_when_the_waha_session_is_deleted(self):
+        original_create = self.supplier.create_trial
+        def fail_create(pack, note):
+            self.supplier.calls.append((pack, note))
+            raise IptvError('upstream_unknown', '结果未知', uncertain=True)
+        self.supplier.create_trial = fail_create
+        self.assertEqual(self.run_event(identity='deleted-session@c.us', message_id='deleted-1')['action'], 'ignored')
+        self.supplier.create_trial = original_create
+        original_sessions = self.client.get_sessions
+        self.client.get_sessions = lambda: []
+        self.now += 3600
+        self.assertEqual(self.state.iptv.retry_due_once(send_callback=self.state._send_text), [])
+        self.assertEqual(len(self.supplier.calls), 1)
+        with closing(sqlite3.connect(self.db)) as connection:
+            self.assertEqual(connection.execute("SELECT count(*) FROM iptv_trial_retries").fetchone()[0], 0)
+            self.assertEqual(connection.execute("SELECT state FROM iptv_trials WHERE customer_key != ''").fetchone()[0], 'cancelled')
+        self.client.get_sessions = original_sessions
 
     def test_hostless_supplier_success_sends_complete_account_once_and_labels_after_delivery(self):
         self.state.iptv.save_settings('default', {'playback_server': 'http://playback.example'})

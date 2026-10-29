@@ -16,10 +16,24 @@ from panel.app import PanelHandler, PanelState, init_db
 
 
 class Client:
+    def __init__(self):
+        self.sent = []
+        self.fail_send = False
+        self.block_send = False
+        self.send_started = threading.Event()
+        self.release_send = threading.Event()
     def get_health(self): return {'status':'ok'}
     def get_version(self): return {'version':'test'}
     def get_sessions(self): return [{'name':'default','status':'WORKING'}]
     def get_chats(self,*args,**kwargs): return [{'id':'synthetic@c.us','name':'测试客户'}]
+    def send_text(self, session, chat_id, text):
+        if self.fail_send:
+            raise TimeoutError('fixture send failed')
+        if self.block_send:
+            self.send_started.set()
+            self.release_send.wait(4)
+        self.sent.append((session, chat_id, text))
+        return {'id': 'manual-' + str(len(self.sent))}
 
 
 class UIRouteTests(unittest.TestCase):
@@ -96,6 +110,101 @@ class UIRouteTests(unittest.TestCase):
         _,_,settings=self.request('/api/settings')
         self.assertNotIn('synthetic-provider-key',settings)
         self.assertTrue(json.loads(settings)['iptv']['api_key_configured'])
+
+    def test_manual_iptv_card_route_sends_selected_duration_and_repeats(self):
+        self.state.save_settings({'iptv': {'api_key': 'synthetic-provider-key', 'pack': 'all',
+                                           'duration_confirmed': True, 'enabled': True}})
+        class Supplier:
+            def __init__(self): self.calls = []
+            def create_account(self, pack, subscription, note):
+                self.calls.append((pack, str(subscription), note))
+                return {'url': 'http://stream.example/get.php?username=private-user&password=private-password'}
+        supplier = Supplier()
+        self.state.iptv.client_factory = lambda _key: supplier
+        chat_ref = self.state.chat.overview('default')['items'][0]['chat_ref']
+        route = '/api/chat/sessions/default/iptv/manual-card'
+        payload = {'chat_ref': chat_ref, 'subscription': '3', 'client_request_id': 'manual-request-1'}
+        self.assertEqual(self.request(route, False, 'POST', payload, True)[0], 401)
+        self.assertEqual(self.request(route, True, 'POST', payload)[0], 403)
+        status, _, body = self.request(route, True, 'POST', payload, True)
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)['status'], 'sent')
+        self.assertEqual(len(supplier.calls), 1)
+        self.assertEqual(len(self.state.client.sent), 1)
+        self.assertNotIn('private-password', body)
+        second = {**payload, 'subscription': '12', 'client_request_id': 'manual-request-2'}
+        status, _, body = self.request(route, True, 'POST', second, True)
+        self.assertEqual(status, 200)
+        self.assertEqual(len(supplier.calls), 2)
+        sent_count = len(self.state.client.sent)
+        status, _, body = self.request(route, True, 'POST', second, True)
+        self.assertEqual(status, 200)
+        self.assertEqual(len(supplier.calls), 2)
+        self.assertEqual(len(self.state.client.sent), sent_count)
+
+    def test_manual_iptv_card_auto_language_uses_recent_customer_context(self):
+        self.state.save_settings({'iptv': {'api_key': 'synthetic-provider-key', 'pack': 'all',
+                                           'duration_confirmed': True, 'enabled': True}})
+        class Supplier:
+            def create_account(self, pack, subscription, note):
+                return {'url': 'http://stream.example/get.php?username=private-user&password=private-password'}
+        self.state.iptv.client_factory = lambda _key: Supplier()
+        self.state._archive_message('default', 'synthetic@c.us', 'inbound', 'customer-language-1',
+                                     'Quero um teste IPTV', self.state.clock())
+        chat_ref = self.state.chat.overview('default')['items'][0]['chat_ref']
+        route = '/api/chat/sessions/default/iptv/manual-card'
+        payload = {'chat_ref': chat_ref, 'subscription': '3', 'client_request_id': 'manual-language-1', 'language': 'auto'}
+        status, _, body = self.request(route, True, 'POST', payload, True)
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)['status'], 'sent')
+        self.assertIn('Sua conta IPTV de 3 meses está pronta.', self.state.client.sent[-1][2])
+
+    def test_manual_iptv_send_failure_schedules_resend_of_existing_card(self):
+        self.state.save_settings({'iptv': {'api_key': 'synthetic-provider-key', 'pack': 'all',
+                                           'duration_confirmed': True, 'enabled': True}})
+        class Supplier:
+            def create_account(self, pack, subscription, note):
+                return {'url': 'http://stream.example/get.php?username=private-user&password=private-password'}
+        self.state.iptv.client_factory = lambda _key: Supplier()
+        chat_ref = self.state.chat.overview('default')['items'][0]['chat_ref']
+        self.state.client.fail_send = True
+        route = '/api/chat/sessions/default/iptv/manual-card'
+        payload = {'chat_ref': chat_ref, 'subscription': '1', 'client_request_id': 'manual-send-fail'}
+        status, _, body = self.request(route, True, 'POST', payload, True)
+        self.assertEqual(status, 202)
+        self.assertEqual(json.loads(body)['status'], 'send_retrying')
+        self.state.client.fail_send = False
+        self.assertEqual(len(self.state.iptv.retry_due_once(send_callback=self.state._send_text)), 1)
+        self.assertEqual(len(self.state.client.sent), 1)
+
+    def test_concurrent_manual_replay_sends_one_message(self):
+        self.state.save_settings({'iptv': {'api_key': 'synthetic-provider-key', 'pack': 'all',
+                                           'duration_confirmed': True, 'enabled': True}})
+        class Supplier:
+            def __init__(self): self.calls = []
+            def create_account(self, pack, subscription, note):
+                self.calls.append((pack, str(subscription), note))
+                return {'url': 'http://stream.example/get.php?username=private-user&password=private-password'}
+        supplier = Supplier()
+        self.state.iptv.client_factory = lambda _key: supplier
+        chat_ref = self.state.chat.overview('default')['items'][0]['chat_ref']
+        route = '/api/chat/sessions/default/iptv/manual-card'
+        payload = {'chat_ref': chat_ref, 'subscription': '6', 'client_request_id': 'manual-concurrent'}
+        self.state.client.block_send = True
+        results = []
+        first = threading.Thread(target=lambda: results.append(self.request(route, True, 'POST', payload, True)))
+        second = threading.Thread(target=lambda: results.append(self.request(route, True, 'POST', payload, True)))
+        first.start()
+        self.assertTrue(self.state.client.send_started.wait(2))
+        second.start()
+        second.join(0.2)
+        self.assertTrue(second.is_alive())
+        self.state.client.release_send.set()
+        first.join(3)
+        second.join(3)
+        self.assertEqual([item[0] for item in results], [200, 200])
+        self.assertEqual(len(supplier.calls), 1)
+        self.assertEqual(len(self.state.client.sent), 1)
 
     def test_overview_and_log_filters_validate_scope(self):
         status,_,body=self.request('/api/overview?scope=all')
