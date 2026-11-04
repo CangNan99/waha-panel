@@ -12,7 +12,7 @@ from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 from panel.app import PanelHandler, PanelState, init_db
-from panel.chat_automation import AutomationError, ChatAutomationService
+from panel.chat_automation import AutomationError, ChatAutomationService, DELAY_SECONDS
 from panel.chat_service import ChatSendError, ChatService, ChatServiceError
 from panel.translation_service import TranslationError, TranslationService
 
@@ -90,6 +90,7 @@ class EngagementSchemaTests(unittest.TestCase):
         )
         connection.commit()
         connection.close()
+
         init_db(self.database, seed_business=False)
         init_db(self.database, seed_business=False)
         connection = sqlite3.connect(self.database)
@@ -119,6 +120,70 @@ class EngagementSchemaTests(unittest.TestCase):
                 "VALUES ('default','chat-key','IPTV测试过',1,1)"
             )
         connection.close()
+
+    def test_legacy_follow_up_rows_survive_delay_constraint_migration(self):
+        init_db(self.database, seed_business=False)
+        connection = sqlite3.connect(self.database)
+        connection.execute(
+            "INSERT INTO follow_up_tasks("
+            "session_name,chat_key_hmac,chat_id_ciphertext,created_at,due_at,updated_at,"
+            "delay_code,mode,state,client_request_id) "
+            "VALUES ('default','legacy-key','legacy-chat',100,86500,100,'24h','AI','PENDING','legacy-request')"
+        )
+        connection.execute("ALTER TABLE follow_up_tasks RENAME TO follow_up_tasks__legacy_for_test")
+        connection.execute(
+            """CREATE TABLE follow_up_tasks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_name TEXT NOT NULL,
+                chat_key_hmac TEXT NOT NULL,
+                chat_id_ciphertext TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                due_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                delay_code TEXT NOT NULL CHECK (delay_code IN ('24h', '3d', '7d', '15d')),
+                mode TEXT NOT NULL CHECK (mode IN ('AI', 'FIXED')),
+                fixed_copy_ciphertext TEXT,
+                state TEXT NOT NULL CHECK (state IN ('PENDING', 'RUNNING', 'SENT', 'SKIPPED', 'FAILED', 'UNKNOWN', 'CANCELLED')),
+                skip_reason TEXT,
+                error_code TEXT,
+                error_message TEXT,
+                waha_message_id TEXT,
+                client_request_id TEXT NOT NULL UNIQUE,
+                claimed_at INTEGER,
+                completed_at INTEGER
+            )"""
+        )
+        connection.execute(
+            "INSERT INTO follow_up_tasks("
+            "id,session_name,chat_key_hmac,chat_id_ciphertext,created_at,due_at,updated_at,delay_code,mode,"
+            "fixed_copy_ciphertext,state,skip_reason,error_code,error_message,waha_message_id,client_request_id,claimed_at,completed_at) "
+            "SELECT id,session_name,chat_key_hmac,chat_id_ciphertext,created_at,due_at,updated_at,delay_code,mode,"
+            "fixed_copy_ciphertext,state,skip_reason,error_code,error_message,waha_message_id,client_request_id,claimed_at,completed_at "
+            "FROM follow_up_tasks__legacy_for_test"
+        )
+        connection.execute("DROP TABLE follow_up_tasks__legacy_for_test")
+        connection.commit()
+        connection.close()
+
+        init_db(self.database, seed_business=False)
+        connection = sqlite3.connect(self.database)
+        row = connection.execute(
+            "SELECT delay_code,client_request_id FROM follow_up_tasks WHERE id=1"
+        ).fetchone()
+        self.assertEqual(row, ("24h", "legacy-request"))
+        for index, code in enumerate(DELAY_SECONDS):
+            connection.execute(
+                "INSERT INTO follow_up_tasks("
+                "session_name,chat_key_hmac,chat_id_ciphertext,created_at,due_at,updated_at,delay_code,mode,state,client_request_id) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                ("default", f"key-{index}", "chat", 100, 100 + DELAY_SECONDS[code], 100, code, "AI", "PENDING", f"request-{index}"),
+            )
+        connection.commit()
+        accepted = connection.execute(
+            "SELECT COUNT(*) FROM follow_up_tasks WHERE delay_code IN ('1h','2h','3h','6h','12h')"
+        ).fetchone()[0]
+        connection.close()
+        self.assertEqual(accepted, 5)
 
 
 class ChatServiceEngagementTests(unittest.TestCase):
@@ -542,7 +607,7 @@ class AutomationSchedulerTests(unittest.TestCase):
 
     def test_creation_validates_inputs_and_encrypts_sensitive_values(self):
         with self.assertRaises(AutomationError):
-            self.automation.create_task("default", self.chat_ref, "1h", "AI")
+            self.automation.create_task("default", self.chat_ref, "30m", "AI")
         with self.assertRaises(AutomationError):
             self.automation.create_task("default", self.chat_ref, "24h", "OTHER")
         with self.assertRaises(AutomationError):

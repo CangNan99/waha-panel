@@ -278,6 +278,20 @@ class SettingsAndContextTests(UpgradeTestCase):
             self.assertEqual(saved["auto_reply_delay_scale"], value)
         self.assertEqual(self.state.settings_payload("default")["auto_reply_delay_scale"], 100)
 
+    def test_human_takeover_resume_delay_defaults_and_round_trips_per_session(self):
+        self.assertEqual(self.state.settings_payload("default")["human_takeover_resume_delay"], "5h")
+        saved = self.state.save_settings({"human_takeover_resume_delay": "30m"}, "sales")
+        self.assertEqual(saved["human_takeover_resume_delay"], "30m")
+        self.assertEqual(self.state.settings_payload("default")["human_takeover_resume_delay"], "5h")
+
+    def test_invalid_human_takeover_resume_delay_is_rejected_without_overwriting(self):
+        self.state.save_settings({"human_takeover_resume_delay": "1h"}, "default")
+        before = self.state.settings_payload("default")
+        for value in ("5m", "2h", "", None, 3600):
+            with self.assertRaises(ValueError):
+                self.state.save_settings({"human_takeover_resume_delay": value}, "default")
+            self.assertEqual(self.state.settings_payload("default"), before)
+
     def test_invalid_reply_delay_scale_is_rejected_without_overwriting(self):
         self.state.save_settings({"auto_reply_delay_scale": 50}, "default")
         before = self.state.settings_payload("default")

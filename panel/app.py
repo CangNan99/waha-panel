@@ -167,6 +167,7 @@ DEFAULT_SETTINGS = {
     "theme": "daylight",
     "auto_reply_context_per_side": "5",
     "auto_reply_delay_scale": "100",
+    "human_takeover_resume_delay": "5h",
     "customer_memory_enabled": "0",
     "auto_reply_media_types": json.dumps(
         {"image": False, "video": False, "audio": False, "file": False},
@@ -182,6 +183,13 @@ CONTEXT_PER_SIDE_MAX = 50
 REPLY_DELAY_SCALE_MIN = 0
 REPLY_DELAY_SCALE_MAX = 120
 DEFAULT_REPLY_DELAY_SCALE = 100
+HUMAN_TAKEOVER_RESUME_SECONDS = {
+    "10m": 10 * 60,
+    "30m": 30 * 60,
+    "1h": 60 * 60,
+    "5h": 5 * 60 * 60,
+}
+DEFAULT_HUMAN_TAKEOVER_RESUME_DELAY = "5h"
 MEDIA_TYPE_KEYS = ("image", "video", "audio", "file")
 DEFAULT_AUTO_REPLY_MEDIA_TYPES = {
     "image": False,
@@ -259,6 +267,15 @@ def normalize_reply_delay_scale(value, default=DEFAULT_REPLY_DELAY_SCALE):
         return parse_reply_delay_scale(value)
     except (TypeError, ValueError):
         return default
+
+
+def normalize_human_takeover_resume_delay(value, default=DEFAULT_HUMAN_TAKEOVER_RESUME_DELAY):
+    code = str(value or "").strip().lower()
+    if code in HUMAN_TAKEOVER_RESUME_SECONDS:
+        return code
+    if default is not None:
+        return default
+    raise ValueError("人工接管自动恢复时间无效")
 
 
 def normalize_media_types(value, strict=False):
@@ -479,6 +496,37 @@ def ensure_multi_session_schema(connection):
     connection.execute("PRAGMA foreign_keys = ON")
 
 
+def ensure_follow_up_delay_schema(connection):
+    """Upgrade the follow-up table CHECK constraint without losing tasks."""
+    migration_path = Path(__file__).with_name("migrations") / "017_follow_up_delay_codes.sql"
+    row = connection.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='follow_up_tasks'"
+    ).fetchone()
+    schema_sql = str(row[0] or "") if row else ""
+    required_codes = ("'1h'", "'2h'", "'3h'", "'6h'", "'12h'")
+    if row and all(code in schema_sql for code in required_codes):
+        connection.executescript(migration_path.read_text(encoding="utf-8"))
+        return
+    if row:
+        legacy_name = "follow_up_tasks__legacy_delay"
+        connection.execute(f"DROP TABLE IF EXISTS {legacy_name}")
+        connection.execute("DROP INDEX IF EXISTS idx_follow_up_due")
+        connection.execute("DROP INDEX IF EXISTS idx_follow_up_chat")
+        connection.execute(f"ALTER TABLE follow_up_tasks RENAME TO {legacy_name}")
+        connection.executescript(migration_path.read_text(encoding="utf-8"))
+        columns = (
+            "id,session_name,chat_key_hmac,chat_id_ciphertext,created_at,due_at,updated_at,"
+            "delay_code,mode,fixed_copy_ciphertext,state,skip_reason,error_code,error_message,"
+            "waha_message_id,client_request_id,claimed_at,completed_at"
+        )
+        connection.execute(
+            f"INSERT INTO follow_up_tasks({columns}) SELECT {columns} FROM {legacy_name}"
+        )
+        connection.execute(f"DROP TABLE {legacy_name}")
+    else:
+        connection.executescript(migration_path.read_text(encoding="utf-8"))
+
+
 def init_db(path, seed_business=True):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -542,6 +590,7 @@ def init_db(path, seed_business=True):
         connection.executescript(chat_metadata_migration.read_text(encoding="utf-8"))
         engagement_migration = Path(__file__).with_name("migrations") / "007_chat_engagement.sql"
         connection.executescript(engagement_migration.read_text(encoding="utf-8"))
+        ensure_follow_up_delay_schema(connection)
         _add_column_if_missing(
             connection,
             "conversation_messages",
@@ -1346,6 +1395,9 @@ class PanelState:
             "auto_reply_delay_scale": normalize_reply_delay_scale(
                 values.get("auto_reply_delay_scale", DEFAULT_REPLY_DELAY_SCALE)
             ),
+            "human_takeover_resume_delay": normalize_human_takeover_resume_delay(
+                values.get("human_takeover_resume_delay", DEFAULT_HUMAN_TAKEOVER_RESUME_DELAY)
+            ),
             "customer_memory_enabled": as_bool(values.get("customer_memory_enabled", "0")),
             "auto_reply_media_types": normalize_media_types(
                 values.get("auto_reply_media_types", DEFAULT_AUTO_REPLY_MEDIA_TYPES)
@@ -1385,6 +1437,10 @@ class PanelState:
             updates["auto_reply_context_per_side"] = str(context_count)
         if "auto_reply_delay_scale" in payload:
             updates["auto_reply_delay_scale"] = str(parse_reply_delay_scale(payload["auto_reply_delay_scale"]))
+        if "human_takeover_resume_delay" in payload:
+            updates["human_takeover_resume_delay"] = normalize_human_takeover_resume_delay(
+                payload["human_takeover_resume_delay"], default=None
+            )
         if "auto_reply_media_types" in payload:
             updates["auto_reply_media_types"] = json.dumps(
                 normalize_media_types(payload["auto_reply_media_types"], strict=True),
