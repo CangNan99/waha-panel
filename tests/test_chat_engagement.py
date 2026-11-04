@@ -4,6 +4,7 @@ import base64
 import tempfile
 import threading
 import unittest
+import uuid
 from cryptography.fernet import Fernet
 from http.server import ThreadingHTTPServer
 from pathlib import Path
@@ -53,6 +54,11 @@ class _Client:
         if self.mode == "unknown": raise TimeoutError("timeout")
         if self.mode == "failed": raise ValueError("failed")
         return {"id": "wamid.manual"}
+    def send_image(self, *_args):
+        self.calls += 1
+        if self.mode == "unknown": raise TimeoutError("timeout")
+        if self.mode == "failed": raise ValueError("failed")
+        return {"id": "wamid.image"}
 
 
 class EngagementSchemaTests(unittest.TestCase):
@@ -209,6 +215,44 @@ class ChatServiceEngagementTests(unittest.TestCase):
         state = self.service.takeover_state("default", self.item["chat_ref"])
         self.assertEqual(state["last_manual_sent_at"], 1_005)
         self.assertEqual(state["auto_resume_at"], 19_005)
+
+    def test_takeover_and_manual_sends_use_configured_resume_delay(self):
+        delays = {"10m": 600, "30m": 1_800, "1h": 3_600, "5h": 18_000}
+        for code, seconds in delays.items():
+            with self.subTest(code=code):
+                self.clock.value = 1_005
+                database = Path(self.temp.name) / f"{code}.sqlite3"
+                init_db(database, seed_business=False)
+                service = ChatService(
+                    database,
+                    self.client,
+                    _Codec(),
+                    b"s" * 32,
+                    clock=self.clock,
+                    settings_loader=lambda _session, value=code: {"human_takeover_resume_delay": value},
+                )
+                item = service.overview("default")["items"][0]
+                state = service.takeover("default", item["chat_ref"])
+                self.assertEqual(state["auto_resume_at"], 1_005 + seconds)
+                self.clock.value = 2_000
+                service.send_text("default", item["chat_ref"], "人工回复", str(uuid.uuid4()))
+                self.assertEqual(service.takeover_state("default", item["chat_ref"])["auto_resume_at"], 2_000 + seconds)
+
+    def test_successful_manual_image_send_uses_configured_resume_delay(self):
+        database = Path(self.temp.name) / "image.sqlite3"
+        init_db(database, seed_business=False)
+        service = ChatService(
+            database,
+            self.client,
+            _Codec(),
+            b"s" * 32,
+            clock=self.clock,
+            settings_loader=lambda _session: {"human_takeover_resume_delay": "1h"},
+        )
+        item = service.overview("default")["items"][0]
+        image = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")
+        service.send_image("default", item["chat_ref"], "test.png", "image/png", image, "", str(uuid.uuid4()))
+        self.assertEqual(service.takeover_state("default", item["chat_ref"])["auto_resume_at"], 1_005 + 3_600)
 
     def test_summary_upsert_replaces_current_report_but_preserves_manual_labels(self):
         self.service.add_manual_label("default", self.item["chat_ref"], "VIP")

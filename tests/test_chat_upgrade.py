@@ -474,6 +474,17 @@ class SettingsApiTests(UpgradeTestCase):
         self.assertIn("previousReplyDelayScale", page)
         self.assertIn("renderReplyDelayScale(event.target.value)", page)
 
+    def test_settings_page_exposes_human_takeover_resume_slider(self):
+        page = settings_page()
+        self.assertIn('id="humanTakeoverResumeDelay"', page)
+        self.assertIn('type="range"', page)
+        self.assertIn("10 分钟", page)
+        self.assertIn("30 分钟", page)
+        self.assertIn("1 小时", page)
+        self.assertIn("5 小时", page)
+        self.assertIn("human_takeover_resume_delay", page)
+        self.assertIn("renderHumanTakeoverResumeDelay", page)
+
 
 class MemoryAndTranslationRouteTests(UpgradeTestCase):
     def handler(self, payload=None, path=""):
