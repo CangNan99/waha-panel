@@ -640,7 +640,7 @@ class IptvService:
                     except Exception: raise IptvError('account_unavailable', '试用记录暂不可读，请人工核对') from None
                     return {'id': previous['id'], 'account': account, 'expires_at': previous['expires_at'],
                             'reused': True, 'subscription': '99', 'language': language or 'en'}
-                if previous['state'] in ('unknown', 'creating'):
+                if previous['state'] == 'unknown':
                     retry = connection.execute(
                         'SELECT 1 FROM iptv_trial_retries WHERE record_type=? AND record_id=?',
                         ('automatic', previous['id']),

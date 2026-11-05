@@ -486,6 +486,22 @@ class IptvServiceTests(unittest.TestCase):
         self.assertEqual(errors, [])
         self.assertEqual(len(self.supplier.calls), 1)
 
+    def test_in_flight_creation_without_retry_stays_pending(self):
+        customer_key = self.service._customer_key('legacy-customer@c.us')
+        with closing(sqlite3.connect(self.path)) as connection:
+            connection.execute(
+                "INSERT INTO iptv_trials(id,provider,customer_key,session_name,message_key,state,created_at,updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                ('in-flight', 'activationpanel', customer_key, 'sales', 'legacy-message', 'creating', self.now, self.now),
+            )
+            connection.commit()
+        with self.assertRaises(IptvError) as caught:
+            self.service.create_trial('sales', 'legacy-customer@c.us', 'fresh-request')
+        self.assertEqual(caught.exception.code, 'trial_pending')
+        with closing(sqlite3.connect(self.path)) as connection:
+            self.assertEqual(connection.execute('SELECT count(*) FROM iptv_trial_retries').fetchone()[0], 0)
+        self.assertEqual(self.supplier.calls, [])
+
     def test_delivery_failure_reuses_created_result_and_public_records_are_safe(self):
         result = self.create()
         self.service.mark_delivery(result['id'], False)
