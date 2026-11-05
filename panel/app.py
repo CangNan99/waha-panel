@@ -2173,7 +2173,11 @@ class PanelState:
             with urlopen(request, timeout=30) as response:
                 result = json.loads(response.read().decode("utf-8"))
             content = result["choices"][0]["message"].get("content")
-        except Exception as error:
+        except (
+            HTTPError, URLError, TimeoutError, ConnectionError,
+            json.JSONDecodeError, UnicodeDecodeError, KeyError, IndexError,
+            TypeError, ValueError, AttributeError,
+        ) as error:
             mapped = _map_ai_error(error)
             raise mapped from error
         if not isinstance(content, str) or not content.strip():
