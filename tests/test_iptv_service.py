@@ -18,6 +18,7 @@ from panel.iptv_service import (
     IptvService,
     classify_trial_intent,
     explicit_trial_request,
+    infer_customer_language_from_history,
     infer_trial_language,
 )
 
@@ -187,6 +188,19 @@ class ActivationClientTests(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertFalse(classify_trial_intent(text)['requested'])
         self.assertEqual(infer_trial_language('', '客户：Quero um teste IPTV'), 'pt')
+
+    def test_customer_language_ignores_agent_messages_and_prefers_latest_customer_text(self):
+        english_customer = [
+            {'from_me': False, 'body': 'Can I get an IPTV trial?'},
+            {'from_me': True, 'body': '好的，我已经发给你测试账号。'},
+        ]
+        self.assertEqual(infer_customer_language_from_history(english_customer), 'en')
+        multilingual_customer = [
+            {'direction': 'inbound', 'body': 'Quero um teste IPTV'},
+            {'direction': 'outbound', 'body': '中文客服回复不应覆盖客户语言'},
+            {'direction': 'inbound', 'body': 'Quero testar agora'},
+        ]
+        self.assertEqual(infer_customer_language_from_history(multilingual_customer), 'pt')
 
 
 class IptvServiceTests(unittest.TestCase):

@@ -643,7 +643,10 @@ class AutomationSchedulerTests(unittest.TestCase):
             connection.close()
 
     def test_due_times_are_calculated_from_creation_for_every_delay(self):
-        delays = {"24h": 86_400, "3d": 259_200, "7d": 604_800, "15d": 1_296_000}
+        delays = {
+            "1h": 3_600, "2h": 7_200, "3h": 10_800, "6h": 21_600, "12h": 43_200,
+            "24h": 86_400, "3d": 259_200, "7d": 604_800, "15d": 1_296_000,
+        }
         for code, seconds in delays.items():
             task = self.automation.create_task("default", self.chat_ref, code, "AI")
             self.assertEqual(task["created_at"], 10_000)

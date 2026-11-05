@@ -59,28 +59,92 @@ def infer_trial_language(text, context=''):
     fallback = re.sub(r'(?m)^(?:客户|客服|customer|agent)\s*[:：]\s*', '', fallback)
     fallback = fallback.replace('[iptv_trial_invitation]', ' ')
     for candidate in (value, fallback):
-        if not candidate:
-            continue
-        if re.search(r'[\u3040-\u30ff]', candidate):
-            return 'en'
-        if re.search(r'[\u4e00-\u9fff]', candidate):
-            return 'zh'
-        if re.search(r'[\u0600-\u06ff]', candidate):
-            return 'ar'
-        if re.search(r'[\u0400-\u04ff]', candidate):
-            return 'ru'
-        if re.search(r'\b(?:quero|queria|teste|seu|sua|por favor)\b', candidate):
-            return 'pt'
-        if re.search(r'\b(?:quiero|prueba|pruébalo|por favor|puedo)\b', candidate):
-            return 'es'
-        if re.search(r'\b(?:voudrais|essai|essayer|s\'il vous plaît|peux)\b', candidate):
-            return 'fr'
-        if re.search(r'\b(?:möchte|testen|bitte|kann ich)\b', candidate):
-            return 'de'
-        if re.search(r'\b(?:istiyorum|deneme|lütfen)\b', candidate):
-            return 'tr'
-        if re.search(r'\b(?:vorrei|prova|posso)\b', candidate):
-            return 'it'
+        language = _language_signal(candidate)
+        if language:
+            return language
+    return 'en'
+
+
+def _language_signal(text):
+    """Return a supported language for one text, or ``None`` when it is ambiguous."""
+    candidate = _normalize_intent_text(text, 3000)
+    if not candidate:
+        return None
+    if re.search(r'[\u3040-\u30ff]', candidate):
+        return 'en'
+    if re.search(r'[\u4e00-\u9fff]', candidate):
+        return 'zh'
+    if re.search(r'[\u0600-\u06ff]', candidate):
+        return 'ar'
+    if re.search(r'[\u0400-\u04ff]', candidate):
+        return 'ru'
+    if re.search(r'\b(?:quero|queria|teste|seu|sua|por favor)\b', candidate):
+        return 'pt'
+    if re.search(r'\b(?:quiero|prueba|pruébalo|por favor|puedo)\b', candidate):
+        return 'es'
+    if re.search(r"\b(?:voudrais|essai|essayer|s'il vous plaît|peux)\b", candidate):
+        return 'fr'
+    if re.search(r'\b(?:möchte|testen|bitte|kann ich)\b', candidate):
+        return 'de'
+    if re.search(r'\b(?:istiyorum|deneme|lütfen)\b', candidate):
+        return 'tr'
+    if re.search(r'\b(?:vorrei|prova|posso)\b', candidate):
+        return 'it'
+    return None
+
+
+def _history_message_text(item):
+    if isinstance(item, dict):
+        for key in ('body', 'text', 'content', 'caption'):
+            value = item.get(key)
+            if value:
+                return str(value)
+        return ''
+    return str(item or '')
+
+
+def _is_customer_history_item(item):
+    if not isinstance(item, dict):
+        return True
+    if item.get('from_me') is True:
+        return False
+    direction = str(item.get('direction') or item.get('role') or item.get('sender') or '').strip().casefold()
+    if direction in {'outbound', 'out', 'agent', 'assistant', '客服', '人工', 'ai'}:
+        return False
+    if direction in {'inbound', 'in', 'customer', 'user', '客户', 'received'}:
+        return True
+    if item.get('from_me') is False:
+        return True
+    return True
+
+
+def infer_customer_language_from_history(history_or_context):
+    """Infer the latest language used by the customer, ignoring agent replies."""
+    customer_texts = []
+    if isinstance(history_or_context, (list, tuple)):
+        for item in history_or_context:
+            if _is_customer_history_item(item):
+                text = _history_message_text(item).strip()
+                if text:
+                    customer_texts.append(text)
+    elif isinstance(history_or_context, dict):
+        return infer_customer_language_from_history([history_or_context])
+    else:
+        raw = str(history_or_context or '')
+        lines = [line.strip() for line in raw.splitlines() if line.strip()]
+        if not lines:
+            lines = [raw.strip()] if raw.strip() else []
+        for line in lines:
+            match = re.match(r'^(客户|客服|customer|agent|user|assistant)\s*[:：]\s*(.*)$', line, re.I)
+            if match:
+                if match.group(1).casefold() in {'客服', 'agent', 'assistant'}:
+                    continue
+                line = match.group(2)
+            customer_texts.append(line)
+    for text in reversed(customer_texts):
+        language = _language_signal(text)
+        if language:
+            return language
     return 'en'
 
 

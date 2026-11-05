@@ -370,8 +370,13 @@ class ChatPageRegressionTests(unittest.TestCase):
             self.assertIn(f'id="{control_id}"', page)
         self.assertIn("手动", page)
         self.assertIn("AI", page)
-        for delay in ("24h", "3d", "7d", "15d"):
-            self.assertIn(f'value="{delay}"', page)
+        self.assertIn('id="followUpDelay"', page)
+        self.assertIn('type="range"', page)
+        for delay in ("1h", "2h", "3h", "6h", "12h", "24h", "3d", "7d", "15d"):
+            self.assertIn(delay, page)
+        for label in ("1 小时", "2 小时", "3 小时", "6 小时", "12 小时", "24 小时", "3 天", "7 天", "15 天"):
+            self.assertIn(label, page)
+        self.assertIn("renderFollowUpDelay", page)
         for mode in ("AI", "FIXED"):
             self.assertIn(f'value="{mode}"', page)
         self.assertIn("当前总结", page)
