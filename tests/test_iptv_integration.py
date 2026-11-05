@@ -77,6 +77,18 @@ class IptvIntegrationTests(unittest.TestCase):
         self.assertEqual(len(self.supplier.calls), 1)
         self.assertEqual(self.client.sent[0][:2], ('default', 'customer@c.us'))
 
+    def test_short_test_message_with_iptv_context_uses_backend_fallback(self):
+        self.state._archive_message(
+            'default', 'customer@c.us', 'outbound', 'iptv-context-1',
+            'Your IPTV account is ready.', self.now - 2, origin='iptv_trial'
+        )
+        with patch.object(self.state, '_ai_reply', return_value=('I will prepare the IPTV test for you.', 'ai')):
+            result = self.state.handle_webhook(self.event('测试', message_id='short-test-1'), dispatch=True)
+        self.assertEqual(result['action'], 'replied')
+        self.assertEqual(result['mode'], 'iptv_trial')
+        self.assertEqual(len(self.supplier.calls), 1)
+        self.assertEqual(self.client.sent[0][:2], ('default', 'customer@c.us'))
+
     def test_failed_automatic_trial_is_retried_and_sent_after_restart(self):
         original = self.supplier.create_trial
         attempts = {'count': 0}

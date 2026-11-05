@@ -46,6 +46,10 @@ _REQUEST_WORD = re.compile(
     r'我想|我要|想要|给我|申请|请给|请发|可以吗|能不能|想试|试一下|\b(?:want|need|please|quero|queria|quiero|quisiera|voudrais|souhaite|möchte|istiyorum|хочу|vorrei|можно|можешь|can i|could i|may i|send me|give me|get me|please send|me das|kann ich|posso)\b|أريد|اريد|من فضلك|試したい|ください|부탁|mag ik|ik wil|tôi muốn|muốn thử|saya ingin|ingin coba',
     re.I,
 )
+_SHORT_TRIAL_REQUEST = re.compile(
+    r'^(?:试用|测试|体验|试试看|试一下|test|trial|try|demo|teste|prueba|probar|essai|deneme|testen|probe|тест|проба|تجربة|テスト|テストしたい|테스트|proberen|thử|coba)[\s!,.。！？，?、…~～]*$',
+    re.I,
+)
 
 
 def _normalize_intent_text(value, limit=8000):
@@ -180,6 +184,8 @@ def classify_trial_intent(text, context=''):
         return {'requested': True, 'language': language, 'reason': 'invitation_confirmation'}
     if not has_iptv or not _TRIAL_WORD.search(value):
         return {'requested': False, 'language': language, 'reason': 'missing_trial_signal'}
+    if _SHORT_TRIAL_REQUEST.match(value):
+        return {'requested': True, 'language': language, 'reason': 'short_context_request'}
     if _REQUEST_WORD.search(value):
         return {'requested': True, 'language': language, 'reason': 'explicit_request'}
     return {'requested': False, 'language': language, 'reason': 'missing_request_signal'}
@@ -615,6 +621,7 @@ class IptvService:
     def create_trial(self, session, chat_id, message_id, allowed=lambda: True, language='en'):
         if not self._allowed(allowed): raise IptvError('cancelled', '自动开通条件已变化')
         customer_key, now = self._customer_key(chat_id), int(self.clock())
+        retry_recovery = None
         with closing(self._connect()) as connection, connection:
             connection.execute('BEGIN IMMEDIATE')
             config = self._config(connection)
@@ -633,19 +640,40 @@ class IptvService:
                     except Exception: raise IptvError('account_unavailable', '试用记录暂不可读，请人工核对') from None
                     return {'id': previous['id'], 'account': account, 'expires_at': previous['expires_at'],
                             'reused': True, 'subscription': '99', 'language': language or 'en'}
-                if previous['state'] != 'cancelled' or previous['message_key'] == self._hash(str(message_id)):
+                if previous['state'] in ('unknown', 'creating'):
+                    retry = connection.execute(
+                        'SELECT 1 FROM iptv_trial_retries WHERE record_type=? AND record_id=?',
+                        ('automatic', previous['id']),
+                    ).fetchone()
+                    if retry:
+                        raise IptvError('trial_pending', '此客户已有开通记录，请先人工核对；系统不会重复开通')
+                    retry_recovery = (previous['id'], session, chat_id, language)
+                elif previous['state'] != 'cancelled' or previous['message_key'] == self._hash(str(message_id)):
                     raise IptvError('trial_pending', '此客户已有开通记录，请先人工核对；系统不会重复开通')
-            day_start = int(datetime.fromtimestamp(now, TZ).replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
-            count = connection.execute("SELECT count(*) FROM iptv_trials WHERE provider=? AND created_at>=? AND state NOT IN ('failed','cancelled')", (PROVIDER, day_start)).fetchone()[0]
-            if count >= int(config.get('daily_limit', 20)):
-                raise IptvError('daily_limit', '已达到今日 IPTV 自动开通上限')
-            trial_id = uuid.uuid4().hex
-            if previous:
-                # Only cancelled-before-call rows can be reclaimed. Quota and
-                # the new reservation are checked under one write transaction.
-                connection.execute("UPDATE iptv_trials SET id=?,session_name=?,message_key=?,state='creating',error_code='',created_at=?,updated_at=? WHERE id=? AND state='cancelled'", (trial_id, session, self._hash(str(message_id)), now, now, previous['id']))
-            else:
-                connection.execute('INSERT INTO iptv_trials(id,provider,customer_key,session_name,message_key,state,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)', (trial_id, PROVIDER, customer_key, session, self._hash(str(message_id)), 'creating', now, now))
+            if not retry_recovery:
+                day_start = int(datetime.fromtimestamp(now, TZ).replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
+                count = connection.execute("SELECT count(*) FROM iptv_trials WHERE provider=? AND created_at>=? AND state NOT IN ('failed','cancelled')", (PROVIDER, day_start)).fetchone()[0]
+                if count >= int(config.get('daily_limit', 20)):
+                    raise IptvError('daily_limit', '已达到今日 IPTV 自动开通上限')
+                trial_id = uuid.uuid4().hex
+                if previous:
+                    # Only cancelled-before-call rows can be reclaimed. Quota and
+                    # the new reservation are checked under one write transaction.
+                    connection.execute("UPDATE iptv_trials SET id=?,session_name=?,message_key=?,state='creating',error_code='',created_at=?,updated_at=? WHERE id=? AND state='cancelled'", (trial_id, session, self._hash(str(message_id)), now, now, previous['id']))
+                else:
+                    connection.execute('INSERT INTO iptv_trials(id,provider,customer_key,session_name,message_key,state,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)', (trial_id, PROVIDER, customer_key, session, self._hash(str(message_id)), 'creating', now, now))
+        if retry_recovery:
+            if not self._allowed(allowed):
+                raise IptvError('cancelled', '自动开通条件已变化')
+            self._enqueue_retry(
+                'automatic', retry_recovery[0], 'create', retry_recovery[1],
+                retry_recovery[2], retry_recovery[3], 'legacy_retry_recovery',
+            )
+            raise IptvError(
+                'retry_queued',
+                '已有一次未确认的开通请求，系统已安排恢复重试',
+                uncertain=True,
+            )
         if not self._allowed(allowed):
             self._set_state(trial_id, 'cancelled', 'cancelled')
             raise IptvError('cancelled', '自动开通条件已变化')

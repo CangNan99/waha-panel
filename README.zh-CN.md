@@ -4,7 +4,7 @@
 
 ## 界面预览
 
-1.0.21 新增客户图片多模态识别、按客户语言发送 IPTV 体验跟进、短时跟进滑杆和人工接管后自动恢复 AI，并包含 1.0.20 的 IPTV 稳定性改进。以下界面截图均使用演示数据。
+1.0.22 优化 IPTV 测试短消息触发，并恢复旧版本遗留的未知自动开卡记录；同时保留 1.0.21 的自动化体验改进。以下界面截图均使用演示数据。
 
 ![状态概览](docs/assets/overview-1.0.15.png)
 
@@ -97,6 +97,7 @@ pwsh -File .\update.ps1 -Component waha
 
 | 版本 | 更新内容 | 详细说明 |
 | --- | --- | --- |
+| 1.0.22 | 优化 IPTV 测试短消息触发，并恢复旧版本遗留的未知自动开卡记录。 | [docs/releases/1.0.22.md](docs/releases/1.0.22.md) |
 | 1.0.21 | 新增客户图片多模态识别、按客户语言的 IPTV 体验跟进、短时跟进滑杆和人工接管后自动恢复 AI。 | [docs/releases/1.0.21.md](docs/releases/1.0.21.md) |
 | 1.0.20 | 优化 IPTV 多语言测试意图、持久化失败重试、手动五档卡密和聊天分页刷新；保留共享播放服务器地址校验。 | [docs/releases/1.0.20.md](docs/releases/1.0.20.md) |
 | 1.0.19 | 新增共享播放服务器地址，兼容供应商成功返回但缺少域名的 IPTV 播放链接，并加强地址校验。 | [docs/releases/1.0.19.md](docs/releases/1.0.19.md) |
@@ -138,6 +139,6 @@ pwsh -File .\backup.ps1
 当前镜像版本：
 
 - `devlikeapro/waha:latest-2026.9.1`
-- `docker.io/cangnan88/waha-panel:1.0.21`
+- `docker.io/cangnan88/waha-panel:1.0.22`
 
 如需域名访问，只反代到面板端口 `127.0.0.1:3003`。WAHA API 端口 `3002` 默认不应公开。请在反向代理层启用 HTTPS，并确保代理不会记录 `Authorization`、APIKey 或密码字段。
