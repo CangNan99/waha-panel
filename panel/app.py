@@ -205,6 +205,78 @@ TRUSTED_AVATAR_HOSTS = frozenset({"pps.whatsapp.net", "mmg.whatsapp.net"})
 SESSION_AVATAR_CACHE_LIMIT = 32
 SESSION_AVATAR_TTL_SECONDS = 24 * 60 * 60
 SESSION_AVATAR_NEGATIVE_TTL_SECONDS = 30
+
+
+class AIUpstreamError(RuntimeError):
+    """Safe, typed failure for the configured OpenAI-compatible provider."""
+
+    def __init__(self, code, public_message, status=0, retryable=False):
+        self.code = str(code)
+        self.public_message = str(public_message)
+        self.status = int(status or 0)
+        self.retryable = bool(retryable)
+        super().__init__(self.public_message)
+
+
+def _map_ai_error(error):
+    if isinstance(error, AIUpstreamError):
+        return error
+    if isinstance(error, HTTPError):
+        try:
+            status = int(error.code)
+        except (TypeError, ValueError):
+            status = 0
+        if status == 402:
+            return AIUpstreamError(
+                "AI_PAYMENT_REQUIRED",
+                "AI 服务余额或订阅不可用，请充值、恢复订阅或更换可用配置",
+                status=status,
+                retryable=False,
+            )
+        if status in {401, 403}:
+            return AIUpstreamError(
+                "AI_AUTH_ERROR",
+                "AI 服务认证或权限配置无效，请检查 API Key 和访问权限",
+                status=status,
+                retryable=False,
+            )
+        if status in {408, 429} or status >= 500:
+            return AIUpstreamError(
+                "AI_UPSTREAM_ERROR",
+                "AI 服务暂时不可用，请稍后重试",
+                status=status,
+                retryable=True,
+            )
+        return AIUpstreamError(
+            "AI_UPSTREAM_ERROR",
+            "AI 服务请求失败，请检查服务地址和响应状态",
+            status=status,
+            retryable=False,
+        )
+    if isinstance(error, (TimeoutError, URLError, ConnectionError)):
+        return AIUpstreamError(
+            "AI_CONNECTION_ERROR",
+            "AI 服务暂时无法连接，请稍后重试",
+            retryable=True,
+        )
+    if isinstance(error, (json.JSONDecodeError, UnicodeDecodeError, KeyError, IndexError, TypeError, ValueError, AttributeError)):
+        return AIUpstreamError(
+            "AI_RESPONSE_INVALID",
+            "AI 服务返回内容格式无效，请检查模型配置",
+            retryable=False,
+        )
+    return AIUpstreamError(
+        "AI_UPSTREAM_ERROR",
+        "AI 服务请求失败，请稍后重试",
+        retryable=True,
+    )
+
+
+def _ai_error_log_message(error):
+    suffix = f"（HTTP {error.status}）" if getattr(error, "status", 0) else ""
+    return str(getattr(error, "code", "AI_UPSTREAM_ERROR")) + suffix
+
+
 SENSITIVE_NAME = re.compile(
     r"(?i)(api[_-]?key|password|token|secret|authorization)\s*([:=])\s*([^\s,;}&]+)"
 )
@@ -2065,7 +2137,11 @@ class PanelState:
         model = str(settings.get("ai_model") or "").strip()
         api_key = str(settings.get("ai_api_key") or "")
         if not (base_url and model and api_key):
-            raise RuntimeError("AI_MEMORY_CONFIG_MISSING")
+            raise AIUpstreamError(
+                "AI_CONFIG_MISSING",
+                "AI 模型配置不完整，请填写服务地址、模型名和 API Key",
+                retryable=False,
+            )
         endpoint = (
             base_url
             if base_url.rstrip("/").endswith("/chat/completions")
@@ -2093,9 +2169,20 @@ class PanelState:
             },
             method="POST",
         )
-        with urlopen(request, timeout=30) as response:
-            result = json.loads(response.read().decode("utf-8"))
-        return result["choices"][0]["message"].get("content") or ""
+        try:
+            with urlopen(request, timeout=30) as response:
+                result = json.loads(response.read().decode("utf-8"))
+            content = result["choices"][0]["message"].get("content")
+        except Exception as error:
+            mapped = _map_ai_error(error)
+            raise mapped from error
+        if not isinstance(content, str) or not content.strip():
+            raise AIUpstreamError(
+                "AI_RESPONSE_INVALID",
+                "AI 服务返回内容格式无效，请检查模型配置",
+                retryable=False,
+            )
+        return content
 
     def _ai_reply(self, settings, incoming_text, customer_id=None, conversation_context="", include_tools=False,
                   session_name=DEFAULT_SESSION_NAME):
@@ -2104,7 +2191,7 @@ class PanelState:
         model = settings.get("ai_model", "").strip()
         api_key = settings.get("ai_api_key", "")
         if not (base_url and model and api_key):
-            return "", "ai_unconfigured"
+            return "", "AI_CONFIG_MISSING"
         endpoint = base_url if base_url.rstrip("/").endswith("/chat/completions") else base_url.rstrip("/") + "/chat/completions"
         knowledge_context = self._knowledge_context(name)
         try:
@@ -2214,7 +2301,7 @@ class PanelState:
             choice = result["choices"][0]
             message_result = choice["message"]
             if message_result.get("refusal") or choice.get("finish_reason") not in (None, "stop", "tool_calls"):
-                return "", "ai_invalid_result"
+                return "", "AI_RESPONSE_INVALID"
             tool_calls = message_result.get("tool_calls") or []
             if tool_calls:
                 if not include_tools or not isinstance(tool_calls, list) or len(tool_calls) != 1:
@@ -2245,8 +2332,9 @@ class PanelState:
             reply = content.strip() if isinstance(content, str) else ""
             return (reply, "ai") if reply else ("", "ai_empty")
         except Exception as error:
-            self.log("ERROR", "ai.reply", redact_error(error, api_key), name)
-            return "", "ai_error"
+            mapped = _map_ai_error(error)
+            self.log("ERROR", "ai.reply", _ai_error_log_message(mapped), name)
+            return "", mapped.code
 
     def _execute_iptv_trial(self, session, chat_id, message_id, original_timestamp,
                             ticket, policy_token, arguments, incoming, context, dispatch):
@@ -4251,8 +4339,10 @@ class PanelHandler(BaseHTTPRequestHandler):
             status = HTTPStatus.CONFLICT
         elif code in {"CHAT_CAPABILITY_UNAVAILABLE", "TRANSLATION_UNAVAILABLE", "MEMORY_UNAVAILABLE", "ALIYUN_TRANSLATION_UNAVAILABLE"}:
             status = HTTPStatus.SERVICE_UNAVAILABLE
-        elif code in {"SESSION_NOT_CONNECTED", "TRANSLATION_NOT_CONFIGURED", "ALIYUN_CONFIG_MISSING"}:
+        elif code in {"SESSION_NOT_CONNECTED", "TRANSLATION_NOT_CONFIGURED", "ALIYUN_CONFIG_MISSING", "AI_CONFIG_MISSING", "AI_AUTH_ERROR"}:
             status = HTTPStatus.CONFLICT
+        elif code == "AI_PAYMENT_REQUIRED":
+            status = HTTPStatus.PAYMENT_REQUIRED
         elif code in {"AI_RATE_LIMIT", "AI_BUSY", "ALIYUN_RATE_LIMIT", "ALIYUN_BUSY"}:
             status = HTTPStatus.TOO_MANY_REQUESTS
         elif code in {"AI_CONNECTION_ERROR", "AI_UPSTREAM_ERROR", "AI_RESPONSE_INVALID"}:

@@ -7,8 +7,9 @@ import unittest
 from contextlib import closing
 from pathlib import Path
 from unittest.mock import patch
+from urllib.error import HTTPError
 
-from panel.app import PanelState, init_db, settings_page
+from panel.app import AIUpstreamError, PanelState, init_db, settings_page
 
 
 class Client:
@@ -176,6 +177,44 @@ class AutoReplyPolicyTests(unittest.TestCase):
         self.state.save_settings({"default_reply_text": "旧固定文案"})
         self.assertEqual(self.state.handle_webhook(self.event())["action"], "ignored")
         self.assertEqual(self.client.sent, [])
+
+    def test_ai_payment_required_is_classified_without_exposing_key(self):
+        self.state.save_settings({
+            "ai_base_url": "https://ai.example/v1",
+            "ai_model": "test",
+            "ai_api_key": "synthetic-ai-key",
+        })
+        error = HTTPError(
+            "https://ai.example/v1/chat/completions", 402, "Payment Required", {},
+            io.BytesIO(b"provider secret diagnostic"),
+        )
+        with patch("panel.app.urlopen", side_effect=error):
+            result = self.state.handle_webhook(self.event(message_id="payment-required"))
+        self.assertEqual(result["action"], "ignored")
+        with closing(sqlite3.connect(self.database)) as connection:
+            logs = "\n".join(row[0] for row in connection.execute(
+                "SELECT message FROM system_logs WHERE event='ai.reply'"
+            ))
+        self.assertIn("AI_PAYMENT_REQUIRED", logs)
+        self.assertNotIn("synthetic-ai-key", logs)
+        self.assertNotIn("provider secret diagnostic", logs)
+
+    def test_memory_completion_maps_payment_http_error_to_typed_code(self):
+        settings = {
+            "ai_base_url": "https://ai.example/v1",
+            "ai_model": "test",
+            "ai_api_key": "synthetic-ai-key",
+        }
+        error = HTTPError(
+            "https://ai.example/v1/chat/completions", 402, "Payment Required", {},
+            io.BytesIO(b"provider secret diagnostic"),
+        )
+        with patch("panel.app.urlopen", side_effect=error):
+            with self.assertRaises(AIUpstreamError) as caught:
+                self.state._customer_memory_completion(settings, "system", "user")
+        self.assertEqual((caught.exception.code, caught.exception.status, caught.exception.retryable),
+                         ("AI_PAYMENT_REQUIRED", 402, False))
+        self.assertNotIn("synthetic-ai-key", str(caught.exception))
 
     def test_ai_invalid_empty_error_and_tool_responses_never_send(self):
         self.state.save_settings({"ai_base_url": "https://ai.invalid/v1", "ai_model": "test", "ai_api_key": "synthetic"})

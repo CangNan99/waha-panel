@@ -16,6 +16,22 @@ MAX_MEMORY_CHARS = 12_000
 MAX_MEMORY_FIELD_CHARS = 2_000
 MAX_MEMORY_LIST_ITEMS = 20
 MAX_MEMORY_RETRY_SECONDS = 15 * 60
+MEMORY_DETERMINISTIC_ERROR_CODES = {
+    "AI_CONFIG_MISSING",
+    "AI_AUTH_ERROR",
+    "AI_PAYMENT_REQUIRED",
+    "AI_RESPONSE_INVALID",
+    "MEMORY_RESULT_INVALID",
+    "MEMORY_RESULT_EMPTY",
+}
+MEMORY_RETRYABLE_ERROR_CODES = {
+    "AI_CONNECTION_ERROR",
+    "AI_UPSTREAM_ERROR",
+    "AI_RATE_LIMIT",
+    "AI_BUSY",
+    "MEMORY_GENERATION_FAILED",
+    "MEMORY_WORKER_FAILED",
+}
 
 MEMORY_FIELDS = (
     "profile",
@@ -384,6 +400,16 @@ class CustomerMemoryService:
             connection.commit()
         return {"cleared": True, "session_name": session}
 
+    @staticmethod
+    def _retryable_error(error):
+        explicit = getattr(error, "retryable", None)
+        if isinstance(explicit, bool):
+            return explicit
+        code = str(getattr(error, "code", "") or "MEMORY_WORKER_FAILED")
+        if code in MEMORY_DETERMINISTIC_ERROR_CODES:
+            return False
+        return code in MEMORY_RETRYABLE_ERROR_CODES
+
     def _run_one_due_job(self):
         now = int(self.clock())
         job = None
@@ -423,20 +449,28 @@ class CustomerMemoryService:
                 connection.commit()
         except Exception as error:
             attempts = int(job.get("attempts") or 0) + 1
-            delay = min(MAX_MEMORY_RETRY_SECONDS, 2 ** min(attempts, 8))
+            error_code = str(getattr(error, "code", "") or "MEMORY_WORKER_FAILED")
+            retryable = self._retryable_error(error)
+            now = int(self.clock())
+            if retryable:
+                delay = min(MAX_MEMORY_RETRY_SECONDS, 2 ** min(attempts, 8))
+                state = "PENDING"
+                next_run_at = now + delay
+                log_message = "客户记忆任务重试：" + error_code
+            else:
+                state = "FAILED"
+                next_run_at = now
+                hint = "请充值、恢复订阅或更换 AI 配置" if error_code == "AI_PAYMENT_REQUIRED" else "请检查 AI 配置后重新触发记忆任务"
+                log_message = "客户记忆任务已暂停：" + error_code + "；" + hint
             with closing(self._connect()) as connection:
                 connection.execute(
-                    "UPDATE conversation_memory_jobs SET state='PENDING',attempts=?,next_run_at=?,"
+                    "UPDATE conversation_memory_jobs SET state=?,attempts=?,next_run_at=?,"
                     "claimed_at=NULL,last_error_code=?,updated_at=? WHERE session_name=? AND chat_key_hmac=?",
                     (
-                        attempts,
-                        int(self.clock()) + delay,
-                        "MEMORY_WORKER_FAILED",
-                        int(self.clock()),
-                        job["session_name"],
-                        job["chat_key_hmac"],
+                        state, attempts, next_run_at, error_code, now,
+                        job["session_name"], job["chat_key_hmac"],
                     ),
                 )
                 connection.commit()
-            self._safe_log("WARN", "客户记忆任务重试：MEMORY_WORKER_FAILED")
+            self._safe_log("WARN", log_message)
         return True
