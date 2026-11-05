@@ -34,7 +34,7 @@ Set-Location -LiteralPath .\waha-panel
 pwsh -File .\install.ps1
 ```
 
-首次安装会自动生成 WAHA API 密钥、webhook 密钥、面板数据加密密钥和管理员初始密码。初始管理员密码只在安装脚本的首次成功输出中显示；不要把 `.env` 或 `secrets/` 目录上传到公共仓库。
+首次安装会自动生成 WAHA API 密钥、webhook 密钥、面板数据加密密钥和管理员初始密码。安装成功后会同时显示面板账号、WAHA Dashboard 账号，以及面板密码、WAHA 密码和 API Key 的掩码值；真实凭据只保存在受限的 `.env`、`secrets/waha_credentials` 和 `secrets/panel_admin_bootstrap` 文件中，不会写入安装输出、网页或日志。不要把这些文件上传到公共仓库。
 
 这是空白业务安装，不会带入现有 WhatsApp 会话、二维码、聊天、客户资料、AI 密钥、WooCommerce、PayPal、产品或订单数据。
 
@@ -53,7 +53,7 @@ pwsh -File .\install.ps1
 
 - 多 WhatsApp 会话统一管理
 - AI 自动回复、摘要和标签
-- IPTV 试用成功后自动添加只读系统标签“IPTV测试过”
+- IPTV 试用成功后自动添加只读系统标签“IPTV测试过”，并在 12 小时后按客户语言询问测试体验
 - 按客户独立保存的加密动态记忆（在自动回复设置中开启）
 - 聊天列表、消息收发和人工接管
 - 当前聊天可在阿里云机器翻译专业版与 AI 模型翻译之间手动切换，并以双行显示原文和中文译文

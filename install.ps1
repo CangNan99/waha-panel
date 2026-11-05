@@ -17,6 +17,12 @@ function Write-Utf8NoBom([string]$Path, [string]$Content) {
     [IO.File]::WriteAllText($Path, $Content, [Text.UTF8Encoding]::new($false))
 }
 
+function Mask-Secret([string]$Value) {
+    if ([string]::IsNullOrEmpty($Value)) { return '***' }
+    if ($Value.Length -le 8) { return $Value.Substring(0, [Math]::Min(2, $Value.Length)) + '***' }
+    return $Value.Substring(0, 4) + '...' + $Value.Substring($Value.Length - 4, 4)
+}
+
 try {
     $step = 'checking Docker Compose'
     & docker compose version | Out-Null
@@ -26,6 +32,8 @@ try {
     New-Item -ItemType Directory -Force -Path $secretDir | Out-Null
     $firstInstall = -not (Test-Path -LiteralPath $envPath)
     $adminPassword = $null
+    $wahaApiKey = $null
+    $wahaDashboardPassword = $null
 
     if ($firstInstall) {
         $step = 'generating installation secrets'
@@ -102,11 +110,19 @@ PANEL_ADMIN_PASSWORD=$adminPassword
     Write-Host 'Panel: http://127.0.0.1:3003/'
     Write-Host 'WAHA:  http://127.0.0.1:3002/'
     if ($adminPassword) {
-        Write-Host 'Initial panel administrator: admin'
-        Write-Host "Initial panel password (shown once): $adminPassword"
+        Write-Host 'Panel administrator: admin'
+        Write-Host ('Panel password (masked): {0}' -f (Mask-Secret $adminPassword))
     } else {
         Write-Host 'Existing administrator credentials were preserved.'
     }
+    Write-Host 'WAHA Dashboard username: admin'
+    if ($wahaDashboardPassword) {
+        Write-Host ('WAHA Dashboard password (masked): {0}' -f (Mask-Secret $wahaDashboardPassword))
+        Write-Host ('WAHA API key (masked): {0}' -f (Mask-Secret $wahaApiKey))
+    } else {
+        Write-Host 'WAHA Dashboard password and API key were preserved.'
+    }
+    Write-Host 'Restricted credential files: .env, secrets/waha_credentials, secrets/panel_admin_bootstrap'
 } catch {
     Write-Error ("INSTALL FAILED at {0}: {1}" -f $step, $_.Exception.Message)
     exit 1
