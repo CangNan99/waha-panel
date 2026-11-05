@@ -122,7 +122,20 @@ def infer_customer_language_from_history(history_or_context):
     """Infer the latest language used by the customer, ignoring agent replies."""
     customer_texts = []
     if isinstance(history_or_context, (list, tuple)):
-        for item in history_or_context:
+        items = list(history_or_context)
+        if items and all(
+            isinstance(item, dict) and (item.get("timestamp") is not None or item.get("created_at") is not None)
+            for item in items
+        ):
+            def history_time(item):
+                value = item.get("timestamp", item.get("created_at", 0))
+                try:
+                    return float(value)
+                except (TypeError, ValueError):
+                    return 0.0
+            items = sorted(enumerate(items), key=lambda pair: (history_time(pair[1]), pair[0]))
+            items = [item for _index, item in items]
+        for item in items:
             if _is_customer_history_item(item):
                 text = _history_message_text(item).strip()
                 if text:
