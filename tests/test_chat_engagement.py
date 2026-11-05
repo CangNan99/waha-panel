@@ -652,6 +652,18 @@ class AutomationSchedulerTests(unittest.TestCase):
             self.assertEqual(task["created_at"], 10_000)
             self.assertEqual(task["due_at"], 10_000 + seconds)
 
+    def test_stable_client_request_id_reuses_matching_system_task(self):
+        first = self.automation.create_task(
+            "default", self.chat_ref, "12h", "FIXED", "请告诉我测试体验。",
+            client_request_id="iptv-manual-follow-up:card-1",
+        )
+        second = self.automation.create_task(
+            "default", self.chat_ref, "12h", "FIXED", "请告诉我测试体验。",
+            client_request_id="iptv-manual-follow-up:card-1",
+        )
+        self.assertEqual(first["id"], second["id"])
+        self.assertEqual(self.automation.list_tasks("default", self.chat_ref)["items"], [first])
+
     def test_creation_validates_inputs_and_encrypts_sensitive_values(self):
         with self.assertRaises(AutomationError):
             self.automation.create_task("default", self.chat_ref, "30m", "AI")

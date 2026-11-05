@@ -162,10 +162,32 @@ class IptvIntegrationTests(unittest.TestCase):
         self.assertEqual(events, ['delivered', 'labelled'])
         self.assertEqual(self.system_labels(), [('default', 'IPTV测试过')])
 
+    def _follow_up_rows(self):
+        with closing(sqlite3.connect(self.db)) as connection:
+            connection.row_factory = sqlite3.Row
+            return [dict(row) for row in connection.execute(
+                "SELECT delay_code,mode,client_request_id,fixed_copy_ciphertext,state FROM follow_up_tasks ORDER BY id"
+            )]
+
+    def test_manual_card_success_adds_label_and_12h_follow_up_once(self):
+        card = self.state.iptv.create_manual_card(
+            'default', 'manual@c.us', 'manual-card-1', '99', 'manual-request-1', 'en'
+        )
+        self.state.iptv.mark_manual_delivery(card['id'], True)
+        self.state.record_iptv_manual_delivery_success('default', 'manual@c.us', card)
+        self.state.record_iptv_manual_delivery_success('default', 'manual@c.us', card)
+        self.assertEqual(self.system_labels(), [('default', 'IPTV测试过')])
+        rows = self._follow_up_rows()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual((rows[0]['delay_code'], rows[0]['mode'], rows[0]['state']), ('12h', 'FIXED', 'PENDING'))
+        self.assertEqual(rows[0]['client_request_id'], 'iptv-manual-follow-up:' + card['id'])
+        self.assertNotIn('测试体验', rows[0]['fixed_copy_ciphertext'])
+
     def test_delivery_failure_and_unknown_creation_do_not_add_system_label(self):
         with patch.object(self.state, '_send_text', side_effect=TimeoutError()):
             self.assertEqual(self.run_event()['action'], 'ignored')
         self.assertEqual(self.system_labels(), [])
+        self.assertEqual(self._follow_up_rows(), [])
         with patch.object(self.supplier, 'create_trial', side_effect=IptvError('upstream_unknown', '结果未知', uncertain=True)):
             self.assertEqual(self.run_event(identity='other@c.us', message_id='event-other')['action'], 'ignored')
         self.assertEqual(self.system_labels(), [])

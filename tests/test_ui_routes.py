@@ -176,6 +176,9 @@ class UIRouteTests(unittest.TestCase):
         self.state.client.fail_send = False
         self.assertEqual(len(self.state.iptv.retry_due_once(send_callback=self.state._send_text)), 1)
         self.assertEqual(len(self.state.client.sent), 1)
+        with closing(sqlite3.connect(self.database)) as connection:
+            self.assertEqual(connection.execute("SELECT label FROM customer_system_labels").fetchall(), [('IPTV测试过',)])
+            self.assertEqual(connection.execute("SELECT delay_code,mode FROM follow_up_tasks").fetchall(), [('12h', 'FIXED')])
 
     def test_concurrent_manual_replay_sends_one_message(self):
         self.state.save_settings({'iptv': {'api_key': 'synthetic-provider-key', 'pack': 'all',

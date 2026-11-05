@@ -37,6 +37,7 @@ try:
         classify_trial_intent,
         explicit_trial_request,
         infer_trial_language,
+        infer_customer_language_from_history,
     )
 except ImportError:
     from iptv_service import (
@@ -46,6 +47,7 @@ except ImportError:
         classify_trial_intent,
         explicit_trial_request,
         infer_trial_language,
+        infer_customer_language_from_history,
     )
 
 try:
@@ -1083,6 +1085,7 @@ class PanelState:
             send_callback=self._send_text,
             label_callback=self._iptv_retry_label,
             retry_allowed=self._iptv_retry_allowed,
+            manual_delivery_callback=self.record_iptv_manual_delivery_success,
         )
         self.csrf_token = derive_csrf_token(secret)
         self.chat = ChatService(
@@ -1198,6 +1201,32 @@ class PanelState:
         if self.chat is None:
             return
         self.chat.add_system_label_by_chat_id(session_name, chat_id, 'IPTV测试过')
+
+    def record_iptv_manual_delivery_success(self, session_name, chat_id, card):
+        """Persist post-delivery label and one translated experience follow-up."""
+        if self.chat is None or self.automation is None:
+            return None
+        session = normalize_session_name(session_name or DEFAULT_SESSION_NAME)
+        customer = str(chat_id or '').strip()
+        card_id = str((card or {}).get('id') or '').strip()
+        if not customer or not card_id:
+            return None
+        try:
+            self.chat.add_system_label_by_chat_id(session, customer, 'IPTV测试过')
+        except Exception:
+            self.log('WARN', 'iptv.system_label_failed', '手动卡密已发送，系统标签写入失败（LABEL_WRITE_FAILED）', session)
+        # This source copy is encrypted by ChatAutomationService and is translated
+        # only when the 12-hour task is actually due.
+        fixed_copy = '你好，想了解一下你体验 IPTV 测试账号的效果怎么样？播放是否正常？如果有任何问题，请告诉我。'
+        try:
+            chat_ref = self.chat._encode_chat(session, customer)
+            return self.automation.create_task(
+                session, chat_ref, '12h', 'FIXED', fixed_copy,
+                client_request_id='iptv-manual-follow-up:' + card_id,
+            )
+        except Exception:
+            self.log('WARN', 'iptv.follow_up_failed', '手动卡密已发送，体验跟进任务创建失败（FOLLOW_UP_CREATE_FAILED）', session)
+            return None
 
     def end_translation_request(self):
         self._translation_slots.release()
@@ -3862,11 +3891,24 @@ class PanelHandler(BaseHTTPRequestHandler):
             chat_id = chat._decode_chat(name, chat_ref)
             language = payload.get("language", "auto")
             if language == "auto":
+                history = []
                 try:
-                    context = self.state._conversation_context(chat_id, session_name=name)
+                    history.extend(self.state._context_rows(name, chat_id, "inbound", 20, None))
                 except Exception:
-                    context = ""
-                language = infer_trial_language("", context)
+                    pass
+                try:
+                    history.extend(chat.history_for_id(name, chat_id, 20))
+                except Exception:
+                    pass
+                if history:
+                    language = infer_customer_language_from_history(history)
+                else:
+                    try:
+                        language = infer_customer_language_from_history(
+                            self.state._conversation_context(chat_id, session_name=name)
+                        )
+                    except Exception:
+                        language = "en"
             card = self.state.iptv.create_manual_card(
                 name,
                 chat_id,
@@ -3877,6 +3919,7 @@ class PanelHandler(BaseHTTPRequestHandler):
             )
             with self.state.iptv.delivery_attempt("manual", card["id"]):
                 if self.state.iptv.delivery_state("manual", card["id"]) == "sent":
+                    self.state.record_iptv_manual_delivery_success(name, chat_id, card)
                     self.send_json({"status": "sent", "card_id": card["id"]})
                     return
                 try:
@@ -3892,6 +3935,7 @@ class PanelHandler(BaseHTTPRequestHandler):
                     self.send_json({"status": "send_retrying", "card_id": card["id"]}, HTTPStatus.ACCEPTED)
                     return
                 self.state.iptv.mark_manual_delivery(card["id"], True)
+                self.state.record_iptv_manual_delivery_success(name, chat_id, card)
                 chat.broker.publish(name, {"type": "refresh", "reason": action})
                 self.state.log("INFO", "iptv.manual_sent", "已发送手动 IPTV 卡密", name)
                 self.send_json({"status": "sent", "card_id": card["id"]})

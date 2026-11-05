@@ -328,7 +328,8 @@ class ActivationClient:
 
 class IptvService:
     def __init__(self, database_path, cipher, hmac_secret, clock=None, client_factory=None,
-                 send_callback=None, label_callback=None, retry_allowed=None):
+                 send_callback=None, label_callback=None, retry_allowed=None,
+                 manual_delivery_callback=None):
         self.database_path = str(database_path)
         self.cipher = cipher
         self._secret = bytes(hmac_secret)
@@ -337,6 +338,7 @@ class IptvService:
         self.send_callback = send_callback
         self.label_callback = label_callback
         self.retry_allowed = retry_allowed
+        self.manual_delivery_callback = manual_delivery_callback
         self._external_secret_lock = threading.Lock()
         self._external_secret_cache = (None, ())
         self._retry_lock = threading.Lock()
@@ -754,9 +756,20 @@ class IptvService:
                                (int(self.clock()), str(card_id)))
         self._enqueue_retry('manual', card_id, 'send', session, chat_id, language or row['language'], 'send_failed')
 
-    def retry_due_once(self, send_callback=None, label_callback=None):
+    def _notify_manual_delivery_success(self, callback, session, chat_id, card):
+        if not callback:
+            return
+        try:
+            callback(session, chat_id, card)
+        except Exception:
+            # Delivery is already confirmed; a bookkeeping failure must never
+            # make the retry worker send the card again.
+            return
+
+    def retry_due_once(self, send_callback=None, label_callback=None, manual_delivery_callback=None):
         callback = send_callback or self.send_callback
         label = label_callback or self.label_callback
+        manual_success = manual_delivery_callback or self.manual_delivery_callback
         now = int(self.clock())
         if not self._retry_lock.acquire(blocking=False):
             return []
@@ -847,6 +860,8 @@ class IptvService:
                                   'subscription': record['subscription'], 'language': record['language'], 'reused': True}
                         with self.delivery_attempt('manual', record['id']):
                             if self.delivery_state('manual', record['id']) == 'sent':
+                                if manual_success:
+                                    self._notify_manual_delivery_success(manual_success, retry['session_name'], chat_id, result)
                                 self._clear_retry('manual', record['id'])
                                 processed.append(record['id'])
                                 continue
@@ -856,6 +871,8 @@ class IptvService:
                                 connection.execute("UPDATE iptv_manual_cards SET state='sent',error_code='',updated_at=? WHERE id=?",
                                                    (now, record['id']))
                             self._clear_retry('manual', record['id'])
+                            if manual_success:
+                                self._notify_manual_delivery_success(manual_success, record['session_name'], chat_id, result)
                         processed.append(record['id'])
                 except IptvError as error:
                     if retry['record_type'] == 'automatic' and retry_phase == 'create':
