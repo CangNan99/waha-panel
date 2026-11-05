@@ -2,6 +2,7 @@ import base64
 import html
 import hashlib
 import hmac
+import io
 import json
 import os
 import random
@@ -23,6 +24,8 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, quote, unquote, urlencode, urljoin, urlparse
 from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
+
+from PIL import Image
 
 try:
     from .auto_reply_policy import AutoReplyPolicy, active_window_start, message_timestamp
@@ -171,6 +174,7 @@ DEFAULT_SETTINGS = {
     "auto_reply_delay_scale": "100",
     "human_takeover_resume_delay": "5h",
     "customer_memory_enabled": "0",
+    "auto_reply_image_vision": "0",
     "auto_reply_media_types": json.dumps(
         {"image": False, "video": False, "audio": False, "file": False},
         ensure_ascii=False,
@@ -201,6 +205,13 @@ DEFAULT_AUTO_REPLY_MEDIA_TYPES = {
 }
 CONTEXT_CHARACTER_LIMIT = 12000
 MAX_AVATAR_BYTES = 2 * 1024 * 1024
+MAX_AI_IMAGE_BYTES = 10 * 1024 * 1024
+MAX_AI_IMAGE_PIXELS = 40_000_000
+AI_IMAGE_TYPES = {
+    "JPEG": "image/jpeg",
+    "PNG": "image/png",
+    "WEBP": "image/webp",
+}
 TRUSTED_AVATAR_HOSTS = frozenset({"pps.whatsapp.net", "mmg.whatsapp.net"})
 SESSION_AVATAR_CACHE_LIMIT = 32
 SESSION_AVATAR_TTL_SECONDS = 24 * 60 * 60
@@ -1501,6 +1512,7 @@ class PanelState:
                 values.get("human_takeover_resume_delay", DEFAULT_HUMAN_TAKEOVER_RESUME_DELAY)
             ),
             "customer_memory_enabled": as_bool(values.get("customer_memory_enabled", "0")),
+            "auto_reply_image_vision": as_bool(values.get("auto_reply_image_vision", "0")),
             "auto_reply_media_types": normalize_media_types(
                 values.get("auto_reply_media_types", DEFAULT_AUTO_REPLY_MEDIA_TYPES)
             ),
@@ -1552,6 +1564,10 @@ class PanelState:
         if "customer_memory_enabled" in payload:
             updates["customer_memory_enabled"] = (
                 "1" if as_bool(payload["customer_memory_enabled"]) else "0"
+            )
+        if "auto_reply_image_vision" in payload:
+            updates["auto_reply_image_vision"] = (
+                "1" if as_bool(payload["auto_reply_image_vision"]) else "0"
             )
         if "auto_reply_enabled" in payload:
             updates["auto_reply_enabled"] = "1" if as_bool(payload["auto_reply_enabled"]) else "0"
@@ -2188,8 +2204,107 @@ class PanelState:
             )
         return content
 
+    @staticmethod
+    def _decode_ai_image_data(value):
+        """Decode a bounded WAHA image payload without retaining the raw input."""
+        if isinstance(value, (bytes, bytearray, memoryview)):
+            return bytes(value)
+        if isinstance(value, dict):
+            return PanelState._decode_ai_image_data(
+                value.get("data") or value.get("base64") or value.get("content")
+            )
+        if not isinstance(value, str):
+            return None
+        encoded = value.strip()
+        if encoded.lower().startswith("data:"):
+            header, separator, encoded = encoded.partition(",")
+            if not separator or ";base64" not in header.lower():
+                return None
+        encoded = re.sub(r"\s+", "", encoded)
+        if not encoded or len(encoded) > ((MAX_AI_IMAGE_BYTES + 2) * 4 // 3 + 16):
+            return None
+        try:
+            return base64.b64decode(encoded, validate=True)
+        except (ValueError, TypeError):
+            return None
+
+    @classmethod
+    def _validated_ai_image_content(cls, raw):
+        if not isinstance(raw, (bytes, bytearray, memoryview)):
+            raise ValueError("图片数据格式无效")
+        body = bytes(raw)
+        if not body or len(body) > MAX_AI_IMAGE_BYTES:
+            raise ValueError("图片超过面板读取限制")
+        try:
+            with Image.open(io.BytesIO(body)) as image:
+                image_format = str(image.format or "").upper()
+                mime_type = AI_IMAGE_TYPES.get(image_format)
+                if not mime_type:
+                    raise ValueError("图片格式不受支持")
+                width, height = image.size
+                if width <= 0 or height <= 0 or width * height > MAX_AI_IMAGE_PIXELS:
+                    raise ValueError("图片像素超过面板处理限制")
+                image.verify()
+        except ValueError:
+            raise
+        except Exception as error:
+            raise ValueError("图片内容无法校验") from error
+        return {
+            "mime_type": mime_type,
+            "data": base64.b64encode(body).decode("ascii"),
+        }
+
+    def _load_ai_image_content(self, session_name, chat_id, message_id, message):
+        """Fetch and validate a customer image for a multimodal AI request."""
+        initial_payload = message if isinstance(message, dict) else {}
+        raw_candidate = None
+        media_url = ""
+
+        def collect(payload):
+            nonlocal raw_candidate, media_url
+            if not isinstance(payload, dict):
+                return
+            media = payload.get("media") if isinstance(payload.get("media"), dict) else {}
+            for item in (media, payload):
+                if not isinstance(item, dict):
+                    continue
+                media_url = media_url or str(item.get("url") or item.get("mediaUrl") or "").strip()
+                if raw_candidate is None:
+                    for key in ("data", "base64", "content"):
+                        if key in item and item.get(key) not in (None, ""):
+                            raw_candidate = item.get(key)
+                            break
+
+        collect(initial_payload)
+        if raw_candidate is None and not media_url:
+            get_message = getattr(self.client, "get_message", None)
+            if not callable(get_message):
+                raise ValueError("WAHA 未提供消息媒体读取接口")
+            fetched = get_message(session_name, chat_id, message_id, download_media=True)
+            collect(fetched)
+
+        raw = self._decode_ai_image_data(raw_candidate)
+        if raw is None and media_url.lower().startswith("data:"):
+            raw = self._decode_ai_image_data(media_url)
+        if raw is None and media_url:
+            get_media_bytes = getattr(self.client, "get_media_bytes", None)
+            if not callable(get_media_bytes):
+                raise ValueError("WAHA 未提供媒体下载接口")
+            result = get_media_bytes(media_url, max_bytes=MAX_AI_IMAGE_BYTES)
+            if not isinstance(result, (tuple, list)) or len(result) != 3:
+                raise ValueError("WAHA 媒体响应格式无效")
+            status, _content_type, body = result
+            try:
+                status_code = int(status)
+            except (TypeError, ValueError):
+                status_code = 0
+            if status_code and not 200 <= status_code < 300:
+                raise ValueError("WAHA 媒体读取失败")
+            raw = body
+        return self._validated_ai_image_content(raw)
+
     def _ai_reply(self, settings, incoming_text, customer_id=None, conversation_context="", include_tools=False,
-                  session_name=DEFAULT_SESSION_NAME):
+                  session_name=DEFAULT_SESSION_NAME, image_content=None):
         name = normalize_session_name(session_name)
         base_url = settings.get("ai_base_url", "").strip()
         model = settings.get("ai_model", "").strip()
@@ -2239,6 +2354,11 @@ class PanelState:
             ) if business_context else "",
             business_rules if business_context else "",
         ) if part]
+        if isinstance(image_content, dict):
+            system_parts.append(
+                "客户发送了一张图片。请结合图片内容、图片说明和当前对话上下文回答；"
+                "无法确定图片内容时明确说明，不要编造图片中不存在的信息。"
+            )
         iptv_enabled = bool(include_tools and self.iptv is not None and self.iptv.settings_payload(name)["enabled"])
         if iptv_enabled:
             system_parts.append(
@@ -2251,11 +2371,26 @@ class PanelState:
                 "sends the real credentials after the tool succeeds. Do not include a customer ID, "
                 "package, duration, API key or password in tool arguments."
             )
+        user_content = incoming_text
+        if isinstance(image_content, dict):
+            mime_type = str(image_content.get("mime_type") or "image/png").strip().lower()
+            image_data = str(image_content.get("data") or "").strip()
+            if image_data:
+                user_content = [
+                    {"type": "text", "text": incoming_text or "请识别客户发送的图片并结合上下文回复。"},
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:{mime_type};base64,{image_data}",
+                            "detail": "auto",
+                        },
+                    },
+                ]
         request_payload = {
             "model": model,
             "messages": [
                 {"role": "system", "content": "\n\n".join(system_parts)},
-                {"role": "user", "content": incoming_text},
+                {"role": "user", "content": user_content},
             ],
         }
         tools = []
@@ -2290,8 +2425,23 @@ class PanelState:
             request_payload["tools"] = tools
         if self.iptv is not None:
             try:
-                request_payload["messages"] = [{**message, "content": self.iptv.sanitize_external_text(message["content"])}
-                                               for message in request_payload["messages"]]
+                sanitized_messages = []
+                for message in request_payload["messages"]:
+                    content = message.get("content")
+                    if isinstance(content, str):
+                        content = self.iptv.sanitize_external_text(content)
+                    elif isinstance(content, list):
+                        content = [
+                            {
+                                **part,
+                                "text": self.iptv.sanitize_external_text(part.get("text", "")),
+                            }
+                            if isinstance(part, dict) and part.get("type") == "text"
+                            else part
+                            for part in content
+                        ]
+                    sanitized_messages.append({**message, "content": content})
+                request_payload["messages"] = sanitized_messages
             except IptvError:
                 return "", "ai_sensitive_context_unavailable"
         payload = json.dumps(request_payload).encode("utf-8")
@@ -2608,14 +2758,29 @@ class PanelState:
                       if self.iptv is not None and self.iptv.settings_payload(session_name)["enabled"] else None)
         if self.iptv is not None:
             incoming_for_ai = self.iptv.sanitize_context(chat_id, incoming_for_ai, session=session_name)
-        reply, mode = self._ai_reply(
-            settings,
-            incoming_for_ai,
-            customer_id=chat_id,
-            conversation_context=context,
-            include_tools=True,
-            session_name=session_name,
-        )
+        image_content = None
+        if media_kind == "image" and as_bool(settings.get("auto_reply_image_vision", "0")):
+            try:
+                image_content = self._load_ai_image_content(
+                    session_name, chat_id, message_id, message
+                )
+            except Exception:
+                # Never put image bytes, provider URLs, or adapter diagnostics in logs.
+                self.log(
+                    "WARN",
+                    "ai.image",
+                    "AI_IMAGE_UNAVAILABLE：客户图片无法读取或校验，已回退为图片标记",
+                    session_name,
+                )
+        ai_kwargs = {
+            "customer_id": chat_id,
+            "conversation_context": context,
+            "include_tools": True,
+            "session_name": session_name,
+        }
+        if image_content is not None:
+            ai_kwargs["image_content"] = image_content
+        reply, mode = self._ai_reply(settings, incoming_for_ai, **ai_kwargs)
         if mode == "iptv_trial_tool":
             return self._execute_iptv_trial(session_name, chat_id, message_id, original_timestamp,
                 ticket, iptv_token, reply, incoming_for_ai, context, dispatch)
@@ -3435,6 +3600,7 @@ def settings_page():
              <div class="range-field"><label for="replyDelayScale"><span>自动回复延迟强度</span><output id="replyDelayScaleValue" for="replyDelayScale">100 · 当前默认</output></label><input id="replyDelayScale" type="range" min="0" max="120" step="5" value="100" aria-valuenow="100" aria-valuetext="100% · 当前默认"><div class="section-note" id="replyDelayExplanation">100% 使用当前热对话、冷对话和输入模拟延迟。</div></div>
             <div class="range-field"><label for="humanTakeoverResumeDelay"><span>人工接管后恢复 AI</span><output id="humanTakeoverResumeDelayValue" for="humanTakeoverResumeDelay">5 小时</output></label><input id="humanTakeoverResumeDelay" type="range" min="0" max="3" step="1" value="3" aria-valuenow="3" aria-valuetext="5 小时"><div class="section-note" id="humanTakeoverResumeDelayExplanation">人工接管或成功发送人工消息后，按此时间自动恢复 AI 回复。</div></div>
             <div class="switch"><label class="check-label" for="customerMemoryEnabled"><input id="customerMemoryEnabled" type="checkbox">启用客户动态记忆</label><span id="customerMemoryState" class="status-chip off">已关闭</span></div><div class="section-note">按客户保存加密的对话摘要、需求偏好和有效人工回复经验，用于后续 AI 回复；关闭后保留已有记忆并停止更新和使用。</div>
+            <div class="switch"><label class="check-label" for="autoReplyImageVision"><input id="autoReplyImageVision" type="checkbox">启用 AI 图片识别（多模态）</label><span id="autoReplyImageVisionState" class="status-chip off">已关闭</span></div><div class="section-note">仅在图片媒体开关开启且当前模型支持多模态时，把客户图片发送给 AI；图片字节不会写入聊天归档。</div>
             <fieldset class="media-options"><legend>可触发自动回复的客户媒体</legend><div class="section-note">默认关闭；仅处理私聊客户消息，开启后才会处理对应媒体类型。</div><label for="autoReplyMedia_image"><input id="autoReplyMedia_image" type="checkbox">图片</label><label for="autoReplyMedia_video"><input id="autoReplyMedia_video" type="checkbox">视频</label><label for="autoReplyMedia_audio"><input id="autoReplyMedia_audio" type="checkbox">音频</label><label for="autoReplyMedia_file"><input id="autoReplyMedia_file" type="checkbox">文件</label></fieldset>
             <label for="persona">人设</label><textarea id="persona" maxlength="4000"></textarea>
             <label for="systemPrompt">系统提示词</label><textarea id="systemPrompt" maxlength="8000"></textarea>
@@ -3532,19 +3698,19 @@ def settings_page():
     function humanTakeoverResumeDelayCode() { const index = Math.max(0, Math.min(humanTakeoverResumeOptions.length - 1, Number($('humanTakeoverResumeDelay').value) || 0)); return humanTakeoverResumeOptions[index].code; }
     function collectMediaTypes() { return Object.fromEntries(mediaTypeNames.map((name) => [name, $('autoReplyMedia_' + name).checked])); }
     function setChip(id, checked) { $(id).textContent = checked ? '已开启' : '已关闭'; $(id).className = 'status-chip' + (checked ? '' : ' off'); }
-    function setEnabledState() { setChip('enabledState', $('enabled').checked); setChip('allDayState', $('allDay').checked); setChip('customerMemoryState', $('customerMemoryEnabled').checked); }
+    function setEnabledState() { setChip('enabledState', $('enabled').checked); setChip('allDayState', $('allDay').checked); setChip('customerMemoryState', $('customerMemoryEnabled').checked); setChip('autoReplyImageVisionState', $('autoReplyImageVision').checked); }
     function applyTheme(theme) { const selected = ['daylight','night'].includes(theme) ? theme : 'daylight'; document.documentElement.dataset.theme = selected; $('themeSelect').value = selected; localStorage.setItem('waha-panel-theme', selected); }
     async function ensureCsrf() { if (csrfToken) return csrfToken; const response = await fetch('/api/security/csrf', {cache:'no-store', credentials:'same-origin'}); const data = await response.json(); if (!response.ok) throw new Error(data.message || '安全校验不可用'); csrfToken = data.csrf_token || ''; return csrfToken; }
     async function mutateFetch(url, options={}) { const headers = new Headers(options.headers || {}); try { await ensureCsrf(); } catch (_) {} if (csrfToken) headers.set('X-CSRF-Token', csrfToken); return fetch(url, {...options, headers, credentials:'same-origin', cache:'no-store'}); }
     async function saveTheme(theme) { applyTheme(theme); try { const response = await mutateFetch('/api/settings' + sessionQuery, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({theme})}); if (!response.ok) { const data = await response.json(); throw new Error(data.message || '主题保存失败'); } } catch (error) { $('settingsNotice').textContent = error.message; } }
-    async function loadSettings() { const response = await fetch('/api/settings' + sessionQuery, {cache:'no-store'}); const data = await response.json(); if (!response.ok) throw new Error(data.message || '读取设置失败'); $('enabled').checked = data.auto_reply_enabled; $('allDay').checked = data.auto_reply_all_day; $('customerMemoryEnabled').checked = Boolean(data.customer_memory_enabled); setEnabledState(); renderSchedule(data.weekly_reply_windows); $('contextPerSide').value = String(data.auto_reply_context_per_side ?? 5); renderContextCount(); loadedReplyDelayScale = Math.max(0, Math.min(120, Number(data.auto_reply_delay_scale ?? 100) || 100)); renderReplyDelayScale(loadedReplyDelayScale); loadedHumanTakeoverResumeDelay = String(data.human_takeover_resume_delay || '5h'); renderHumanTakeoverResumeDelay(loadedHumanTakeoverResumeDelay); for (const name of mediaTypeNames) $('autoReplyMedia_' + name).checked = Boolean(data.auto_reply_media_types?.[name]); $('persona').value = data.persona || ''; $('systemPrompt').value = data.system_prompt || ''; $('aiBaseUrl').value = data.ai_base_url || ''; $('aiModel').value = data.ai_model || ''; $('keyState').textContent = data.ai_api_key_configured ? 'APIKey：已配置（隐藏）' : 'APIKey：未配置'; applyTheme(data.theme); renderIptvSettings(data.iptv); loadIptvRecords(); }
-    async function saveSettings(event) { event.preventDefault(); const button = $('saveButton'); button.disabled = true; $('settingsNotice').textContent = ''; renderContextCount(); const previousReplyDelayScale = loadedReplyDelayScale; const previousHumanTakeoverResumeDelay = loadedHumanTakeoverResumeDelay; try { const body = {auto_reply_enabled:$('enabled').checked,auto_reply_all_day:$('allDay').checked,customer_memory_enabled:$('customerMemoryEnabled').checked,weekly_reply_windows:collectWindows(),auto_reply_context_per_side:Number($('contextPerSide').value),auto_reply_delay_scale:Number($('replyDelayScale').value),human_takeover_resume_delay:humanTakeoverResumeDelayCode(),auto_reply_media_types:collectMediaTypes(),persona:$('persona').value,system_prompt:$('systemPrompt').value,ai_base_url:$('aiBaseUrl').value,ai_model:$('aiModel').value,ai_api_key:$('aiKey').value,clear_ai_api_key:$('clearKey').checked,theme:$('themeSelect').value}; if (iptvAvailable) body.iptv = collectIptvSettings(); const response = await mutateFetch('/api/settings' + sessionQuery, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}); const data = await response.json(); if (!response.ok) throw new Error(data.message || '保存失败'); loadedReplyDelayScale = Math.max(0, Math.min(120, Number(data.auto_reply_delay_scale ?? body.auto_reply_delay_scale) || 100)); renderReplyDelayScale(loadedReplyDelayScale); loadedHumanTakeoverResumeDelay = String(data.human_takeover_resume_delay || body.human_takeover_resume_delay); renderHumanTakeoverResumeDelay(loadedHumanTakeoverResumeDelay); $('aiKey').value = ''; $('clearKey').checked = false; $('iptvKey').value = ''; $('clearIptvKey').checked = false; renderIptvSettings(data.iptv); loadIptvRecords(); $('keyState').textContent = data.ai_api_key_configured ? 'APIKey：已配置（隐藏）' : 'APIKey：未配置'; $('settingsNotice').className = 'notice success'; $('settingsNotice').textContent = '设置已保存'; delete document.body.dataset.dirty; } catch (error) { loadedReplyDelayScale = previousReplyDelayScale; renderReplyDelayScale(previousReplyDelayScale); loadedHumanTakeoverResumeDelay = previousHumanTakeoverResumeDelay; renderHumanTakeoverResumeDelay(previousHumanTakeoverResumeDelay); $('settingsNotice').className = 'notice'; $('settingsNotice').textContent = error.message; } finally { button.disabled = false; } }
+    async function loadSettings() { const response = await fetch('/api/settings' + sessionQuery, {cache:'no-store'}); const data = await response.json(); if (!response.ok) throw new Error(data.message || '读取设置失败'); $('enabled').checked = data.auto_reply_enabled; $('allDay').checked = data.auto_reply_all_day; $('customerMemoryEnabled').checked = Boolean(data.customer_memory_enabled); $('autoReplyImageVision').checked = Boolean(data.auto_reply_image_vision); setEnabledState(); renderSchedule(data.weekly_reply_windows); $('contextPerSide').value = String(data.auto_reply_context_per_side ?? 5); renderContextCount(); loadedReplyDelayScale = Math.max(0, Math.min(120, Number(data.auto_reply_delay_scale ?? 100) || 100)); renderReplyDelayScale(loadedReplyDelayScale); loadedHumanTakeoverResumeDelay = String(data.human_takeover_resume_delay || '5h'); renderHumanTakeoverResumeDelay(loadedHumanTakeoverResumeDelay); for (const name of mediaTypeNames) $('autoReplyMedia_' + name).checked = Boolean(data.auto_reply_media_types?.[name]); $('persona').value = data.persona || ''; $('systemPrompt').value = data.system_prompt || ''; $('aiBaseUrl').value = data.ai_base_url || ''; $('aiModel').value = data.ai_model || ''; $('keyState').textContent = data.ai_api_key_configured ? 'APIKey：已配置（隐藏）' : 'APIKey：未配置'; applyTheme(data.theme); renderIptvSettings(data.iptv); loadIptvRecords(); }
+    async function saveSettings(event) { event.preventDefault(); const button = $('saveButton'); button.disabled = true; $('settingsNotice').textContent = ''; renderContextCount(); const previousReplyDelayScale = loadedReplyDelayScale; const previousHumanTakeoverResumeDelay = loadedHumanTakeoverResumeDelay; try { const body = {auto_reply_enabled:$('enabled').checked,auto_reply_all_day:$('allDay').checked,customer_memory_enabled:$('customerMemoryEnabled').checked,auto_reply_image_vision:$('autoReplyImageVision').checked,weekly_reply_windows:collectWindows(),auto_reply_context_per_side:Number($('contextPerSide').value),auto_reply_delay_scale:Number($('replyDelayScale').value),human_takeover_resume_delay:humanTakeoverResumeDelayCode(),auto_reply_media_types:collectMediaTypes(),persona:$('persona').value,system_prompt:$('systemPrompt').value,ai_base_url:$('aiBaseUrl').value,ai_model:$('aiModel').value,ai_api_key:$('aiKey').value,clear_ai_api_key:$('clearKey').checked,theme:$('themeSelect').value}; if (iptvAvailable) body.iptv = collectIptvSettings(); const response = await mutateFetch('/api/settings' + sessionQuery, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}); const data = await response.json(); if (!response.ok) throw new Error(data.message || '保存失败'); loadedReplyDelayScale = Math.max(0, Math.min(120, Number(data.auto_reply_delay_scale ?? body.auto_reply_delay_scale) || 100)); renderReplyDelayScale(loadedReplyDelayScale); loadedHumanTakeoverResumeDelay = String(data.human_takeover_resume_delay || body.human_takeover_resume_delay); renderHumanTakeoverResumeDelay(loadedHumanTakeoverResumeDelay); $('aiKey').value = ''; $('clearKey').checked = false; $('iptvKey').value = ''; $('clearIptvKey').checked = false; renderIptvSettings(data.iptv); loadIptvRecords(); $('keyState').textContent = data.ai_api_key_configured ? 'APIKey：已配置（隐藏）' : 'APIKey：未配置'; $('settingsNotice').className = 'notice success'; $('settingsNotice').textContent = '设置已保存'; delete document.body.dataset.dirty; } catch (error) { loadedReplyDelayScale = previousReplyDelayScale; renderReplyDelayScale(previousReplyDelayScale); loadedHumanTakeoverResumeDelay = previousHumanTakeoverResumeDelay; renderHumanTakeoverResumeDelay(previousHumanTakeoverResumeDelay); $('settingsNotice').className = 'notice'; $('settingsNotice').textContent = error.message; } finally { button.disabled = false; } }
     async function addKnowledge(name, content) { $('knowledgeNotice').textContent = ''; const response = await mutateFetch('/api/knowledge' + sessionQuery, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({file_name:name,content})}); const data = await response.json(); if (!response.ok) throw new Error(data.message || '资料保存失败'); $('knowledgeText').value = ''; await loadKnowledge(); }
     async function loadKnowledge() { const response = await fetch('/api/knowledge' + sessionQuery, {cache:'no-store'}); const data = await response.json(); if (!response.ok) throw new Error(data.message || '资料读取失败'); $('knowledgeList').innerHTML = data.items.length ? data.items.map(item => `<div class="knowledge-item"><div><div class="knowledge-name">${esc(item.file_name)}</div><div class="knowledge-meta">${item.characters} 字符 · ${new Date(item.created_at * 1000).toLocaleString()}</div></div><div class="knowledge-actions"><button type="button" data-view="${item.id}">查看</button><button type="button" class="danger" data-delete="${item.id}">删除</button></div></div>`).join('') : '<div class="muted">暂无资料</div>'; document.querySelectorAll('[data-view]').forEach(button => button.addEventListener('click', () => viewKnowledge(button.dataset.view))); document.querySelectorAll('[data-delete]').forEach(button => button.addEventListener('click', () => deleteKnowledge(button.dataset.delete))); }
     async function viewKnowledge(id) { const response = await fetch('/api/knowledge/' + id + sessionQuery, {cache:'no-store'}); const data = await response.json(); if (!response.ok) throw new Error(data.message || '资料读取失败'); $('knowledgePreview').hidden = false; $('knowledgePreview').textContent = data.content; }
     async function deleteKnowledge(id) { if (!window.confirm('确认删除这份资料？')) return; const response = await mutateFetch('/api/knowledge/' + id + sessionQuery, {method:'DELETE'}); const data = await response.json(); if (!response.ok) throw new Error(data.message || '删除失败'); $('knowledgePreview').hidden = true; await loadKnowledge(); }
     $('contextPerSide').addEventListener('input', renderContextCount); $('replyDelayScale').addEventListener('input', (event) => renderReplyDelayScale(event.target.value)); $('humanTakeoverResumeDelay').addEventListener('input', (event) => { loadedHumanTakeoverResumeDelay = renderHumanTakeoverResumeDelay(humanTakeoverResumeOptions[Number(event.target.value)]?.code || '5h'); }); renderContextCount(); renderReplyDelayScale(loadedReplyDelayScale); renderHumanTakeoverResumeDelay(loadedHumanTakeoverResumeDelay);
-    const storedTheme = localStorage.getItem('waha-panel-theme'); if (storedTheme) applyTheme(storedTheme); $('themeSelect').addEventListener('change', (event) => saveTheme(event.target.value)); $('enabled').addEventListener('change', setEnabledState); $('allDay').addEventListener('change', setEnabledState); $('customerMemoryEnabled').addEventListener('change', setEnabledState); $('settingsForm').addEventListener('submit', saveSettings); $('checkIptv').addEventListener('click', checkIptv); $('refreshIptvRecords').addEventListener('click', loadIptvRecords); $('addKnowledge').addEventListener('click', async () => { try { await addKnowledge($('knowledgeName').value || '粘贴文字', $('knowledgeText').value); } catch (error) { $('knowledgeNotice').textContent = error.message; } }); $('knowledgeFile').addEventListener('change', () => { const file = $('knowledgeFile').files[0]; if (!file) return; if (!/[.]txt$|[.]md$/i.test(file.name)) { $('knowledgeNotice').textContent = '仅支持 .txt 或 .md 文件'; return; } const reader = new FileReader(); reader.onload = async () => { try { await addKnowledge(file.name, reader.result); $('knowledgeFile').value = ''; } catch (error) { $('knowledgeNotice').textContent = error.message; } }; reader.readAsText(file); });
+    const storedTheme = localStorage.getItem('waha-panel-theme'); if (storedTheme) applyTheme(storedTheme); $('themeSelect').addEventListener('change', (event) => saveTheme(event.target.value)); $('enabled').addEventListener('change', setEnabledState); $('allDay').addEventListener('change', setEnabledState); $('customerMemoryEnabled').addEventListener('change', setEnabledState); $('autoReplyImageVision').addEventListener('change', setEnabledState); $('settingsForm').addEventListener('submit', saveSettings); $('checkIptv').addEventListener('click', checkIptv); $('refreshIptvRecords').addEventListener('click', loadIptvRecords); $('addKnowledge').addEventListener('click', async () => { try { await addKnowledge($('knowledgeName').value || '粘贴文字', $('knowledgeText').value); } catch (error) { $('knowledgeNotice').textContent = error.message; } }); $('knowledgeFile').addEventListener('change', () => { const file = $('knowledgeFile').files[0]; if (!file) return; if (!/[.]txt$|[.]md$/i.test(file.name)) { $('knowledgeNotice').textContent = '仅支持 .txt 或 .md 文件'; return; } const reader = new FileReader(); reader.onload = async () => { try { await addKnowledge(file.name, reader.result); $('knowledgeFile').value = ''; } catch (error) { $('knowledgeNotice').textContent = error.message; } }; reader.readAsText(file); });
     loadSettings().catch(error => { $('settingsNotice').textContent = error.message; }); loadKnowledge().catch(error => { $('knowledgeNotice').textContent = error.message; });
   </script>
 </body>

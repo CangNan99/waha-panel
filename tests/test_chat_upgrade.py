@@ -431,6 +431,12 @@ class SettingsAndContextTests(UpgradeTestCase):
 
 
 class SettingsApiTests(UpgradeTestCase):
+    def test_image_vision_setting_round_trips_per_session(self):
+        saved = self.state.save_settings({"auto_reply_image_vision": True}, "sales")
+        self.assertTrue(saved["auto_reply_image_vision"])
+        self.assertFalse(self.state.settings_payload("default")["auto_reply_image_vision"])
+        self.assertTrue(self.state.settings_payload("sales")["auto_reply_image_vision"])
+
     def test_context_and_media_settings_round_trip_per_session(self):
         saved = self.state.save_settings(
             {
@@ -459,6 +465,9 @@ class SettingsApiTests(UpgradeTestCase):
         self.assertIn("auto_reply_context_per_side", page)
         self.assertIn("auto_reply_media_types", page)
         self.assertIn('id="customerMemoryEnabled"', page)
+        self.assertIn('id="autoReplyImageVision"', page)
+        self.assertIn("auto_reply_image_vision", page)
+        self.assertIn("多模态", page)
         self.assertIn("customer_memory_enabled", page)
         self.assertIn("APIKey：已配置（隐藏）", page)
 
@@ -719,6 +728,29 @@ class WebhookArchiveTests(UpgradeTestCase):
                 "AND content='测试回复'"
             ).fetchone()[0]
         self.assertEqual(origin, "auto_ai")
+
+    def test_enabled_image_vision_fetches_customer_image_without_archiving_bytes(self):
+        self.state.save_settings({
+            "auto_reply_media_types": {"image": True},
+            "auto_reply_image_vision": True,
+        })
+        image = PNG_1X1
+        self.client.get_message = lambda *_args, **_kwargs: {
+            "media": {"url": "http://waha.local/media/image-1", "mimetype": "image/png"},
+        }
+        self.client.get_media_bytes = lambda *_args, **_kwargs: (200, "image/png", image)
+        captured = {}
+        def fake_reply(_settings, _incoming, **kwargs):
+            captured.update(kwargs)
+            return "测试回复", "ai"
+        self.state._ai_reply = fake_reply
+        result = self.state.handle_webhook(
+            self.event(body="请看这张图", message_type="image", has_media=True, message_id="vision-1")
+        )
+        self.assertEqual(result["action"], "replied")
+        self.assertEqual(captured["image_content"]["mime_type"], "image/png")
+        self.assertEqual(base64.b64decode(captured["image_content"]["data"]), image)
+        self.assertNotIn(base64.b64encode(image).decode("ascii"), json.dumps(self.messages_for("chat-1@c.us")))
 
     def test_media_setting_controls_trigger_but_keeps_metadata(self):
         self.state.save_settings({"auto_reply_media_types": {"image": True}})

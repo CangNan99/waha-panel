@@ -178,6 +178,35 @@ class AutoReplyPolicyTests(unittest.TestCase):
         self.assertEqual(self.state.handle_webhook(self.event())["action"], "ignored")
         self.assertEqual(self.client.sent, [])
 
+    def test_ai_reply_sends_openai_compatible_multimodal_image_part(self):
+        self.state.save_settings({
+            "ai_base_url": "https://ai.example/v1",
+            "ai_model": "vision-model",
+            "ai_api_key": "synthetic-ai-key",
+        })
+        captured = []
+        response = io.BytesIO(json.dumps({
+            "choices": [{"message": {"content": "我看到了图片"}, "finish_reason": "stop"}]
+        }).encode())
+        def transport(request, timeout):
+            captured.append(json.loads(request.data.decode("utf-8")))
+            return response
+        with patch("panel.app.urlopen", side_effect=transport):
+            reply, mode = self.state._ai_reply(
+                self.state._settings(),
+                "客户发送了一张图片",
+                image_content={"mime_type": "image/png", "data": "aGVsbG8="},
+            )
+        self.assertEqual((reply, mode), ("我看到了图片", "ai"))
+        user_content = captured[0]["messages"][1]["content"]
+        self.assertIsInstance(user_content, list)
+        self.assertEqual(user_content[0], {"type": "text", "text": "客户发送了一张图片"})
+        self.assertEqual(user_content[1]["type"], "image_url")
+        self.assertEqual(
+            user_content[1]["image_url"]["url"],
+            "data:image/png;base64,aGVsbG8=",
+        )
+
     def test_ai_payment_required_is_classified_without_exposing_key(self):
         self.state.save_settings({
             "ai_base_url": "https://ai.example/v1",
