@@ -2,6 +2,7 @@ import base64
 import html
 import hashlib
 import hmac
+import io
 import json
 import os
 import random
@@ -24,15 +25,33 @@ from urllib.parse import parse_qs, quote, unquote, urlencode, urljoin, urlparse
 from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
 
+from PIL import Image
+
 try:
     from .auto_reply_policy import AutoReplyPolicy, active_window_start, message_timestamp
 except ImportError:
     from auto_reply_policy import AutoReplyPolicy, active_window_start, message_timestamp
 
 try:
-    from .iptv_service import IptvService, IptvError, LANGUAGES as IPTV_LANGUAGES, explicit_trial_request
+    from .iptv_service import (
+        IptvService,
+        IptvError,
+        LANGUAGES as IPTV_LANGUAGES,
+        classify_trial_intent,
+        explicit_trial_request,
+        infer_trial_language,
+        infer_customer_language_from_history,
+    )
 except ImportError:
-    from iptv_service import IptvService, IptvError, LANGUAGES as IPTV_LANGUAGES, explicit_trial_request
+    from iptv_service import (
+        IptvService,
+        IptvError,
+        LANGUAGES as IPTV_LANGUAGES,
+        classify_trial_intent,
+        explicit_trial_request,
+        infer_trial_language,
+        infer_customer_language_from_history,
+    )
 
 try:
     from .monitoring_service import MonitoringService, safe_log_message
@@ -153,7 +172,9 @@ DEFAULT_SETTINGS = {
     "theme": "daylight",
     "auto_reply_context_per_side": "5",
     "auto_reply_delay_scale": "100",
+    "human_takeover_resume_delay": "5h",
     "customer_memory_enabled": "0",
+    "auto_reply_image_vision": "0",
     "auto_reply_media_types": json.dumps(
         {"image": False, "video": False, "audio": False, "file": False},
         ensure_ascii=False,
@@ -168,6 +189,13 @@ CONTEXT_PER_SIDE_MAX = 50
 REPLY_DELAY_SCALE_MIN = 0
 REPLY_DELAY_SCALE_MAX = 120
 DEFAULT_REPLY_DELAY_SCALE = 100
+HUMAN_TAKEOVER_RESUME_SECONDS = {
+    "10m": 10 * 60,
+    "30m": 30 * 60,
+    "1h": 60 * 60,
+    "5h": 5 * 60 * 60,
+}
+DEFAULT_HUMAN_TAKEOVER_RESUME_DELAY = "5h"
 MEDIA_TYPE_KEYS = ("image", "video", "audio", "file")
 DEFAULT_AUTO_REPLY_MEDIA_TYPES = {
     "image": False,
@@ -177,10 +205,89 @@ DEFAULT_AUTO_REPLY_MEDIA_TYPES = {
 }
 CONTEXT_CHARACTER_LIMIT = 12000
 MAX_AVATAR_BYTES = 2 * 1024 * 1024
+MAX_AI_IMAGE_BYTES = 10 * 1024 * 1024
+MAX_AI_IMAGE_PIXELS = 40_000_000
+AI_IMAGE_TYPES = {
+    "JPEG": "image/jpeg",
+    "PNG": "image/png",
+    "WEBP": "image/webp",
+}
 TRUSTED_AVATAR_HOSTS = frozenset({"pps.whatsapp.net", "mmg.whatsapp.net"})
 SESSION_AVATAR_CACHE_LIMIT = 32
 SESSION_AVATAR_TTL_SECONDS = 24 * 60 * 60
 SESSION_AVATAR_NEGATIVE_TTL_SECONDS = 30
+
+
+class AIUpstreamError(RuntimeError):
+    """Safe, typed failure for the configured OpenAI-compatible provider."""
+
+    def __init__(self, code, public_message, status=0, retryable=False):
+        self.code = str(code)
+        self.public_message = str(public_message)
+        self.status = int(status or 0)
+        self.retryable = bool(retryable)
+        super().__init__(self.public_message)
+
+
+def _map_ai_error(error):
+    if isinstance(error, AIUpstreamError):
+        return error
+    if isinstance(error, HTTPError):
+        try:
+            status = int(error.code)
+        except (TypeError, ValueError):
+            status = 0
+        if status == 402:
+            return AIUpstreamError(
+                "AI_PAYMENT_REQUIRED",
+                "AI 服务余额或订阅不可用，请充值、恢复订阅或更换可用配置",
+                status=status,
+                retryable=False,
+            )
+        if status in {401, 403}:
+            return AIUpstreamError(
+                "AI_AUTH_ERROR",
+                "AI 服务认证或权限配置无效，请检查 API Key 和访问权限",
+                status=status,
+                retryable=False,
+            )
+        if status in {408, 429} or status >= 500:
+            return AIUpstreamError(
+                "AI_UPSTREAM_ERROR",
+                "AI 服务暂时不可用，请稍后重试",
+                status=status,
+                retryable=True,
+            )
+        return AIUpstreamError(
+            "AI_UPSTREAM_ERROR",
+            "AI 服务请求失败，请检查服务地址和响应状态",
+            status=status,
+            retryable=False,
+        )
+    if isinstance(error, (TimeoutError, URLError, ConnectionError)):
+        return AIUpstreamError(
+            "AI_CONNECTION_ERROR",
+            "AI 服务暂时无法连接，请稍后重试",
+            retryable=True,
+        )
+    if isinstance(error, (json.JSONDecodeError, UnicodeDecodeError, KeyError, IndexError, TypeError, ValueError, AttributeError)):
+        return AIUpstreamError(
+            "AI_RESPONSE_INVALID",
+            "AI 服务返回内容格式无效，请检查模型配置",
+            retryable=False,
+        )
+    return AIUpstreamError(
+        "AI_UPSTREAM_ERROR",
+        "AI 服务请求失败，请稍后重试",
+        retryable=True,
+    )
+
+
+def _ai_error_log_message(error):
+    suffix = f"（HTTP {error.status}）" if getattr(error, "status", 0) else ""
+    return str(getattr(error, "code", "AI_UPSTREAM_ERROR")) + suffix
+
+
 SENSITIVE_NAME = re.compile(
     r"(?i)(api[_-]?key|password|token|secret|authorization)\s*([:=])\s*([^\s,;}&]+)"
 )
@@ -245,6 +352,15 @@ def normalize_reply_delay_scale(value, default=DEFAULT_REPLY_DELAY_SCALE):
         return parse_reply_delay_scale(value)
     except (TypeError, ValueError):
         return default
+
+
+def normalize_human_takeover_resume_delay(value, default=DEFAULT_HUMAN_TAKEOVER_RESUME_DELAY):
+    code = str(value or "").strip().lower()
+    if code in HUMAN_TAKEOVER_RESUME_SECONDS:
+        return code
+    if default is not None:
+        return default
+    raise ValueError("人工接管自动恢复时间无效")
 
 
 def normalize_media_types(value, strict=False):
@@ -465,6 +581,37 @@ def ensure_multi_session_schema(connection):
     connection.execute("PRAGMA foreign_keys = ON")
 
 
+def ensure_follow_up_delay_schema(connection):
+    """Upgrade the follow-up table CHECK constraint without losing tasks."""
+    migration_path = Path(__file__).with_name("migrations") / "017_follow_up_delay_codes.sql"
+    row = connection.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='follow_up_tasks'"
+    ).fetchone()
+    schema_sql = str(row[0] or "") if row else ""
+    required_codes = ("'1h'", "'2h'", "'3h'", "'6h'", "'12h'")
+    if row and all(code in schema_sql for code in required_codes):
+        connection.executescript(migration_path.read_text(encoding="utf-8"))
+        return
+    if row:
+        legacy_name = "follow_up_tasks__legacy_delay"
+        connection.execute(f"DROP TABLE IF EXISTS {legacy_name}")
+        connection.execute("DROP INDEX IF EXISTS idx_follow_up_due")
+        connection.execute("DROP INDEX IF EXISTS idx_follow_up_chat")
+        connection.execute(f"ALTER TABLE follow_up_tasks RENAME TO {legacy_name}")
+        connection.executescript(migration_path.read_text(encoding="utf-8"))
+        columns = (
+            "id,session_name,chat_key_hmac,chat_id_ciphertext,created_at,due_at,updated_at,"
+            "delay_code,mode,fixed_copy_ciphertext,state,skip_reason,error_code,error_message,"
+            "waha_message_id,client_request_id,claimed_at,completed_at"
+        )
+        connection.execute(
+            f"INSERT INTO follow_up_tasks({columns}) SELECT {columns} FROM {legacy_name}"
+        )
+        connection.execute(f"DROP TABLE {legacy_name}")
+    else:
+        connection.executescript(migration_path.read_text(encoding="utf-8"))
+
+
 def init_db(path, seed_business=True):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -528,6 +675,7 @@ def init_db(path, seed_business=True):
         connection.executescript(chat_metadata_migration.read_text(encoding="utf-8"))
         engagement_migration = Path(__file__).with_name("migrations") / "007_chat_engagement.sql"
         connection.executescript(engagement_migration.read_text(encoding="utf-8"))
+        ensure_follow_up_delay_schema(connection)
         _add_column_if_missing(
             connection,
             "conversation_messages",
@@ -881,7 +1029,7 @@ class PanelState:
         self.admin_service = AdminService(self.database_path)
         self._admin_db_auth = as_bool(os.environ.get("PANEL_ADMIN_DB_AUTH", "0"))
         self._update_service = UpdateService(
-            current_panel=os.environ.get("PANEL_VERSION", "1.0.19"),
+            current_panel=os.environ.get("PANEL_VERSION", "1.0.21"),
             current_waha=os.environ.get("WAHA_IMAGE_TAG", "latest-2026.9.1"),
         )
         self.sleep_fn = sleep_fn or time.sleep
@@ -1012,7 +1160,16 @@ class PanelState:
         ).digest()
         codec = ReferenceCodec(cipher)
         self.data_cipher = cipher
-        self.iptv = IptvService(self.database_path, cipher, secret, clock=self.clock)
+        self.iptv = IptvService(
+            self.database_path,
+            cipher,
+            secret,
+            clock=self.clock,
+            send_callback=self._send_text,
+            label_callback=self._iptv_retry_label,
+            retry_allowed=self._iptv_retry_allowed,
+            manual_delivery_callback=self.record_iptv_manual_delivery_success,
+        )
         self.csrf_token = derive_csrf_token(secret)
         self.chat = ChatService(
             self.database_path,
@@ -1026,6 +1183,7 @@ class PanelState:
             outbound_recorder=self._record_outbound_message,
             takeover_changed=self.reply_policy.chat_changed,
             takeover_lock=self.reply_policy.lock,
+            settings_loader=self._settings,
         )
         self.translation = TranslationService(
             self.database_path,
@@ -1078,6 +1236,8 @@ class PanelState:
         return self.chat
 
     def start_background_services(self):
+        if self.iptv is not None and hasattr(self.iptv, "start"):
+            self.iptv.start()
         memory = self.memory
         if memory is not None and hasattr(memory, "start"):
             memory.start()
@@ -1086,6 +1246,8 @@ class PanelState:
             automation.start()
 
     def stop_background_services(self):
+        if self.iptv is not None and hasattr(self.iptv, "stop"):
+            self.iptv.stop()
         memory = self.memory
         if memory is not None and hasattr(memory, "stop"):
             memory.stop()
@@ -1105,6 +1267,49 @@ class PanelState:
             raise TranslationError("AI_BUSY", "已有两项 AI 请求正在处理，请稍后重试")
         with self._translation_limit_lock:
             self._translation_request_times.append(now)
+
+    def _iptv_retry_allowed(self, session_name, chat_id, record_type):
+        try:
+            if session_record(self.client.get_sessions(), session_name) is None:
+                return 'deleted'
+            if record_type == 'manual':
+                return self.chat is not None
+            if self.iptv is None or not self.iptv.settings_payload(session_name).get('enabled'):
+                return False
+            return self.chat is None or not self.chat.is_human_takeover(session_name, chat_id)
+        except Exception:
+            return False
+
+    def _iptv_retry_label(self, session_name, chat_id):
+        if self.chat is None:
+            return
+        self.chat.add_system_label_by_chat_id(session_name, chat_id, 'IPTV测试过')
+
+    def record_iptv_manual_delivery_success(self, session_name, chat_id, card):
+        """Persist post-delivery label and one translated experience follow-up."""
+        if self.chat is None or self.automation is None:
+            return None
+        session = normalize_session_name(session_name or DEFAULT_SESSION_NAME)
+        customer = str(chat_id or '').strip()
+        card_id = str((card or {}).get('id') or '').strip()
+        if not customer or not card_id:
+            return None
+        try:
+            self.chat.add_system_label_by_chat_id(session, customer, 'IPTV测试过')
+        except Exception:
+            self.log('WARN', 'iptv.system_label_failed', '手动卡密已发送，系统标签写入失败（LABEL_WRITE_FAILED）', session)
+        # This source copy is encrypted by ChatAutomationService and is translated
+        # only when the 12-hour task is actually due.
+        fixed_copy = '你好，想了解一下你体验 IPTV 测试账号的效果怎么样？播放是否正常？如果有任何问题，请告诉我。'
+        try:
+            chat_ref = self.chat._encode_chat(session, customer)
+            return self.automation.create_task(
+                session, chat_ref, '12h', 'FIXED', fixed_copy,
+                client_request_id='iptv-manual-follow-up:' + card_id,
+            )
+        except Exception:
+            self.log('WARN', 'iptv.follow_up_failed', '手动卡密已发送，体验跟进任务创建失败（FOLLOW_UP_CREATE_FAILED）', session)
+            return None
 
     def end_translation_request(self):
         self._translation_slots.release()
@@ -1303,7 +1508,11 @@ class PanelState:
             "auto_reply_delay_scale": normalize_reply_delay_scale(
                 values.get("auto_reply_delay_scale", DEFAULT_REPLY_DELAY_SCALE)
             ),
+            "human_takeover_resume_delay": normalize_human_takeover_resume_delay(
+                values.get("human_takeover_resume_delay", DEFAULT_HUMAN_TAKEOVER_RESUME_DELAY)
+            ),
             "customer_memory_enabled": as_bool(values.get("customer_memory_enabled", "0")),
+            "auto_reply_image_vision": as_bool(values.get("auto_reply_image_vision", "0")),
             "auto_reply_media_types": normalize_media_types(
                 values.get("auto_reply_media_types", DEFAULT_AUTO_REPLY_MEDIA_TYPES)
             ),
@@ -1342,6 +1551,10 @@ class PanelState:
             updates["auto_reply_context_per_side"] = str(context_count)
         if "auto_reply_delay_scale" in payload:
             updates["auto_reply_delay_scale"] = str(parse_reply_delay_scale(payload["auto_reply_delay_scale"]))
+        if "human_takeover_resume_delay" in payload:
+            updates["human_takeover_resume_delay"] = normalize_human_takeover_resume_delay(
+                payload["human_takeover_resume_delay"], default=None
+            )
         if "auto_reply_media_types" in payload:
             updates["auto_reply_media_types"] = json.dumps(
                 normalize_media_types(payload["auto_reply_media_types"], strict=True),
@@ -1351,6 +1564,10 @@ class PanelState:
         if "customer_memory_enabled" in payload:
             updates["customer_memory_enabled"] = (
                 "1" if as_bool(payload["customer_memory_enabled"]) else "0"
+            )
+        if "auto_reply_image_vision" in payload:
+            updates["auto_reply_image_vision"] = (
+                "1" if as_bool(payload["auto_reply_image_vision"]) else "0"
             )
         if "auto_reply_enabled" in payload:
             updates["auto_reply_enabled"] = "1" if as_bool(payload["auto_reply_enabled"]) else "0"
@@ -1724,7 +1941,7 @@ class PanelState:
             return [
                 dict(row)
                 for row in connection.execute(
-                    "SELECT id,direction,message_id,content,created_at FROM conversation_messages "
+                    "SELECT id,direction,message_id,content,created_at,origin FROM conversation_messages "
                     "WHERE session_name=? AND chat_id=? AND direction=? "
                     "AND (? IS NULL OR message_id IS NULL OR message_id != ?) "
                     "ORDER BY id DESC LIMIT ?",
@@ -1746,6 +1963,14 @@ class PanelState:
         lines = [
             ("客户" if row["direction"] == "inbound" else "客服")
             + "："
+            + (
+                "[IPTV_TRIAL_INVITATION] "
+                if row["direction"] == "outbound"
+                and str(row.get("origin") or "") == "auto_ai"
+                and re.search(r"\biptv\b", str(row["content"] or ""), re.I)
+                and re.search(r"试用|测试|体验|\b(?:trial|test|try)\b", str(row["content"] or ""), re.I)
+                else ""
+            )
             + str(row["content"] or "").strip()
             for row in rows
             if str(row["content"] or "").strip()
@@ -1928,7 +2153,11 @@ class PanelState:
         model = str(settings.get("ai_model") or "").strip()
         api_key = str(settings.get("ai_api_key") or "")
         if not (base_url and model and api_key):
-            raise RuntimeError("AI_MEMORY_CONFIG_MISSING")
+            raise AIUpstreamError(
+                "AI_CONFIG_MISSING",
+                "AI 模型配置不完整，请填写服务地址、模型名和 API Key",
+                retryable=False,
+            )
         endpoint = (
             base_url
             if base_url.rstrip("/").endswith("/chat/completions")
@@ -1956,18 +2185,132 @@ class PanelState:
             },
             method="POST",
         )
-        with urlopen(request, timeout=30) as response:
-            result = json.loads(response.read().decode("utf-8"))
-        return result["choices"][0]["message"].get("content") or ""
+        try:
+            with urlopen(request, timeout=30) as response:
+                result = json.loads(response.read().decode("utf-8"))
+            content = result["choices"][0]["message"].get("content")
+        except (
+            HTTPError, URLError, TimeoutError, ConnectionError,
+            json.JSONDecodeError, UnicodeDecodeError, KeyError, IndexError,
+            TypeError, ValueError, AttributeError,
+        ) as error:
+            mapped = _map_ai_error(error)
+            raise mapped from error
+        if not isinstance(content, str) or not content.strip():
+            raise AIUpstreamError(
+                "AI_RESPONSE_INVALID",
+                "AI 服务返回内容格式无效，请检查模型配置",
+                retryable=False,
+            )
+        return content
+
+    @staticmethod
+    def _decode_ai_image_data(value):
+        """Decode a bounded WAHA image payload without retaining the raw input."""
+        if isinstance(value, (bytes, bytearray, memoryview)):
+            return bytes(value)
+        if isinstance(value, dict):
+            return PanelState._decode_ai_image_data(
+                value.get("data") or value.get("base64") or value.get("content")
+            )
+        if not isinstance(value, str):
+            return None
+        encoded = value.strip()
+        if encoded.lower().startswith("data:"):
+            header, separator, encoded = encoded.partition(",")
+            if not separator or ";base64" not in header.lower():
+                return None
+        encoded = re.sub(r"\s+", "", encoded)
+        if not encoded or len(encoded) > ((MAX_AI_IMAGE_BYTES + 2) * 4 // 3 + 16):
+            return None
+        try:
+            return base64.b64decode(encoded, validate=True)
+        except (ValueError, TypeError):
+            return None
+
+    @classmethod
+    def _validated_ai_image_content(cls, raw):
+        if not isinstance(raw, (bytes, bytearray, memoryview)):
+            raise ValueError("图片数据格式无效")
+        body = bytes(raw)
+        if not body or len(body) > MAX_AI_IMAGE_BYTES:
+            raise ValueError("图片超过面板读取限制")
+        try:
+            with Image.open(io.BytesIO(body)) as image:
+                image_format = str(image.format or "").upper()
+                mime_type = AI_IMAGE_TYPES.get(image_format)
+                if not mime_type:
+                    raise ValueError("图片格式不受支持")
+                width, height = image.size
+                if width <= 0 or height <= 0 or width * height > MAX_AI_IMAGE_PIXELS:
+                    raise ValueError("图片像素超过面板处理限制")
+                image.verify()
+        except ValueError:
+            raise
+        except Exception as error:
+            raise ValueError("图片内容无法校验") from error
+        return {
+            "mime_type": mime_type,
+            "data": base64.b64encode(body).decode("ascii"),
+        }
+
+    def _load_ai_image_content(self, session_name, chat_id, message_id, message):
+        """Fetch and validate a customer image for a multimodal AI request."""
+        initial_payload = message if isinstance(message, dict) else {}
+        raw_candidate = None
+        media_url = ""
+
+        def collect(payload):
+            nonlocal raw_candidate, media_url
+            if not isinstance(payload, dict):
+                return
+            media = payload.get("media") if isinstance(payload.get("media"), dict) else {}
+            for item in (media, payload):
+                if not isinstance(item, dict):
+                    continue
+                media_url = media_url or str(item.get("url") or item.get("mediaUrl") or "").strip()
+                if raw_candidate is None:
+                    for key in ("data", "base64", "content"):
+                        if key in item and item.get(key) not in (None, ""):
+                            raw_candidate = item.get(key)
+                            break
+
+        collect(initial_payload)
+        if raw_candidate is None and not media_url:
+            get_message = getattr(self.client, "get_message", None)
+            if not callable(get_message):
+                raise ValueError("WAHA 未提供消息媒体读取接口")
+            fetched = get_message(session_name, chat_id, message_id, download_media=True)
+            collect(fetched)
+
+        raw = self._decode_ai_image_data(raw_candidate)
+        if raw is None and media_url.lower().startswith("data:"):
+            raw = self._decode_ai_image_data(media_url)
+        if raw is None and media_url:
+            get_media_bytes = getattr(self.client, "get_media_bytes", None)
+            if not callable(get_media_bytes):
+                raise ValueError("WAHA 未提供媒体下载接口")
+            result = get_media_bytes(media_url, max_bytes=MAX_AI_IMAGE_BYTES)
+            if not isinstance(result, (tuple, list)) or len(result) != 3:
+                raise ValueError("WAHA 媒体响应格式无效")
+            status, _content_type, body = result
+            try:
+                status_code = int(status)
+            except (TypeError, ValueError):
+                status_code = 0
+            if status_code and not 200 <= status_code < 300:
+                raise ValueError("WAHA 媒体读取失败")
+            raw = body
+        return self._validated_ai_image_content(raw)
 
     def _ai_reply(self, settings, incoming_text, customer_id=None, conversation_context="", include_tools=False,
-                  session_name=DEFAULT_SESSION_NAME):
+                  session_name=DEFAULT_SESSION_NAME, image_content=None):
         name = normalize_session_name(session_name)
         base_url = settings.get("ai_base_url", "").strip()
         model = settings.get("ai_model", "").strip()
         api_key = settings.get("ai_api_key", "")
         if not (base_url and model and api_key):
-            return "", "ai_unconfigured"
+            return "", "AI_CONFIG_MISSING"
         endpoint = base_url if base_url.rstrip("/").endswith("/chat/completions") else base_url.rstrip("/") + "/chat/completions"
         knowledge_context = self._knowledge_context(name)
         try:
@@ -2011,6 +2354,11 @@ class PanelState:
             ) if business_context else "",
             business_rules if business_context else "",
         ) if part]
+        if isinstance(image_content, dict):
+            system_parts.append(
+                "客户发送了一张图片。请结合图片内容、图片说明和当前对话上下文回答；"
+                "无法确定图片内容时明确说明，不要编造图片中不存在的信息。"
+            )
         iptv_enabled = bool(include_tools and self.iptv is not None and self.iptv.settings_payload(name)["enabled"])
         if iptv_enabled:
             system_parts.append(
@@ -2023,11 +2371,26 @@ class PanelState:
                 "sends the real credentials after the tool succeeds. Do not include a customer ID, "
                 "package, duration, API key or password in tool arguments."
             )
+        user_content = incoming_text
+        if isinstance(image_content, dict):
+            mime_type = str(image_content.get("mime_type") or "image/png").strip().lower()
+            image_data = str(image_content.get("data") or "").strip()
+            if image_data:
+                user_content = [
+                    {"type": "text", "text": incoming_text or "请识别客户发送的图片并结合上下文回复。"},
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:{mime_type};base64,{image_data}",
+                            "detail": "auto",
+                        },
+                    },
+                ]
         request_payload = {
             "model": model,
             "messages": [
                 {"role": "system", "content": "\n\n".join(system_parts)},
-                {"role": "user", "content": incoming_text},
+                {"role": "user", "content": user_content},
             ],
         }
         tools = []
@@ -2062,8 +2425,23 @@ class PanelState:
             request_payload["tools"] = tools
         if self.iptv is not None:
             try:
-                request_payload["messages"] = [{**message, "content": self.iptv.sanitize_external_text(message["content"])}
-                                               for message in request_payload["messages"]]
+                sanitized_messages = []
+                for message in request_payload["messages"]:
+                    content = message.get("content")
+                    if isinstance(content, str):
+                        content = self.iptv.sanitize_external_text(content)
+                    elif isinstance(content, list):
+                        content = [
+                            {
+                                **part,
+                                "text": self.iptv.sanitize_external_text(part.get("text", "")),
+                            }
+                            if isinstance(part, dict) and part.get("type") == "text"
+                            else part
+                            for part in content
+                        ]
+                    sanitized_messages.append({**message, "content": content})
+                request_payload["messages"] = sanitized_messages
             except IptvError:
                 return "", "ai_sensitive_context_unavailable"
         payload = json.dumps(request_payload).encode("utf-8")
@@ -2077,7 +2455,7 @@ class PanelState:
             choice = result["choices"][0]
             message_result = choice["message"]
             if message_result.get("refusal") or choice.get("finish_reason") not in (None, "stop", "tool_calls"):
-                return "", "ai_invalid_result"
+                return "", "AI_RESPONSE_INVALID"
             tool_calls = message_result.get("tool_calls") or []
             if tool_calls:
                 if not include_tools or not isinstance(tool_calls, list) or len(tool_calls) != 1:
@@ -2108,8 +2486,9 @@ class PanelState:
             reply = content.strip() if isinstance(content, str) else ""
             return (reply, "ai") if reply else ("", "ai_empty")
         except Exception as error:
-            self.log("ERROR", "ai.reply", redact_error(error, api_key), name)
-            return "", "ai_error"
+            mapped = _map_ai_error(error)
+            self.log("ERROR", "ai.reply", _ai_error_log_message(mapped), name)
+            return "", mapped.code
 
     def _execute_iptv_trial(self, session, chat_id, message_id, original_timestamp,
                             ticket, policy_token, arguments, incoming, context, dispatch):
@@ -2129,14 +2508,21 @@ class PanelState:
 
         result = None
         try:
-            result = self.iptv.create_trial(session, chat_id, message_id, allowed=allowed)
+            result = self.iptv.create_trial(session, chat_id, message_id, allowed=allowed, language=args["language"])
             reply = self.iptv.reply_text(result, args["language"])
-            with self.reply_policy.lock:
-                if not allowed():
-                    self.log("INFO", "iptv.cancelled", "试用已保存，发送前条件变化，取消发送", session)
-                    return {"action": "ignored", "reason": "发送前回复条件已变化", "session": session}
-                self._send_text(session, chat_id, reply, origin="iptv_trial")
-                self.iptv.mark_delivery(result["id"], True)
+            retry_was_pending = self.iptv.retry_pending("automatic", result["id"])
+            with self.iptv.delivery_attempt("automatic", result["id"]):
+                if retry_was_pending and self.iptv.delivery_state("automatic", result["id"]) == "sent":
+                    return {"action": "ignored", "reason": "IPTV 试用已发送", "session": session}
+                with self.reply_policy.lock:
+                    if not allowed():
+                        self.log("INFO", "iptv.cancelled", "试用已保存，发送前条件变化，取消发送", session)
+                        return {"action": "ignored", "reason": "发送前回复条件已变化", "session": session}
+                    self._send_text(session, chat_id, reply, origin="iptv_trial")
+                    try:
+                        self.iptv.mark_delivery(result["id"], True, session=session, chat_id=chat_id, language=args["language"])
+                    except TypeError:
+                        self.iptv.mark_delivery(result["id"], True)
             try:
                 self.chat.add_system_label_by_chat_id(session, chat_id, "IPTV测试过")
             except Exception:
@@ -2149,7 +2535,13 @@ class PanelState:
             self.log("WARN", "iptv." + error.code, error.public_message, session)
         except Exception:
             if result is not None:
-                self.iptv.mark_delivery(result["id"], False)
+                with self.iptv.delivery_attempt("automatic", result["id"]):
+                    if self.iptv.delivery_state("automatic", result["id"]) != "sent":
+                        try:
+                            self.iptv.mark_delivery(result["id"], False, session=session, chat_id=chat_id,
+                                                     language=(result.get("language") if isinstance(result, dict) else "en"))
+                        except TypeError:
+                            self.iptv.mark_delivery(result["id"], False)
             self.log("ERROR", "iptv.send_failed", "IPTV 发送结果未确认，已保留原试用记录", session)
         return {"action": "ignored", "reason": "IPTV 开通或发送未完成，请查看记录", "session": session}
 
@@ -2366,20 +2758,39 @@ class PanelState:
                       if self.iptv is not None and self.iptv.settings_payload(session_name)["enabled"] else None)
         if self.iptv is not None:
             incoming_for_ai = self.iptv.sanitize_context(chat_id, incoming_for_ai, session=session_name)
-        reply, mode = self._ai_reply(
-            settings,
-            incoming_for_ai,
-            customer_id=chat_id,
-            conversation_context=context,
-            include_tools=True,
-            session_name=session_name,
-        )
+        image_content = None
+        if media_kind == "image" and as_bool(settings.get("auto_reply_image_vision", "0")):
+            try:
+                image_content = self._load_ai_image_content(
+                    session_name, chat_id, message_id, message
+                )
+            except Exception:
+                # Never put image bytes, provider URLs, or adapter diagnostics in logs.
+                self.log(
+                    "WARN",
+                    "ai.image",
+                    "AI_IMAGE_UNAVAILABLE：客户图片无法读取或校验，已回退为图片标记",
+                    session_name,
+                )
+        ai_kwargs = {
+            "customer_id": chat_id,
+            "conversation_context": context,
+            "include_tools": True,
+            "session_name": session_name,
+        }
+        if image_content is not None:
+            ai_kwargs["image_content"] = image_content
+        reply, mode = self._ai_reply(settings, incoming_for_ai, **ai_kwargs)
         if mode == "iptv_trial_tool":
             return self._execute_iptv_trial(session_name, chat_id, message_id, original_timestamp,
                 ticket, iptv_token, reply, incoming_for_ai, context, dispatch)
-        if iptv_token and explicit_trial_request(incoming_for_ai, context):
-            self.log("INFO", "iptv.no_tool", "AI 未返回有效试用工具调用，跳过发送", session_name)
-            return {"action": "ignored", "reason": "AI 未返回有效试用工具调用", "session": session_name}
+        if iptv_token:
+            intent = classify_trial_intent(incoming_for_ai, context)
+            if intent.get("requested"):
+                self.log("INFO", "iptv.fallback", "AI 未返回工具调用，后端按明确测试请求兜底", session_name)
+                fallback_args = json.dumps({"language": intent.get("language") or infer_trial_language(incoming_for_ai, context)})
+                return self._execute_iptv_trial(session_name, chat_id, message_id, original_timestamp,
+                    ticket, iptv_token, fallback_args, incoming_for_ai, context, dispatch)
         if mode == "order_tool" and self.commerce_config.enabled:
             try:
                 tool_request = json.loads(reply)
@@ -3187,7 +3598,9 @@ def settings_page():
             <h3>每周回复时间段</h3><div class="section-note">开启上面的全局总开关时全天回复；否则仅在启用的时间段内回复。</div><div class="schedule" id="schedule"></div><p class="rule-note">结束时间早于开始时间表示跨天，例如 20:00 → 11:00，覆盖当日晚上及次日凌晨。</p>
             <div class="range-field"><label for="contextPerSide"><span>每一方的历史消息数</span><output id="contextPerSideValue" for="contextPerSide">5</output></label><input id="contextPerSide" type="range" min="5" max="50" step="1" value="5"><div class="section-note" id="contextExplanation">客户 5 条 + 自己 5 条，共最多 10 条历史上下文。</div></div>
              <div class="range-field"><label for="replyDelayScale"><span>自动回复延迟强度</span><output id="replyDelayScaleValue" for="replyDelayScale">100 · 当前默认</output></label><input id="replyDelayScale" type="range" min="0" max="120" step="5" value="100" aria-valuenow="100" aria-valuetext="100% · 当前默认"><div class="section-note" id="replyDelayExplanation">100% 使用当前热对话、冷对话和输入模拟延迟。</div></div>
+            <div class="range-field"><label for="humanTakeoverResumeDelay"><span>人工接管后恢复 AI</span><output id="humanTakeoverResumeDelayValue" for="humanTakeoverResumeDelay">5 小时</output></label><input id="humanTakeoverResumeDelay" type="range" min="0" max="3" step="1" value="3" aria-valuenow="3" aria-valuetext="5 小时"><div class="section-note" id="humanTakeoverResumeDelayExplanation">人工接管或成功发送人工消息后，按此时间自动恢复 AI 回复。</div></div>
             <div class="switch"><label class="check-label" for="customerMemoryEnabled"><input id="customerMemoryEnabled" type="checkbox">启用客户动态记忆</label><span id="customerMemoryState" class="status-chip off">已关闭</span></div><div class="section-note">按客户保存加密的对话摘要、需求偏好和有效人工回复经验，用于后续 AI 回复；关闭后保留已有记忆并停止更新和使用。</div>
+            <div class="switch"><label class="check-label" for="autoReplyImageVision"><input id="autoReplyImageVision" type="checkbox">启用 AI 图片识别（多模态）</label><span id="autoReplyImageVisionState" class="status-chip off">已关闭</span></div><div class="section-note">仅在图片媒体开关开启且当前模型支持多模态时，把客户图片发送给 AI；图片字节不会写入聊天归档。</div>
             <fieldset class="media-options"><legend>可触发自动回复的客户媒体</legend><div class="section-note">默认关闭；仅处理私聊客户消息，开启后才会处理对应媒体类型。</div><label for="autoReplyMedia_image"><input id="autoReplyMedia_image" type="checkbox">图片</label><label for="autoReplyMedia_video"><input id="autoReplyMedia_video" type="checkbox">视频</label><label for="autoReplyMedia_audio"><input id="autoReplyMedia_audio" type="checkbox">音频</label><label for="autoReplyMedia_file"><input id="autoReplyMedia_file" type="checkbox">文件</label></fieldset>
             <label for="persona">人设</label><textarea id="persona" maxlength="4000"></textarea>
             <label for="systemPrompt">系统提示词</label><textarea id="systemPrompt" maxlength="8000"></textarea>
@@ -3238,6 +3651,8 @@ def settings_page():
     let csrfToken = '';
     let iptvAvailable = false;
     let loadedReplyDelayScale = 100;
+    let loadedHumanTakeoverResumeDelay = '5h';
+    const humanTakeoverResumeOptions = [{code:'10m',label:'10 分钟'},{code:'30m',label:'30 分钟'},{code:'1h',label:'1 小时'},{code:'5h',label:'5 小时'}];
     function renderIptvSettings(data) {
       iptvAvailable = Boolean(data); $('iptvPanel').hidden = !iptvAvailable; if (!data) return;
       $('iptvEnabled').checked = Boolean(data.enabled); $('iptvPack').value = data.pack || 'all';
@@ -3279,21 +3694,23 @@ def settings_page():
     function collectWindows() { const result = {}; days.forEach(([key]) => { if ($(key+'Enabled').checked) result[key] = [{start:$(key+'Start').value,end:$(key+'End').value}]; }); return result; }
     function renderContextCount() { const count = Math.max(5, Math.min(50, Number($('contextPerSide').value) || 5)); $('contextPerSide').value = String(count); $('contextPerSideValue').textContent = String(count); $('contextExplanation').textContent = `客户 ${count} 条 + 自己 ${count} 条，共最多 ${count * 2} 条历史上下文。`; }
     function renderReplyDelayScale(value) { const scale = Math.max(0, Math.min(120, Number(value) || 0)); $('replyDelayScale').value = String(scale); $('replyDelayScaleValue').textContent = String(scale) + (scale === 100 ? ' · 当前默认' : ' · 延迟强度'); $('replyDelayScale').setAttribute('aria-valuenow', String(scale)); $('replyDelayScale').setAttribute('aria-valuetext', String(scale) + (scale === 100 ? '% · 当前默认' : '% · 延迟强度')); $('replyDelayExplanation').textContent = scale === 0 ? '0% 不等待，适合测试；不会改变人工发送和 IPTV 试用流程。' : String(scale) + '% 按比例缩放热对话、冷对话和输入模拟延迟。'; }
+    function renderHumanTakeoverResumeDelay(code) { const index = Math.max(0, humanTakeoverResumeOptions.findIndex(item => item.code === code)); const option = humanTakeoverResumeOptions[index] || humanTakeoverResumeOptions[3]; $('humanTakeoverResumeDelay').value = String(index); $('humanTakeoverResumeDelayValue').textContent = option.label; $('humanTakeoverResumeDelay').setAttribute('aria-valuenow', String(index)); $('humanTakeoverResumeDelay').setAttribute('aria-valuetext', option.label); $('humanTakeoverResumeDelayExplanation').textContent = '人工接管或成功发送人工消息后，' + option.label + '自动恢复 AI 回复。'; return option.code; }
+    function humanTakeoverResumeDelayCode() { const index = Math.max(0, Math.min(humanTakeoverResumeOptions.length - 1, Number($('humanTakeoverResumeDelay').value) || 0)); return humanTakeoverResumeOptions[index].code; }
     function collectMediaTypes() { return Object.fromEntries(mediaTypeNames.map((name) => [name, $('autoReplyMedia_' + name).checked])); }
     function setChip(id, checked) { $(id).textContent = checked ? '已开启' : '已关闭'; $(id).className = 'status-chip' + (checked ? '' : ' off'); }
-    function setEnabledState() { setChip('enabledState', $('enabled').checked); setChip('allDayState', $('allDay').checked); setChip('customerMemoryState', $('customerMemoryEnabled').checked); }
+    function setEnabledState() { setChip('enabledState', $('enabled').checked); setChip('allDayState', $('allDay').checked); setChip('customerMemoryState', $('customerMemoryEnabled').checked); setChip('autoReplyImageVisionState', $('autoReplyImageVision').checked); }
     function applyTheme(theme) { const selected = ['daylight','night'].includes(theme) ? theme : 'daylight'; document.documentElement.dataset.theme = selected; $('themeSelect').value = selected; localStorage.setItem('waha-panel-theme', selected); }
     async function ensureCsrf() { if (csrfToken) return csrfToken; const response = await fetch('/api/security/csrf', {cache:'no-store', credentials:'same-origin'}); const data = await response.json(); if (!response.ok) throw new Error(data.message || '安全校验不可用'); csrfToken = data.csrf_token || ''; return csrfToken; }
     async function mutateFetch(url, options={}) { const headers = new Headers(options.headers || {}); try { await ensureCsrf(); } catch (_) {} if (csrfToken) headers.set('X-CSRF-Token', csrfToken); return fetch(url, {...options, headers, credentials:'same-origin', cache:'no-store'}); }
     async function saveTheme(theme) { applyTheme(theme); try { const response = await mutateFetch('/api/settings' + sessionQuery, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({theme})}); if (!response.ok) { const data = await response.json(); throw new Error(data.message || '主题保存失败'); } } catch (error) { $('settingsNotice').textContent = error.message; } }
-    async function loadSettings() { const response = await fetch('/api/settings' + sessionQuery, {cache:'no-store'}); const data = await response.json(); if (!response.ok) throw new Error(data.message || '读取设置失败'); $('enabled').checked = data.auto_reply_enabled; $('allDay').checked = data.auto_reply_all_day; $('customerMemoryEnabled').checked = Boolean(data.customer_memory_enabled); setEnabledState(); renderSchedule(data.weekly_reply_windows); $('contextPerSide').value = String(data.auto_reply_context_per_side ?? 5); renderContextCount(); loadedReplyDelayScale = Math.max(0, Math.min(120, Number(data.auto_reply_delay_scale ?? 100) || 100)); renderReplyDelayScale(loadedReplyDelayScale); for (const name of mediaTypeNames) $('autoReplyMedia_' + name).checked = Boolean(data.auto_reply_media_types?.[name]); $('persona').value = data.persona || ''; $('systemPrompt').value = data.system_prompt || ''; $('aiBaseUrl').value = data.ai_base_url || ''; $('aiModel').value = data.ai_model || ''; $('keyState').textContent = data.ai_api_key_configured ? 'APIKey：已配置（隐藏）' : 'APIKey：未配置'; applyTheme(data.theme); renderIptvSettings(data.iptv); loadIptvRecords(); }
-    async function saveSettings(event) { event.preventDefault(); const button = $('saveButton'); button.disabled = true; $('settingsNotice').textContent = ''; renderContextCount(); const previousReplyDelayScale = loadedReplyDelayScale; try { const body = {auto_reply_enabled:$('enabled').checked,auto_reply_all_day:$('allDay').checked,customer_memory_enabled:$('customerMemoryEnabled').checked,weekly_reply_windows:collectWindows(),auto_reply_context_per_side:Number($('contextPerSide').value),auto_reply_delay_scale:Number($('replyDelayScale').value),auto_reply_media_types:collectMediaTypes(),persona:$('persona').value,system_prompt:$('systemPrompt').value,ai_base_url:$('aiBaseUrl').value,ai_model:$('aiModel').value,ai_api_key:$('aiKey').value,clear_ai_api_key:$('clearKey').checked,theme:$('themeSelect').value}; if (iptvAvailable) body.iptv = collectIptvSettings(); const response = await mutateFetch('/api/settings' + sessionQuery, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}); const data = await response.json(); if (!response.ok) throw new Error(data.message || '保存失败'); loadedReplyDelayScale = Math.max(0, Math.min(120, Number(data.auto_reply_delay_scale ?? body.auto_reply_delay_scale) || 100)); renderReplyDelayScale(loadedReplyDelayScale); $('aiKey').value = ''; $('clearKey').checked = false; $('iptvKey').value = ''; $('clearIptvKey').checked = false; renderIptvSettings(data.iptv); loadIptvRecords(); $('keyState').textContent = data.ai_api_key_configured ? 'APIKey：已配置（隐藏）' : 'APIKey：未配置'; $('settingsNotice').className = 'notice success'; $('settingsNotice').textContent = '设置已保存'; delete document.body.dataset.dirty; } catch (error) { loadedReplyDelayScale = previousReplyDelayScale; renderReplyDelayScale(previousReplyDelayScale); $('settingsNotice').className = 'notice'; $('settingsNotice').textContent = error.message; } finally { button.disabled = false; } }
+    async function loadSettings() { const response = await fetch('/api/settings' + sessionQuery, {cache:'no-store'}); const data = await response.json(); if (!response.ok) throw new Error(data.message || '读取设置失败'); $('enabled').checked = data.auto_reply_enabled; $('allDay').checked = data.auto_reply_all_day; $('customerMemoryEnabled').checked = Boolean(data.customer_memory_enabled); $('autoReplyImageVision').checked = Boolean(data.auto_reply_image_vision); setEnabledState(); renderSchedule(data.weekly_reply_windows); $('contextPerSide').value = String(data.auto_reply_context_per_side ?? 5); renderContextCount(); loadedReplyDelayScale = Math.max(0, Math.min(120, Number(data.auto_reply_delay_scale ?? 100) || 100)); renderReplyDelayScale(loadedReplyDelayScale); loadedHumanTakeoverResumeDelay = String(data.human_takeover_resume_delay || '5h'); renderHumanTakeoverResumeDelay(loadedHumanTakeoverResumeDelay); for (const name of mediaTypeNames) $('autoReplyMedia_' + name).checked = Boolean(data.auto_reply_media_types?.[name]); $('persona').value = data.persona || ''; $('systemPrompt').value = data.system_prompt || ''; $('aiBaseUrl').value = data.ai_base_url || ''; $('aiModel').value = data.ai_model || ''; $('keyState').textContent = data.ai_api_key_configured ? 'APIKey：已配置（隐藏）' : 'APIKey：未配置'; applyTheme(data.theme); renderIptvSettings(data.iptv); loadIptvRecords(); }
+    async function saveSettings(event) { event.preventDefault(); const button = $('saveButton'); button.disabled = true; $('settingsNotice').textContent = ''; renderContextCount(); const previousReplyDelayScale = loadedReplyDelayScale; const previousHumanTakeoverResumeDelay = loadedHumanTakeoverResumeDelay; try { const body = {auto_reply_enabled:$('enabled').checked,auto_reply_all_day:$('allDay').checked,customer_memory_enabled:$('customerMemoryEnabled').checked,auto_reply_image_vision:$('autoReplyImageVision').checked,weekly_reply_windows:collectWindows(),auto_reply_context_per_side:Number($('contextPerSide').value),auto_reply_delay_scale:Number($('replyDelayScale').value),human_takeover_resume_delay:humanTakeoverResumeDelayCode(),auto_reply_media_types:collectMediaTypes(),persona:$('persona').value,system_prompt:$('systemPrompt').value,ai_base_url:$('aiBaseUrl').value,ai_model:$('aiModel').value,ai_api_key:$('aiKey').value,clear_ai_api_key:$('clearKey').checked,theme:$('themeSelect').value}; if (iptvAvailable) body.iptv = collectIptvSettings(); const response = await mutateFetch('/api/settings' + sessionQuery, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}); const data = await response.json(); if (!response.ok) throw new Error(data.message || '保存失败'); loadedReplyDelayScale = Math.max(0, Math.min(120, Number(data.auto_reply_delay_scale ?? body.auto_reply_delay_scale) || 100)); renderReplyDelayScale(loadedReplyDelayScale); loadedHumanTakeoverResumeDelay = String(data.human_takeover_resume_delay || body.human_takeover_resume_delay); renderHumanTakeoverResumeDelay(loadedHumanTakeoverResumeDelay); $('aiKey').value = ''; $('clearKey').checked = false; $('iptvKey').value = ''; $('clearIptvKey').checked = false; renderIptvSettings(data.iptv); loadIptvRecords(); $('keyState').textContent = data.ai_api_key_configured ? 'APIKey：已配置（隐藏）' : 'APIKey：未配置'; $('settingsNotice').className = 'notice success'; $('settingsNotice').textContent = '设置已保存'; delete document.body.dataset.dirty; } catch (error) { loadedReplyDelayScale = previousReplyDelayScale; renderReplyDelayScale(previousReplyDelayScale); loadedHumanTakeoverResumeDelay = previousHumanTakeoverResumeDelay; renderHumanTakeoverResumeDelay(previousHumanTakeoverResumeDelay); $('settingsNotice').className = 'notice'; $('settingsNotice').textContent = error.message; } finally { button.disabled = false; } }
     async function addKnowledge(name, content) { $('knowledgeNotice').textContent = ''; const response = await mutateFetch('/api/knowledge' + sessionQuery, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({file_name:name,content})}); const data = await response.json(); if (!response.ok) throw new Error(data.message || '资料保存失败'); $('knowledgeText').value = ''; await loadKnowledge(); }
     async function loadKnowledge() { const response = await fetch('/api/knowledge' + sessionQuery, {cache:'no-store'}); const data = await response.json(); if (!response.ok) throw new Error(data.message || '资料读取失败'); $('knowledgeList').innerHTML = data.items.length ? data.items.map(item => `<div class="knowledge-item"><div><div class="knowledge-name">${esc(item.file_name)}</div><div class="knowledge-meta">${item.characters} 字符 · ${new Date(item.created_at * 1000).toLocaleString()}</div></div><div class="knowledge-actions"><button type="button" data-view="${item.id}">查看</button><button type="button" class="danger" data-delete="${item.id}">删除</button></div></div>`).join('') : '<div class="muted">暂无资料</div>'; document.querySelectorAll('[data-view]').forEach(button => button.addEventListener('click', () => viewKnowledge(button.dataset.view))); document.querySelectorAll('[data-delete]').forEach(button => button.addEventListener('click', () => deleteKnowledge(button.dataset.delete))); }
     async function viewKnowledge(id) { const response = await fetch('/api/knowledge/' + id + sessionQuery, {cache:'no-store'}); const data = await response.json(); if (!response.ok) throw new Error(data.message || '资料读取失败'); $('knowledgePreview').hidden = false; $('knowledgePreview').textContent = data.content; }
     async function deleteKnowledge(id) { if (!window.confirm('确认删除这份资料？')) return; const response = await mutateFetch('/api/knowledge/' + id + sessionQuery, {method:'DELETE'}); const data = await response.json(); if (!response.ok) throw new Error(data.message || '删除失败'); $('knowledgePreview').hidden = true; await loadKnowledge(); }
-    $('contextPerSide').addEventListener('input', renderContextCount); $('replyDelayScale').addEventListener('input', (event) => renderReplyDelayScale(event.target.value)); renderContextCount(); renderReplyDelayScale(loadedReplyDelayScale);
-    const storedTheme = localStorage.getItem('waha-panel-theme'); if (storedTheme) applyTheme(storedTheme); $('themeSelect').addEventListener('change', (event) => saveTheme(event.target.value)); $('enabled').addEventListener('change', setEnabledState); $('allDay').addEventListener('change', setEnabledState); $('customerMemoryEnabled').addEventListener('change', setEnabledState); $('settingsForm').addEventListener('submit', saveSettings); $('checkIptv').addEventListener('click', checkIptv); $('refreshIptvRecords').addEventListener('click', loadIptvRecords); $('addKnowledge').addEventListener('click', async () => { try { await addKnowledge($('knowledgeName').value || '粘贴文字', $('knowledgeText').value); } catch (error) { $('knowledgeNotice').textContent = error.message; } }); $('knowledgeFile').addEventListener('change', () => { const file = $('knowledgeFile').files[0]; if (!file) return; if (!/[.]txt$|[.]md$/i.test(file.name)) { $('knowledgeNotice').textContent = '仅支持 .txt 或 .md 文件'; return; } const reader = new FileReader(); reader.onload = async () => { try { await addKnowledge(file.name, reader.result); $('knowledgeFile').value = ''; } catch (error) { $('knowledgeNotice').textContent = error.message; } }; reader.readAsText(file); });
+    $('contextPerSide').addEventListener('input', renderContextCount); $('replyDelayScale').addEventListener('input', (event) => renderReplyDelayScale(event.target.value)); $('humanTakeoverResumeDelay').addEventListener('input', (event) => { loadedHumanTakeoverResumeDelay = renderHumanTakeoverResumeDelay(humanTakeoverResumeOptions[Number(event.target.value)]?.code || '5h'); }); renderContextCount(); renderReplyDelayScale(loadedReplyDelayScale); renderHumanTakeoverResumeDelay(loadedHumanTakeoverResumeDelay);
+    const storedTheme = localStorage.getItem('waha-panel-theme'); if (storedTheme) applyTheme(storedTheme); $('themeSelect').addEventListener('change', (event) => saveTheme(event.target.value)); $('enabled').addEventListener('change', setEnabledState); $('allDay').addEventListener('change', setEnabledState); $('customerMemoryEnabled').addEventListener('change', setEnabledState); $('autoReplyImageVision').addEventListener('change', setEnabledState); $('settingsForm').addEventListener('submit', saveSettings); $('checkIptv').addEventListener('click', checkIptv); $('refreshIptvRecords').addEventListener('click', loadIptvRecords); $('addKnowledge').addEventListener('click', async () => { try { await addKnowledge($('knowledgeName').value || '粘贴文字', $('knowledgeText').value); } catch (error) { $('knowledgeNotice').textContent = error.message; } }); $('knowledgeFile').addEventListener('change', () => { const file = $('knowledgeFile').files[0]; if (!file) return; if (!/[.]txt$|[.]md$/i.test(file.name)) { $('knowledgeNotice').textContent = '仅支持 .txt 或 .md 文件'; return; } const reader = new FileReader(); reader.onload = async () => { try { await addKnowledge(file.name, reader.result); $('knowledgeFile').value = ''; } catch (error) { $('knowledgeNotice').textContent = error.message; } }; reader.readAsText(file); });
     loadSettings().catch(error => { $('settingsNotice').textContent = error.message; }); loadKnowledge().catch(error => { $('knowledgeNotice').textContent = error.message; });
   </script>
 </body>
@@ -3577,6 +3994,7 @@ class PanelHandler(BaseHTTPRequestHandler):
             "send-text", "send-image", "takeover", "resume-ai", "note",
             "follow-ups", "labels", "summary", "memory", "memory/rebuild", "notes/normalize",
             "machine-translations", "machine-translations/cache",
+            "iptv/manual-card",
         }
         if action not in allowed and not (
             len(parts) == 4 and parts[1] == "follow-ups" and parts[2] and parts[3] == "cancel"
@@ -3719,6 +4137,67 @@ class PanelHandler(BaseHTTPRequestHandler):
         chat = self.require_chat_service()
         name, action = self.chat_route(route)
         self.require_waha_session(name, connected=action in {"send-text", "send-image"})
+        if action == "iptv/manual-card":
+            self.require_waha_session(name, connected=True)
+            if self.state.iptv is None:
+                raise ChatServiceError("IPTV 功能需要面板数据加密配置", "IPTV_UNAVAILABLE")
+            payload = self.read_api_json()
+            chat_ref = str(payload.get("chat_ref") or "")
+            request_id = str(payload.get("client_request_id") or "").strip()
+            if not chat_ref or not request_id or len(request_id) > 200:
+                raise ValueError("缺少聊天引用或请求编号")
+            chat_id = chat._decode_chat(name, chat_ref)
+            language = payload.get("language", "auto")
+            if language == "auto":
+                history = []
+                try:
+                    history.extend(self.state._context_rows(name, chat_id, "inbound", 20, None))
+                except Exception:
+                    pass
+                try:
+                    history.extend(chat.history_for_id(name, chat_id, 20))
+                except Exception:
+                    pass
+                if history:
+                    language = infer_customer_language_from_history(history)
+                else:
+                    try:
+                        language = infer_customer_language_from_history(
+                            self.state._conversation_context(chat_id, session_name=name)
+                        )
+                    except Exception:
+                        language = "en"
+            card = self.state.iptv.create_manual_card(
+                name,
+                chat_id,
+                request_id,
+                payload.get("subscription"),
+                request_id,
+                language,
+            )
+            with self.state.iptv.delivery_attempt("manual", card["id"]):
+                if self.state.iptv.delivery_state("manual", card["id"]) == "sent":
+                    self.state.record_iptv_manual_delivery_success(name, chat_id, card)
+                    self.send_json({"status": "sent", "card_id": card["id"]})
+                    return
+                try:
+                    self.state._send_text(
+                        name,
+                        chat_id,
+                        self.state.iptv.reply_text(card, card.get("language", "en")),
+                        origin="iptv_manual",
+                    )
+                except Exception:
+                    self.state.iptv.mark_manual_delivery(card["id"], False, name, chat_id, card.get("language", "en"))
+                    self.state.log("ERROR", "iptv.manual_send_failed", "手动卡密发送失败，已安排重发", name)
+                    self.send_json({"status": "send_retrying", "card_id": card["id"]}, HTTPStatus.ACCEPTED)
+                    return
+                self.state.iptv.mark_manual_delivery(card["id"], True)
+                self.state.record_iptv_manual_delivery_success(name, chat_id, card)
+                chat.broker.publish(name, {"type": "refresh", "reason": action})
+                self.state.log("INFO", "iptv.manual_sent", "已发送手动 IPTV 卡密", name)
+                self.send_json({"status": "sent", "card_id": card["id"]})
+            return
         if action == "labels":
             self.send_chat_labels_write(route, "POST")
             return
@@ -4030,8 +4509,10 @@ class PanelHandler(BaseHTTPRequestHandler):
             status = HTTPStatus.CONFLICT
         elif code in {"CHAT_CAPABILITY_UNAVAILABLE", "TRANSLATION_UNAVAILABLE", "MEMORY_UNAVAILABLE", "ALIYUN_TRANSLATION_UNAVAILABLE"}:
             status = HTTPStatus.SERVICE_UNAVAILABLE
-        elif code in {"SESSION_NOT_CONNECTED", "TRANSLATION_NOT_CONFIGURED", "ALIYUN_CONFIG_MISSING"}:
+        elif code in {"SESSION_NOT_CONNECTED", "TRANSLATION_NOT_CONFIGURED", "ALIYUN_CONFIG_MISSING", "AI_CONFIG_MISSING", "AI_AUTH_ERROR"}:
             status = HTTPStatus.CONFLICT
+        elif code == "AI_PAYMENT_REQUIRED":
+            status = HTTPStatus.PAYMENT_REQUIRED
         elif code in {"AI_RATE_LIMIT", "AI_BUSY", "ALIYUN_RATE_LIMIT", "ALIYUN_BUSY"}:
             status = HTTPStatus.TOO_MANY_REQUESTS
         elif code in {"AI_CONNECTION_ERROR", "AI_UPSTREAM_ERROR", "AI_RESPONSE_INVALID"}:

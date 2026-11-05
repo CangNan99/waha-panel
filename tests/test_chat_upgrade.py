@@ -278,6 +278,20 @@ class SettingsAndContextTests(UpgradeTestCase):
             self.assertEqual(saved["auto_reply_delay_scale"], value)
         self.assertEqual(self.state.settings_payload("default")["auto_reply_delay_scale"], 100)
 
+    def test_human_takeover_resume_delay_defaults_and_round_trips_per_session(self):
+        self.assertEqual(self.state.settings_payload("default")["human_takeover_resume_delay"], "5h")
+        saved = self.state.save_settings({"human_takeover_resume_delay": "30m"}, "sales")
+        self.assertEqual(saved["human_takeover_resume_delay"], "30m")
+        self.assertEqual(self.state.settings_payload("default")["human_takeover_resume_delay"], "5h")
+
+    def test_invalid_human_takeover_resume_delay_is_rejected_without_overwriting(self):
+        self.state.save_settings({"human_takeover_resume_delay": "1h"}, "default")
+        before = self.state.settings_payload("default")
+        for value in ("5m", "2h", "", None, 3600):
+            with self.assertRaises(ValueError):
+                self.state.save_settings({"human_takeover_resume_delay": value}, "default")
+            self.assertEqual(self.state.settings_payload("default"), before)
+
     def test_invalid_reply_delay_scale_is_rejected_without_overwriting(self):
         self.state.save_settings({"auto_reply_delay_scale": 50}, "default")
         before = self.state.settings_payload("default")
@@ -417,6 +431,12 @@ class SettingsAndContextTests(UpgradeTestCase):
 
 
 class SettingsApiTests(UpgradeTestCase):
+    def test_image_vision_setting_round_trips_per_session(self):
+        saved = self.state.save_settings({"auto_reply_image_vision": True}, "sales")
+        self.assertTrue(saved["auto_reply_image_vision"])
+        self.assertFalse(self.state.settings_payload("default")["auto_reply_image_vision"])
+        self.assertTrue(self.state.settings_payload("sales")["auto_reply_image_vision"])
+
     def test_context_and_media_settings_round_trip_per_session(self):
         saved = self.state.save_settings(
             {
@@ -445,6 +465,9 @@ class SettingsApiTests(UpgradeTestCase):
         self.assertIn("auto_reply_context_per_side", page)
         self.assertIn("auto_reply_media_types", page)
         self.assertIn('id="customerMemoryEnabled"', page)
+        self.assertIn('id="autoReplyImageVision"', page)
+        self.assertIn("auto_reply_image_vision", page)
+        self.assertIn("多模态", page)
         self.assertIn("customer_memory_enabled", page)
         self.assertIn("APIKey：已配置（隐藏）", page)
 
@@ -459,6 +482,17 @@ class SettingsApiTests(UpgradeTestCase):
         self.assertIn("aria-valuenow", page)
         self.assertIn("previousReplyDelayScale", page)
         self.assertIn("renderReplyDelayScale(event.target.value)", page)
+
+    def test_settings_page_exposes_human_takeover_resume_slider(self):
+        page = settings_page()
+        self.assertIn('id="humanTakeoverResumeDelay"', page)
+        self.assertIn('type="range"', page)
+        self.assertIn("10 分钟", page)
+        self.assertIn("30 分钟", page)
+        self.assertIn("1 小时", page)
+        self.assertIn("5 小时", page)
+        self.assertIn("human_takeover_resume_delay", page)
+        self.assertIn("renderHumanTakeoverResumeDelay", page)
 
 
 class MemoryAndTranslationRouteTests(UpgradeTestCase):
@@ -694,6 +728,29 @@ class WebhookArchiveTests(UpgradeTestCase):
                 "AND content='测试回复'"
             ).fetchone()[0]
         self.assertEqual(origin, "auto_ai")
+
+    def test_enabled_image_vision_fetches_customer_image_without_archiving_bytes(self):
+        self.state.save_settings({
+            "auto_reply_media_types": {"image": True},
+            "auto_reply_image_vision": True,
+        })
+        image = PNG_1X1
+        self.client.get_message = lambda *_args, **_kwargs: {
+            "media": {"url": "http://waha.local/media/image-1", "mimetype": "image/png"},
+        }
+        self.client.get_media_bytes = lambda *_args, **_kwargs: (200, "image/png", image)
+        captured = {}
+        def fake_reply(_settings, _incoming, **kwargs):
+            captured.update(kwargs)
+            return "测试回复", "ai"
+        self.state._ai_reply = fake_reply
+        result = self.state.handle_webhook(
+            self.event(body="请看这张图", message_type="image", has_media=True, message_id="vision-1")
+        )
+        self.assertEqual(result["action"], "replied")
+        self.assertEqual(captured["image_content"]["mime_type"], "image/png")
+        self.assertEqual(base64.b64decode(captured["image_content"]["data"]), image)
+        self.assertNotIn(base64.b64encode(image).decode("ascii"), json.dumps(self.messages_for("chat-1@c.us")))
 
     def test_media_setting_controls_trigger_but_keeps_metadata(self):
         self.state.save_settings({"auto_reply_media_types": {"image": True}})

@@ -4,6 +4,7 @@ import base64
 import tempfile
 import threading
 import unittest
+import uuid
 from cryptography.fernet import Fernet
 from http.server import ThreadingHTTPServer
 from pathlib import Path
@@ -12,7 +13,7 @@ from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 from panel.app import PanelHandler, PanelState, init_db
-from panel.chat_automation import AutomationError, ChatAutomationService
+from panel.chat_automation import AutomationError, ChatAutomationService, DELAY_SECONDS
 from panel.chat_service import ChatSendError, ChatService, ChatServiceError
 from panel.translation_service import TranslationError, TranslationService
 
@@ -53,6 +54,11 @@ class _Client:
         if self.mode == "unknown": raise TimeoutError("timeout")
         if self.mode == "failed": raise ValueError("failed")
         return {"id": "wamid.manual"}
+    def send_image(self, *_args):
+        self.calls += 1
+        if self.mode == "unknown": raise TimeoutError("timeout")
+        if self.mode == "failed": raise ValueError("failed")
+        return {"id": "wamid.image"}
 
 
 class EngagementSchemaTests(unittest.TestCase):
@@ -90,6 +96,7 @@ class EngagementSchemaTests(unittest.TestCase):
         )
         connection.commit()
         connection.close()
+
         init_db(self.database, seed_business=False)
         init_db(self.database, seed_business=False)
         connection = sqlite3.connect(self.database)
@@ -120,6 +127,70 @@ class EngagementSchemaTests(unittest.TestCase):
             )
         connection.close()
 
+    def test_legacy_follow_up_rows_survive_delay_constraint_migration(self):
+        init_db(self.database, seed_business=False)
+        connection = sqlite3.connect(self.database)
+        connection.execute(
+            "INSERT INTO follow_up_tasks("
+            "session_name,chat_key_hmac,chat_id_ciphertext,created_at,due_at,updated_at,"
+            "delay_code,mode,state,client_request_id) "
+            "VALUES ('default','legacy-key','legacy-chat',100,86500,100,'24h','AI','PENDING','legacy-request')"
+        )
+        connection.execute("ALTER TABLE follow_up_tasks RENAME TO follow_up_tasks__legacy_for_test")
+        connection.execute(
+            """CREATE TABLE follow_up_tasks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_name TEXT NOT NULL,
+                chat_key_hmac TEXT NOT NULL,
+                chat_id_ciphertext TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                due_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                delay_code TEXT NOT NULL CHECK (delay_code IN ('24h', '3d', '7d', '15d')),
+                mode TEXT NOT NULL CHECK (mode IN ('AI', 'FIXED')),
+                fixed_copy_ciphertext TEXT,
+                state TEXT NOT NULL CHECK (state IN ('PENDING', 'RUNNING', 'SENT', 'SKIPPED', 'FAILED', 'UNKNOWN', 'CANCELLED')),
+                skip_reason TEXT,
+                error_code TEXT,
+                error_message TEXT,
+                waha_message_id TEXT,
+                client_request_id TEXT NOT NULL UNIQUE,
+                claimed_at INTEGER,
+                completed_at INTEGER
+            )"""
+        )
+        connection.execute(
+            "INSERT INTO follow_up_tasks("
+            "id,session_name,chat_key_hmac,chat_id_ciphertext,created_at,due_at,updated_at,delay_code,mode,"
+            "fixed_copy_ciphertext,state,skip_reason,error_code,error_message,waha_message_id,client_request_id,claimed_at,completed_at) "
+            "SELECT id,session_name,chat_key_hmac,chat_id_ciphertext,created_at,due_at,updated_at,delay_code,mode,"
+            "fixed_copy_ciphertext,state,skip_reason,error_code,error_message,waha_message_id,client_request_id,claimed_at,completed_at "
+            "FROM follow_up_tasks__legacy_for_test"
+        )
+        connection.execute("DROP TABLE follow_up_tasks__legacy_for_test")
+        connection.commit()
+        connection.close()
+
+        init_db(self.database, seed_business=False)
+        connection = sqlite3.connect(self.database)
+        row = connection.execute(
+            "SELECT delay_code,client_request_id FROM follow_up_tasks WHERE id=1"
+        ).fetchone()
+        self.assertEqual(row, ("24h", "legacy-request"))
+        for index, code in enumerate(DELAY_SECONDS):
+            connection.execute(
+                "INSERT INTO follow_up_tasks("
+                "session_name,chat_key_hmac,chat_id_ciphertext,created_at,due_at,updated_at,delay_code,mode,state,client_request_id) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                ("default", f"key-{index}", "chat", 100, 100 + DELAY_SECONDS[code], 100, code, "AI", "PENDING", f"request-{index}"),
+            )
+        connection.commit()
+        accepted = connection.execute(
+            "SELECT COUNT(*) FROM follow_up_tasks WHERE delay_code IN ('1h','2h','3h','6h','12h')"
+        ).fetchone()[0]
+        connection.close()
+        self.assertEqual(accepted, 5)
+
 
 class ChatServiceEngagementTests(unittest.TestCase):
     def setUp(self):
@@ -144,6 +215,44 @@ class ChatServiceEngagementTests(unittest.TestCase):
         state = self.service.takeover_state("default", self.item["chat_ref"])
         self.assertEqual(state["last_manual_sent_at"], 1_005)
         self.assertEqual(state["auto_resume_at"], 19_005)
+
+    def test_takeover_and_manual_sends_use_configured_resume_delay(self):
+        delays = {"10m": 600, "30m": 1_800, "1h": 3_600, "5h": 18_000}
+        for code, seconds in delays.items():
+            with self.subTest(code=code):
+                self.clock.value = 1_005
+                database = Path(self.temp.name) / f"{code}.sqlite3"
+                init_db(database, seed_business=False)
+                service = ChatService(
+                    database,
+                    self.client,
+                    _Codec(),
+                    b"s" * 32,
+                    clock=self.clock,
+                    settings_loader=lambda _session, value=code: {"human_takeover_resume_delay": value},
+                )
+                item = service.overview("default")["items"][0]
+                state = service.takeover("default", item["chat_ref"])
+                self.assertEqual(state["auto_resume_at"], 1_005 + seconds)
+                self.clock.value = 2_000
+                service.send_text("default", item["chat_ref"], "人工回复", str(uuid.uuid4()))
+                self.assertEqual(service.takeover_state("default", item["chat_ref"])["auto_resume_at"], 2_000 + seconds)
+
+    def test_successful_manual_image_send_uses_configured_resume_delay(self):
+        database = Path(self.temp.name) / "image.sqlite3"
+        init_db(database, seed_business=False)
+        service = ChatService(
+            database,
+            self.client,
+            _Codec(),
+            b"s" * 32,
+            clock=self.clock,
+            settings_loader=lambda _session: {"human_takeover_resume_delay": "1h"},
+        )
+        item = service.overview("default")["items"][0]
+        image = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")
+        service.send_image("default", item["chat_ref"], "test.png", "image/png", image, "", str(uuid.uuid4()))
+        self.assertEqual(service.takeover_state("default", item["chat_ref"])["auto_resume_at"], 1_005 + 3_600)
 
     def test_summary_upsert_replaces_current_report_but_preserves_manual_labels(self):
         self.service.add_manual_label("default", self.item["chat_ref"], "VIP")
@@ -534,15 +643,30 @@ class AutomationSchedulerTests(unittest.TestCase):
             connection.close()
 
     def test_due_times_are_calculated_from_creation_for_every_delay(self):
-        delays = {"24h": 86_400, "3d": 259_200, "7d": 604_800, "15d": 1_296_000}
+        delays = {
+            "1h": 3_600, "2h": 7_200, "3h": 10_800, "6h": 21_600, "12h": 43_200,
+            "24h": 86_400, "3d": 259_200, "7d": 604_800, "15d": 1_296_000,
+        }
         for code, seconds in delays.items():
             task = self.automation.create_task("default", self.chat_ref, code, "AI")
             self.assertEqual(task["created_at"], 10_000)
             self.assertEqual(task["due_at"], 10_000 + seconds)
 
+    def test_stable_client_request_id_reuses_matching_system_task(self):
+        first = self.automation.create_task(
+            "default", self.chat_ref, "12h", "FIXED", "请告诉我测试体验。",
+            client_request_id="iptv-manual-follow-up:card-1",
+        )
+        second = self.automation.create_task(
+            "default", self.chat_ref, "12h", "FIXED", "请告诉我测试体验。",
+            client_request_id="iptv-manual-follow-up:card-1",
+        )
+        self.assertEqual(first["id"], second["id"])
+        self.assertEqual(self.automation.list_tasks("default", self.chat_ref)["items"], [first])
+
     def test_creation_validates_inputs_and_encrypts_sensitive_values(self):
         with self.assertRaises(AutomationError):
-            self.automation.create_task("default", self.chat_ref, "1h", "AI")
+            self.automation.create_task("default", self.chat_ref, "30m", "AI")
         with self.assertRaises(AutomationError):
             self.automation.create_task("default", self.chat_ref, "24h", "OTHER")
         with self.assertRaises(AutomationError):

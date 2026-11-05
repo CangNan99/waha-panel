@@ -4,7 +4,7 @@
 
 ## 界面预览
 
-1.0.19 新增共享播放服务器配置，修复供应商已创建 IPTV 试用、返回链接缺少域名时的校验失败。以下界面截图均使用演示数据。
+1.0.21 新增客户图片多模态识别、按客户语言发送 IPTV 体验跟进、短时跟进滑杆和人工接管后自动恢复 AI，并包含 1.0.20 的 IPTV 稳定性改进。以下界面截图均使用演示数据。
 
 ![状态概览](docs/assets/overview-1.0.15.png)
 
@@ -34,7 +34,7 @@ Set-Location -LiteralPath .\waha-panel
 pwsh -File .\install.ps1
 ```
 
-首次安装会自动生成 WAHA API 密钥、webhook 密钥、面板数据加密密钥和管理员初始密码。初始管理员密码只在安装脚本的首次成功输出中显示；不要把 `.env` 或 `secrets/` 目录上传到公共仓库。
+首次安装会自动生成 WAHA API 密钥、webhook 密钥、面板数据加密密钥和管理员初始密码。安装成功后会同时显示面板账号、WAHA Dashboard 账号，以及面板密码、WAHA 密码和 API Key 的掩码值；真实凭据只保存在受限的 `.env`、`secrets/waha_credentials` 和 `secrets/panel_admin_bootstrap` 文件中，不会写入安装输出、网页或日志。不要把这些文件上传到公共仓库。
 
 这是空白业务安装，不会带入现有 WhatsApp 会话、二维码、聊天、客户资料、AI 密钥、WooCommerce、PayPal、产品或订单数据。
 
@@ -53,7 +53,8 @@ pwsh -File .\install.ps1
 
 - 多 WhatsApp 会话统一管理
 - AI 自动回复、摘要和标签
-- IPTV 试用成功后自动添加只读系统标签“IPTV测试过”
+- 客户图片多模态识别（使用支持视觉的 OpenAI 兼容模型）
+- IPTV 试用成功后自动添加只读系统标签“IPTV测试过”，并在 12 小时后按客户语言询问测试体验
 - 按客户独立保存的加密动态记忆（在自动回复设置中开启）
 - 聊天列表、消息收发和人工接管
 - 当前聊天可在阿里云机器翻译专业版与 AI 模型翻译之间手动切换，并以双行显示原文和中文译文
@@ -96,6 +97,8 @@ pwsh -File .\update.ps1 -Component waha
 
 | 版本 | 更新内容 | 详细说明 |
 | --- | --- | --- |
+| 1.0.21 | 新增客户图片多模态识别、按客户语言的 IPTV 体验跟进、短时跟进滑杆和人工接管后自动恢复 AI。 | [docs/releases/1.0.21.md](docs/releases/1.0.21.md) |
+| 1.0.20 | 优化 IPTV 多语言测试意图、持久化失败重试、手动五档卡密和聊天分页刷新；保留共享播放服务器地址校验。 | [docs/releases/1.0.20.md](docs/releases/1.0.20.md) |
 | 1.0.19 | 新增共享播放服务器地址，兼容供应商成功返回但缺少域名的 IPTV 播放链接，并加强地址校验。 | [docs/releases/1.0.19.md](docs/releases/1.0.19.md) |
 | 1.0.18 | 默认使用阿里云机器翻译专业版，支持手动切换 AI 模型翻译；新增按聊天窗口限领的 IPTV 试用、只读系统标签、回复延迟滑杆和凭据保护。 | [docs/releases/1.0.18.md](docs/releases/1.0.18.md) |
 | 1.0.16 | 自动回复仅处理当前启用与连接周期的新消息；修复会话卡片切换和异步串号，AI 无有效结果时跳过发送。 | [docs/releases/1.0.16.md](docs/releases/1.0.16.md) |
@@ -135,6 +138,6 @@ pwsh -File .\backup.ps1
 当前镜像版本：
 
 - `devlikeapro/waha:latest-2026.9.1`
-- `docker.io/cangnan88/waha-panel:1.0.19`
+- `docker.io/cangnan88/waha-panel:1.0.21`
 
 如需域名访问，只反代到面板端口 `127.0.0.1:3003`。WAHA API 端口 `3002` 默认不应公开。请在反向代理层启用 HTTPS，并确保代理不会记录 `Authorization`、APIKey 或密码字段。

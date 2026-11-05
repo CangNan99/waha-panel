@@ -7,7 +7,7 @@ from pathlib import Path
 
 from cryptography.fernet import Fernet
 
-from panel.app import init_db
+from panel.app import AIUpstreamError, init_db
 from panel.chat_security import DataCipher, chat_key_hmac
 from panel.customer_memory_service import CustomerMemoryService
 
@@ -128,6 +128,51 @@ class CustomerMemoryServiceTests(unittest.TestCase):
             ).fetchone()
         self.assertEqual(status, "FAILED")
         self.assertEqual(error_code, "MEMORY_GENERATION_FAILED")
+
+    def test_deterministic_ai_error_stops_worker_retry_and_keeps_previous_memory(self):
+        self.service.rebuild("default", "chat-1@c.us")
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.execute(
+                "INSERT INTO conversation_messages "
+                "(session_name,chat_id,direction,origin,message_id,content,created_at) "
+                "VALUES (?,?,?,?,?,?,?)",
+                ("default", "chat-1@c.us", "inbound", "unknown", "in-payment", "还有库存吗", 4),
+            )
+            connection.commit()
+        self.service.completion_fn = lambda *_args: (_ for _ in ()).throw(
+            AIUpstreamError("AI_PAYMENT_REQUIRED", "AI 服务余额或订阅不可用", status=402, retryable=False)
+        )
+        self.service.enqueue("default", "chat-1@c.us")
+        self.assertTrue(self.service._run_one_due_job())
+        with closing(sqlite3.connect(self.database)) as connection:
+            state, code, next_run = connection.execute(
+                "SELECT state,last_error_code,next_run_at FROM conversation_memory_jobs"
+            ).fetchone()
+        self.assertEqual((state, code), ("FAILED", "AI_PAYMENT_REQUIRED"))
+        self.assertEqual(next_run, 100)
+        self.assertIn("VIP 客户", self.service.context_for_reply("default", "chat-1@c.us"))
+
+    def test_transient_ai_error_keeps_worker_job_pending_for_retry(self):
+        self.service.rebuild("default", "chat-1@c.us")
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.execute(
+                "INSERT INTO conversation_messages "
+                "(session_name,chat_id,direction,origin,message_id,content,created_at) "
+                "VALUES (?,?,?,?,?,?,?)",
+                ("default", "chat-1@c.us", "inbound", "unknown", "in-timeout", "还有库存吗", 4),
+            )
+            connection.commit()
+        self.service.completion_fn = lambda *_args: (_ for _ in ()).throw(
+            AIUpstreamError("AI_CONNECTION_ERROR", "AI 服务暂时不可达", retryable=True)
+        )
+        self.service.enqueue("default", "chat-1@c.us")
+        self.assertTrue(self.service._run_one_due_job())
+        with closing(sqlite3.connect(self.database)) as connection:
+            state, code, next_run = connection.execute(
+                "SELECT state,last_error_code,next_run_at FROM conversation_memory_jobs"
+            ).fetchone()
+        self.assertEqual((state, code), ("PENDING", "AI_CONNECTION_ERROR"))
+        self.assertGreater(next_run, 100)
 
     def test_clear_removes_memory_and_job_but_preserves_messages(self):
         self.service.rebuild("default", "chat-1@c.us")

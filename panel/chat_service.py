@@ -158,7 +158,8 @@ def _avatar_url(value):
 
 class ChatService:
     def __init__(self, database_path, client, codec, hmac_secret, logger=None,
-                 clock=None, broker=None, outbound_recorder=None, takeover_changed=None, takeover_lock=None):
+                 clock=None, broker=None, outbound_recorder=None, takeover_changed=None,
+                 takeover_lock=None, settings_loader=None):
         self.database_path = Path(database_path)
         self.client = client
         self.codec = codec
@@ -169,12 +170,29 @@ class ChatService:
         self.outbound_recorder = outbound_recorder
         self.takeover_changed = takeover_changed
         self.takeover_lock = takeover_lock or threading.RLock()
+        self.settings_loader = settings_loader
         self._reference_lock = threading.Lock()
         self._chat_reference_cache = {}
         self._message_reference_cache = {}
         self._avatar_lock = threading.RLock()
         self._avatar_cache = OrderedDict()
         self._avatar_slots = threading.BoundedSemaphore(4)
+
+    def _takeover_resume_delay_seconds(self, session):
+        values = {}
+        if callable(self.settings_loader):
+            try:
+                loaded = self.settings_loader(_session_name(session))
+                if isinstance(loaded, dict):
+                    values = loaded
+            except Exception:
+                values = {}
+        return {
+            "10m": 10 * 60,
+            "30m": 30 * 60,
+            "1h": 60 * 60,
+            "5h": 5 * 60 * 60,
+        }.get(str(values.get("human_takeover_resume_delay") or "5h").strip().lower(), 5 * 60 * 60)
 
     def _notify_outbound(self, session, chat_id, message_id, content, request_id, origin="unknown"):
         if not self.outbound_recorder:
@@ -493,7 +511,7 @@ class ChatService:
                 "state='HUMAN_TAKEOVER', paused_at=excluded.paused_at, resumed_at=NULL, updated_at=excluded.updated_at, "
                 "auto_resume_at=excluded.auto_resume_at, last_manual_sent_at="
                 + ("NULL" if clear_manual else "chat_takeovers.last_manual_sent_at"),
-                (name, key, now, now, now + 18000),
+                (name, key, now, now, now + self._takeover_resume_delay_seconds(name)),
             )
             connection.commit()
         finally:
@@ -799,7 +817,7 @@ class ChatService:
                 connection.execute(
                     "UPDATE chat_takeovers SET last_manual_sent_at=?, auto_resume_at=?, updated_at=? "
                     "WHERE session_name=? AND chat_key_hmac=?",
-                    (now, now + 18000, now, _session_name(session), key),
+                    (now, now + self._takeover_resume_delay_seconds(session), now, _session_name(session), key),
                 )
             connection.commit()
         finally:

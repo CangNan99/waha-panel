@@ -12,6 +12,11 @@ except ImportError:
 
 
 DELAY_SECONDS = {
+    "1h": 3_600,
+    "2h": 7_200,
+    "3h": 10_800,
+    "6h": 21_600,
+    "12h": 43_200,
     "24h": 86_400,
     "3d": 259_200,
     "7d": 604_800,
@@ -86,7 +91,16 @@ class ChatAutomationService:
             raise AutomationError("跟进任务编号无效", "INVALID_TASK_ID")
         return task_id
 
-    def create_task(self, session, chat_ref, delay_code, mode, fixed_copy=None):
+    @staticmethod
+    def _request_id(value):
+        if value is None:
+            return str(uuid.uuid4())
+        request_id = str(value).strip()
+        if not request_id or len(request_id) > 200 or any(ord(char) < 32 or ord(char) == 127 for char in request_id):
+            raise AutomationError("跟进请求编号无效", "INVALID_FOLLOW_UP_REQUEST_ID")
+        return request_id
+
+    def create_task(self, session, chat_ref, delay_code, mode, fixed_copy=None, client_request_id=None):
         delay = str(delay_code or "").strip()
         if delay not in DELAY_SECONDS:
             raise AutomationError("跟进时间选项无效", "INVALID_FOLLOW_UP_DELAY")
@@ -113,7 +127,7 @@ class ChatAutomationService:
             raise AutomationError("任务内容无法安全保存", "AUTOMATION_ENCRYPTION_FAILED") from error
 
         now = self._now()
-        request_id = str(uuid.uuid4())
+        request_id = self._request_id(client_request_id)
         connection = self._connect()
         try:
             cursor = connection.execute(
@@ -127,6 +141,29 @@ class ChatAutomationService:
             row = connection.execute(
                 "SELECT * FROM follow_up_tasks WHERE id=?", (cursor.lastrowid,)
             ).fetchone()
+            connection.commit()
+        except sqlite3.IntegrityError:
+            connection.rollback()
+            existing = connection.execute(
+                "SELECT * FROM follow_up_tasks WHERE client_request_id=?", (request_id,)
+            ).fetchone()
+            if existing is None:
+                raise
+            compatible = (
+                existing["session_name"] == str(session)
+                and existing["chat_key_hmac"] == chat_key
+                and existing["delay_code"] == delay
+                and existing["mode"] == task_mode
+            )
+            if compatible and task_mode == "FIXED":
+                try:
+                    previous_copy = self.cipher.decrypt_json(existing["fixed_copy_ciphertext"]).get("text", "")
+                except Exception:
+                    compatible = False
+                compatible = compatible and previous_copy == fixed_text
+            if not compatible:
+                raise AutomationError("稳定跟进请求已用于其他任务", "FOLLOW_UP_REQUEST_CONFLICT") from None
+            row = existing
             connection.commit()
         except Exception:
             connection.rollback()

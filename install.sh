@@ -12,12 +12,25 @@ fail() {
 
 new_secret() { openssl rand 32 | openssl base64 -A | tr '+/' '-_'; }
 
+mask_secret() {
+  local value="${1:-}"
+  local length=${#value}
+  if (( length <= 8 )); then
+    printf '%s***' "${value:0:2}"
+  else
+    printf '%s...%s' "${value:0:4}" "${value: -4}"
+  fi
+}
+
 STEP="checking Docker Compose"
 docker compose version >/dev/null 2>&1 || fail 'docker compose is unavailable'
 command -v openssl >/dev/null 2>&1 || fail 'openssl is required'
 
 mkdir -p "$ROOT/secrets"
 chmod 700 "$ROOT/secrets"
+waha_api_key=""
+waha_dashboard_password=""
+admin_password=""
 if [[ ! -f "$ROOT/.env" ]]; then
   STEP="generating installation secrets"
   waha_api_key="$(new_secret)"
@@ -34,8 +47,8 @@ if [[ ! -f "$ROOT/.env" ]]; then
     "WAHA_DASHBOARD_PASSWORD=$waha_dashboard_password" \
     "WAHA_WEBHOOK_SECRET=$webhook_secret" \
     "PANEL_DATA_ENCRYPTION_KEY=$panel_data_key" \
-    'PANEL_IMAGE=docker.io/cangnan88/waha-panel:1.0.19' \
-    'PANEL_VERSION=1.0.19' \
+    'PANEL_IMAGE=docker.io/cangnan88/waha-panel:1.0.21' \
+    'PANEL_VERSION=1.0.21' \
     'PANEL_PORT=3003' 'PANEL_BIND_ADDRESS=127.0.0.1' \
     'WAHA_PORT=3002' 'WAHA_BIND_ADDRESS=127.0.0.1' \
     'PORTABLE_VOLUME_PREFIX=waha-release' \
@@ -52,7 +65,6 @@ if [[ ! -f "$ROOT/.env" ]]; then
 else
   STEP="checking existing installation files"
   [[ -f "$ROOT/secrets/waha_credentials" ]] || fail 'existing .env has a missing WAHA credentials file'
-  admin_password=""
 fi
 
 STEP="pulling release images"
@@ -77,8 +89,16 @@ done
 printf 'Portable WAHA + panel release is running.\n'
 printf 'Panel: http://127.0.0.1:3003/\nWAHA:  http://127.0.0.1:3002/\n'
 if [[ -n "$admin_password" ]]; then
-  printf 'Initial panel administrator: admin\n'
-  printf 'Initial panel password (shown once): %s\n' "$admin_password"
+  printf 'Panel administrator: admin\n'
+  printf 'Panel password (masked): %s\n' "$(mask_secret "$admin_password")"
 else
   printf 'Existing administrator credentials were preserved.\n'
 fi
+printf 'WAHA Dashboard username: admin\n'
+if [[ -n "$waha_dashboard_password" ]]; then
+  printf 'WAHA Dashboard password (masked): %s\n' "$(mask_secret "$waha_dashboard_password")"
+  printf 'WAHA API key (masked): %s\n' "$(mask_secret "$waha_api_key")"
+else
+  printf 'WAHA Dashboard password and API key were preserved.\n'
+fi
+printf 'Restricted credential files: .env, secrets/waha_credentials, secrets/panel_admin_bootstrap\n'

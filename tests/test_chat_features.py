@@ -263,7 +263,7 @@ class QrAndReleaseTests(unittest.TestCase):
             self.assertNotIn("data:image/", page)
         self.assertIn("WhatsAPP AI管理面板", commerce)
 
-    def test_release_metadata_uses_panel_1_0_19_and_waha_2026_9_1(self):
+    def test_release_metadata_uses_panel_1_0_21_and_waha_2026_9_1(self):
         root = Path(__file__).resolve().parents[1]
         release = json.loads((root / "panel-release.json").read_text(encoding="utf-8"))
         compose = (root / "docker-compose.yml").read_text(encoding="utf-8")
@@ -276,22 +276,22 @@ class QrAndReleaseTests(unittest.TestCase):
         readme = (root / "README.md").read_text(encoding="utf-8")
         readme_zh = (root / "README.zh-CN.md").read_text(encoding="utf-8")
 
-        self.assertEqual(release["tag"], "1.0.19")
-        self.assertEqual(release["version"], "1.0.19")
-        self.assertIn("${PANEL_IMAGE:-docker.io/cangnan88/waha-panel:1.0.19}", compose)
-        self.assertIn("${PANEL_VERSION:-1.0.19}", compose)
-        self.assertIn('os.environ.get("PANEL_VERSION", "1.0.19")', (root / "panel" / "app.py").read_text(encoding="utf-8"))
+        self.assertEqual(release["tag"], "1.0.21")
+        self.assertEqual(release["version"], "1.0.21")
+        self.assertIn("${PANEL_IMAGE:-docker.io/cangnan88/waha-panel:1.0.21}", compose)
+        self.assertIn("${PANEL_VERSION:-1.0.21}", compose)
+        self.assertIn('os.environ.get("PANEL_VERSION", "1.0.21")', (root / "panel" / "app.py").read_text(encoding="utf-8"))
         self.assertIn("mem_limit: 512m", compose)
         for installer in (env_example, install_sh, install_ps1):
-            self.assertIn("PANEL_IMAGE=docker.io/cangnan88/waha-panel:1.0.19", installer)
-            self.assertIn("PANEL_VERSION=1.0.19", installer)
-            self.assertNotIn("PANEL_IMAGE=docker.io/cangnan88/waha-panel:1.0.2", installer)
-            self.assertNotIn("PANEL_VERSION=1.0.2", installer)
-        self.assertIn("docker.io/cangnan88/waha-panel:1.0.19", install_docs)
+            self.assertIn("PANEL_IMAGE=docker.io/cangnan88/waha-panel:1.0.21", installer)
+            self.assertIn("PANEL_VERSION=1.0.21", installer)
+            self.assertNotIn("PANEL_IMAGE=docker.io/cangnan88/waha-panel:1.0.2\n", installer)
+            self.assertNotIn("PANEL_VERSION=1.0.2\n", installer)
+        self.assertIn("docker.io/cangnan88/waha-panel:1.0.21", install_docs)
         self.assertIn("1.0.2", release_plan)
         self.assertIn("1.0.2", release_design)
-        self.assertIn("docker.io/cangnan88/waha-panel:1.0.19", readme)
-        self.assertIn("docker.io/cangnan88/waha-panel:1.0.19", readme_zh)
+        self.assertIn("docker.io/cangnan88/waha-panel:1.0.21", readme)
+        self.assertIn("docker.io/cangnan88/waha-panel:1.0.21", readme_zh)
         self.assertIn("${WAHA_IMAGE:-devlikeapro/waha:latest-2026.9.1}", compose)
         self.assertIn("${WAHA_IMAGE_TAG:-latest-2026.9.1}", compose)
         self.assertIn("${WAHA_BIND_ADDRESS:-127.0.0.1}:${WAHA_PORT:-3002}:3000", compose)
@@ -300,8 +300,8 @@ class QrAndReleaseTests(unittest.TestCase):
         self.assertIn("(INSTALL.zh-CN.md)", readme)
         self.assertIn("(INSTALL.zh-CN.md)", readme_zh)
 
-    def test_update_service_defaults_to_panel_1_0_19(self):
-        self.assertEqual(UpdateService().current["panel"], "1.0.19")
+    def test_update_service_defaults_to_panel_1_0_21(self):
+        self.assertEqual(UpdateService().current["panel"], "1.0.21")
         self.assertEqual(UpdateService().current["waha"], "latest-2026.9.1")
 
 
@@ -370,8 +370,13 @@ class ChatPageRegressionTests(unittest.TestCase):
             self.assertIn(f'id="{control_id}"', page)
         self.assertIn("手动", page)
         self.assertIn("AI", page)
-        for delay in ("24h", "3d", "7d", "15d"):
-            self.assertIn(f'value="{delay}"', page)
+        self.assertIn('id="followUpDelay"', page)
+        self.assertIn('type="range"', page)
+        for delay in ("1h", "2h", "3h", "6h", "12h", "24h", "3d", "7d", "15d"):
+            self.assertIn(delay, page)
+        for label in ("1 小时", "2 小时", "3 小时", "6 小时", "12 小时", "24 小时", "3 天", "7 天", "15 天"):
+            self.assertIn(label, page)
+        self.assertIn("renderFollowUpDelay", page)
         for mode in ("AI", "FIXED"):
             self.assertIn(f'value="{mode}"', page)
         self.assertIn("当前总结", page)
