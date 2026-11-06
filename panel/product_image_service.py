@@ -92,6 +92,7 @@ class ProductImageService:
         self.clock = clock or time.time
         self.logger = logger
         self.storage_root.mkdir(parents=True, exist_ok=True)
+        self.image_root.mkdir(parents=True, exist_ok=True)
         self._ensure_schema()
 
     def _connect(self):

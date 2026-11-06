@@ -54,6 +54,7 @@ class ProductImageServiceTests(unittest.TestCase):
             self.service.settings_payload(),
             {"auto_send_enabled": True, "daily_limit": 20},
         )
+        self.assertTrue(self.service.image_root.is_dir())
 
     def test_valid_upload_returns_safe_metadata_and_resolves_exact_tag(self):
         result = self.service.upload(
