@@ -19,6 +19,12 @@ try {
         & docker run --rm "-v${volume}:/source:ro" "-v${backupDir}:/backup" busybox:1.36 sh -c "tar -czf /backup/$archive -C /source ."
         if ($LASTEXITCODE -ne 0) { throw "backup failed for $name" }
     }
+    $step = 'verifying panel data manifest'
+    & docker run --rm "-v${prefix}_panel_data:/source:ro" busybox:1.36 sh -c "test -f /source/panel.sqlite3"
+    if ($LASTEXITCODE -ne 0) { throw 'SQLite file missing from panel data backup' }
+    & docker run --rm "-v${prefix}_panel_data:/source:ro" busybox:1.36 sh -c "if [ -d /source/product-images ]; then printf 'product-images=present\n'; find /source/product-images -type f | wc -l | sed 's/^/product-image-files=/'; else printf 'product-images=absent\nproduct-image-files=0\n'; fi" | Set-Content -LiteralPath (Join-Path $backupDir 'panel_data-manifest.txt') -Encoding utf8
+    if ($LASTEXITCODE -ne 0) { throw 'panel data manifest verification failed' }
+    Add-Content -LiteralPath (Join-Path $backupDir 'panel_data-manifest.txt') -Value 'sqlite=panel.sqlite3'
     Write-Host "Backup created at $backupDir"
 } catch {
     Write-Error ("BACKUP FAILED at {0}: {1}" -f $step, $_.Exception.Message)
