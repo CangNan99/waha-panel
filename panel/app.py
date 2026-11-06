@@ -95,6 +95,7 @@ try:
     )
     from .chat_automation import ChatAutomationService
     from .chat_page import chat_management_page
+    from .product_image_service import ProductImageService
     from .customer_memory_service import CustomerMemoryService
     from .aliyun_translation_service import AliyunTranslationError, AliyunTranslationService
     from .global_translation_service import GlobalTranslationError, GlobalTranslationService
@@ -135,6 +136,7 @@ except ImportError:  # Supports the existing `python app.py` container entrypoin
     )
     from chat_automation import ChatAutomationService
     from chat_page import chat_management_page
+    from product_image_service import ProductImageService
     from customer_memory_service import CustomerMemoryService
     from aliyun_translation_service import AliyunTranslationError, AliyunTranslationService
     from global_translation_service import GlobalTranslationError, GlobalTranslationService
@@ -699,6 +701,10 @@ def init_db(path, seed_business=True):
         )
         if "enabled" not in _table_columns(connection, "global_translation_settings"):
             connection.executescript(global_translation_toggle_migration.read_text(encoding="utf-8"))
+        product_image_migration = (
+            Path(__file__).with_name("migrations") / "014_product_image_library.sql"
+        )
+        connection.executescript(product_image_migration.read_text(encoding="utf-8"))
         system_labels_migration = (
             Path(__file__).with_name("migrations") / "012_customer_system_labels.sql"
         )
@@ -1032,6 +1038,14 @@ class PanelState:
         self.admin_username = str(admin_username or "")
         self.admin_password = str(admin_password or "")
         self.admin_service = AdminService(self.database_path)
+        self.product_images = ProductImageService(
+            self.database_path,
+            self.database_path.parent / "product-images",
+            clock=time.time,
+            logger=lambda level, message: self.log(
+                str(level or "INFO").upper(), "product.image", message, DEFAULT_SESSION_NAME
+            ),
+        )
         self._admin_db_auth = as_bool(os.environ.get("PANEL_ADMIN_DB_AUTH", "0"))
         self._update_service = UpdateService(
             current_panel=os.environ.get("PANEL_VERSION", "1.0.24"),
