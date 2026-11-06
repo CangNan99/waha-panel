@@ -2394,6 +2394,25 @@ class PanelState:
                 "sends the real credentials after the tool succeeds. Do not include a customer ID, "
                 "package, duration, API key or password in tool arguments."
             )
+        product_image_enabled = False
+        try:
+            product_settings = self.product_images.settings_payload()
+            product_image_enabled = bool(
+                include_tools
+                and product_settings.get("auto_send_enabled")
+                and self.product_images.list_assets()["total"] > 0
+            )
+        except Exception:
+            product_settings = {"auto_send_enabled": False, "daily_limit": 0}
+        if product_image_enabled:
+            system_parts.append(
+                "PRODUCT IMAGE RULES: Call send_product_image only when the current customer message "
+                "explicitly asks about or requests the named product. Use an exact product tag from the "
+                "current message; never guess a tag from older history, customer memory, or a vague request. "
+                "The server selects one unique active primary image and sends it directly. Never call the "
+                "tool more than once for one customer message, never expose internal IDs, filesystem paths, "
+                "or image URLs, and use ordinary text when the product tag is missing or uncertain."
+            )
         user_content = incoming_text
         if isinstance(image_content, dict):
             mime_type = str(image_content.get("mime_type") or "image/png").strip().lower()
@@ -2443,6 +2462,21 @@ class PanelState:
                 "parameters": {"type": "object", "additionalProperties": False,
                     "properties": {"language": {"type": "string", "enum": list(IPTV_LANGUAGES)}},
                     "required": ["language"]},
+            }})
+        if product_image_enabled:
+            tools.append({"type": "function", "function": {
+                "name": "send_product_image",
+                "description": "客户当前明确询问对应产品时发送一张已配置的产品图片",
+                "parameters": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "product_tag": {"type": "string"},
+                        "variant": {"type": "string"},
+                        "caption": {"type": "string"},
+                    },
+                    "required": ["product_tag"],
+                },
             }})
         if tools:
             request_payload["tools"] = tools
@@ -2497,6 +2531,18 @@ class PanelState:
                         if set(arguments) == {"language"} and arguments.get("language") in IPTV_LANGUAGES:
                             return json.dumps(arguments), "iptv_trial_tool"
                         continue
+                    if function.get("name") == "send_product_image" and product_image_enabled:
+                        if set(arguments) - {"product_tag", "variant", "caption"}:
+                            continue
+                        if not isinstance(arguments.get("product_tag"), str) or not arguments.get("product_tag", "").strip():
+                            continue
+                        if any(
+                            key in arguments and not isinstance(arguments.get(key), str)
+                            for key in ("variant", "caption")
+                        ):
+                            continue
+                        return json.dumps(arguments, ensure_ascii=False), "product_image_tool"
+
                     if function.get("name") != "query_order" or not self.commerce_config.enabled:
                         continue
                     if set(arguments) - {"query_type", "order_id", "email", "selected_order_id"}:
@@ -2512,6 +2558,129 @@ class PanelState:
             mapped = _map_ai_error(error)
             self.log("ERROR", "ai.reply", _ai_error_log_message(mapped), name)
             return "", mapped.code
+
+    def _execute_product_image(self, session, chat_id, message_id, original_timestamp,
+                                ticket, arguments, incoming, context, dispatch):
+        """Validate and deliver one strictly tagged product image."""
+        session = normalize_session_name(session)
+        if not dispatch or self.chat is None:
+            return {"action": "ignored", "reason": "产品图片发送条件不满足", "session": session}
+        try:
+            args = json.loads(arguments) if isinstance(arguments, str) else arguments
+        except (TypeError, ValueError):
+            args = None
+        if not isinstance(args, dict) or set(args) - {"product_tag", "variant", "caption"}:
+            return {"action": "ignored", "reason": "产品图片工具参数无效", "session": session}
+        product_tag = args.get("product_tag")
+        variant = args.get("variant", "")
+        caption = args.get("caption", "")
+        if (
+            not isinstance(product_tag, str)
+            or not product_tag.strip()
+            or not isinstance(variant, str)
+            or not isinstance(caption, str)
+            or len(product_tag.strip()) > 120
+            or len(variant.strip()) > 120
+            or len(caption) > 4096
+        ):
+            return {"action": "ignored", "reason": "产品图片工具参数无效", "session": session}
+        # Tool authorization is based on the current customer message only.
+        # Conversation history is context for the model, never permission to
+        # send a product image.
+        current = str(incoming or "")
+        normalized_current = re.sub(r"\s+", " ", current).casefold()
+        normalized_tag = re.sub(r"\s+", " ", product_tag).strip().casefold()
+        if not normalized_tag or normalized_tag not in normalized_current:
+            self.log("INFO", "product_image.not_found", "当前消息未明确包含产品标签", session)
+            return {"action": "ignored", "reason": "当前消息未明确询问该产品", "session": session}
+        try:
+            settings = self.product_images.settings_payload()
+            if not settings.get("auto_send_enabled"):
+                return {"action": "ignored", "reason": "产品图片自动发送已关闭", "session": session}
+            if self.product_images.daily_sent_count() >= int(settings.get("daily_limit", 20)):
+                self.log("INFO", "product_image.limit", "已达到产品图片每日发送上限", session)
+                return {"action": "ignored", "reason": "已达到产品图片每日上限", "session": session}
+            if self.chat.is_human_takeover(session, chat_id):
+                return {"action": "ignored", "reason": "人工接管中", "session": session}
+            if self._reply_ticket(session, original_timestamp, chat_id) != ticket:
+                return {"action": "ignored", "reason": "发送前回复条件已变化", "session": session}
+            if not self._sync_reply_connections():
+                return {"action": "ignored", "reason": "WhatsApp 会话状态暂不可用", "session": session}
+            remote = extract_sessions(self.client.get_sessions())
+            if not classify_session_state(session_state_for(remote, session)):
+                return {"action": "ignored", "reason": "WhatsApp 会话未连接", "session": session}
+            resolved = self.product_images.resolve_for_send(product_tag, variant)
+            if resolved.get("status") != "FOUND":
+                code = str(resolved.get("code") or resolved.get("status") or "NOT_FOUND")
+                self.log("INFO", "product_image." + code.lower(), "产品图片未找到唯一匹配", session)
+                return {"action": "ignored", "reason": "没有唯一可发送的产品图片", "session": session}
+            if not caption.strip():
+                template = str(resolved.get("caption_template") or "")
+                caption = template.replace("{product_tag}", product_tag).strip()
+            reservation = self.product_images.reserve_send(
+                session, chat_id, message_id, resolved["asset_id"], resolved["tag_key"], caption
+            )
+            if not reservation:
+                return {"action": "ignored", "reason": "产品图片发送请求未能预留", "session": session}
+            if not reservation.get("reserved"):
+                state = str(reservation.get("state") or "PENDING")
+                self.log("INFO", "product_image." + state.lower(), "产品图片请求已处理，跳过重复发送", session)
+                return {"action": "ignored", "reason": "产品图片请求已处理", "session": session}
+            content_type, body = self.product_images.preview(resolved["asset_id"])
+            with self.reply_policy.lock:
+                if self._reply_ticket(session, original_timestamp, chat_id) != ticket:
+                    self.product_images.finish_send(reservation["request_id"], "FAILED", error_code="POLICY_CHANGED")
+                    return {"action": "ignored", "reason": "发送前回复条件已变化", "session": session}
+                result = self.chat.send_automated_image(
+                    session,
+                    chat_id,
+                    resolved["original_filename"],
+                    content_type,
+                    body,
+                    caption,
+                    reservation["request_id"],
+                    origin="product_image",
+                )
+            message_id_value = None
+            if isinstance(result, dict) and result.get("message_ref"):
+                try:
+                    _message_chat, message_id_value = self.chat._decode_message(session, result["message_ref"])
+                except Exception:
+                    message_id_value = None
+            self.product_images.finish_send(
+                reservation["request_id"],
+                "SENT",
+                message_id=message_id_value,
+            )
+            self.log("INFO", "product_image.sent", "已发送产品图片", session)
+            return {"action": "replied", "mode": "product_image", "session": session, "text": "产品图片已发送"}
+        except ChatSendError as error:
+            state = str(getattr(error, "state", "FAILED") or "FAILED").upper()
+            code = str(getattr(error, "code", "WAHA_SEND_FAILED") or "WAHA_SEND_FAILED")
+            if "reservation" in locals() and reservation and reservation.get("reserved"):
+                try:
+                    self.product_images.finish_send(reservation["request_id"], state, error_code=code)
+                except Exception:
+                    pass
+            event = "product_image.send_unknown" if state == "UNKNOWN" else "product_image.send_failed"
+            self.log("WARN" if state == "UNKNOWN" else "ERROR", event, "产品图片发送结果未确认" if state == "UNKNOWN" else "产品图片发送失败", session)
+            return {"action": "ignored", "reason": "产品图片发送结果未确认" if state == "UNKNOWN" else "产品图片发送失败", "session": session}
+        except ProductImageError as error:
+            if "reservation" in locals() and reservation and reservation.get("reserved"):
+                try:
+                    self.product_images.finish_send(reservation["request_id"], "FAILED", error_code=getattr(error, "code", "PRODUCT_IMAGE_ERROR"))
+                except Exception:
+                    pass
+            self.log("WARN", "product_image.send_failed", "产品图片发送未完成", session)
+            return {"action": "ignored", "reason": "产品图片发送未完成", "session": session}
+        except Exception:
+            if "reservation" in locals() and reservation and reservation.get("reserved"):
+                try:
+                    self.product_images.finish_send(reservation["request_id"], "FAILED", error_code="PRODUCT_IMAGE_ERROR")
+                except Exception:
+                    pass
+            self.log("ERROR", "product_image.send_failed", "产品图片发送未完成", session)
+            return {"action": "ignored", "reason": "产品图片发送未完成", "session": session}
 
     def _execute_iptv_trial(self, session, chat_id, message_id, original_timestamp,
                             ticket, policy_token, arguments, incoming, context, dispatch):
@@ -2804,6 +2973,9 @@ class PanelState:
         if image_content is not None:
             ai_kwargs["image_content"] = image_content
         reply, mode = self._ai_reply(settings, incoming_for_ai, **ai_kwargs)
+        if mode == "product_image_tool":
+            return self._execute_product_image(session_name, chat_id, message_id, original_timestamp,
+                ticket, reply, incoming_for_ai, context, dispatch)
         if mode == "iptv_trial_tool":
             return self._execute_iptv_trial(session_name, chat_id, message_id, original_timestamp,
                 ticket, iptv_token, reply, incoming_for_ai, context, dispatch)

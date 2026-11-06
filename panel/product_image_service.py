@@ -137,7 +137,7 @@ class ProductImageService:
     def _safe_filename(filename):
         original = str(filename or "").replace("\x00", "")
         safe = Path(original).name
-        if not safe or safe != original or len(safe) > 255:
+        if not safe or safe != original or "/" in original or "\\" in original or len(safe) > 255:
             raise ProductImageValidationError("图片文件名无效", "INVALID_FILENAME")
         return safe
 
@@ -602,6 +602,128 @@ class ProductImageService:
             result = self._load_asset(connection, asset_id, include_inactive=True)
         self._log("INFO", f"product_image.disabled asset={str(asset_id)[:12]}")
         return result
+
+    def _chat_key_hmac(self, session_name, chat_id):
+        # Product-image storage does not receive the panel's chat cipher key.
+        # A one-way digest keeps raw customer identifiers out of this ledger;
+        # the chat service remains the owner of encrypted references.
+        value = f"product-image-chat-v1\x00{session_name}\x00{chat_id}"
+        return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _caption_hash(caption):
+        return hashlib.sha256(str(caption or "").encode("utf-8")).hexdigest()
+
+    def reserve_send(self, session_name, chat_id, message_key, asset_id, tag_key, caption):
+        session = str(session_name or "").strip()
+        customer = str(chat_id or "").strip()
+        message = str(message_key or "").strip()
+        asset = str(asset_id or "").strip()
+        tag = normalize_tag(tag_key)
+        safe_caption = self._clean_caption(caption)
+        if not session or not customer or not message or len(message) > 512:
+            raise ProductImageValidationError("图片发送请求参数无效", "INVALID_SEND_REQUEST")
+        if not asset or not tag:
+            raise ProductImageValidationError("图片发送目标无效", "INVALID_SEND_REQUEST")
+        chat_key = self._chat_key_hmac(session, customer)
+        caption_hash = self._caption_hash(safe_caption)
+        payload_hash = hashlib.sha256(
+            f"{asset}\x00{tag}\x00{caption_hash}".encode("utf-8")
+        ).hexdigest()
+        now = self._now()
+        with self._db() as connection:
+            existing = connection.execute(
+                "SELECT request_id,state,waha_message_id,error_code,asset_id,tag_key,caption_hash,payload_hash "
+                "FROM product_image_send_requests WHERE session_name=? AND chat_key_hmac=? AND message_key=?",
+                (session, chat_key, message),
+            ).fetchone()
+            if existing:
+                return {
+                    "request_id": str(existing["request_id"]),
+                    "state": str(existing["state"]),
+                    "waha_message_id": existing["waha_message_id"],
+                    "error_code": existing["error_code"],
+                    "asset_id": str(existing["asset_id"]),
+                    "tag_key": str(existing["tag_key"]),
+                    "caption_hash": str(existing["caption_hash"]),
+                    "payload_hash": str(existing["payload_hash"]),
+                    "reserved": False,
+                }
+            request_id = str(uuid.uuid4())
+            connection.execute(
+                "INSERT OR IGNORE INTO product_image_send_requests(request_id,session_name,chat_key_hmac,message_key,asset_id,tag_key,caption_hash,payload_hash,state,waha_message_id,error_code,created_at,updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    request_id,
+                    session,
+                    chat_key,
+                    message,
+                    asset,
+                    tag,
+                    caption_hash,
+                    payload_hash,
+                    "PENDING",
+                    None,
+                    None,
+                    now,
+                    now,
+                ),
+            )
+            if connection.execute("SELECT changes()").fetchone()[0] == 0:
+                existing = connection.execute(
+                    "SELECT request_id,state,waha_message_id,error_code,asset_id,tag_key,caption_hash,payload_hash "
+                    "FROM product_image_send_requests WHERE session_name=? AND chat_key_hmac=? AND message_key=?",
+                    (session, chat_key, message),
+                ).fetchone()
+                return {
+                    "request_id": str(existing["request_id"]),
+                    "state": str(existing["state"]),
+                    "waha_message_id": existing["waha_message_id"],
+                    "error_code": existing["error_code"],
+                    "asset_id": str(existing["asset_id"]),
+                    "tag_key": str(existing["tag_key"]),
+                    "caption_hash": str(existing["caption_hash"]),
+                    "payload_hash": str(existing["payload_hash"]),
+                    "reserved": False,
+                }
+        return {
+            "request_id": request_id,
+            "state": "PENDING",
+            "waha_message_id": None,
+            "error_code": None,
+            "asset_id": asset,
+            "tag_key": tag,
+            "caption_hash": caption_hash,
+            "payload_hash": payload_hash,
+            "reserved": True,
+        }
+
+    def finish_send(self, request_id, state, message_id=None, error_code=None):
+        final_state = str(state or "").upper()
+        if final_state not in {"PENDING", "SENT", "FAILED", "UNKNOWN"}:
+            raise ProductImageValidationError("图片发送状态无效", "INVALID_SEND_STATE")
+        with self._db() as connection:
+            connection.execute(
+                "UPDATE product_image_send_requests SET state=?,waha_message_id=?,error_code=?,updated_at=? WHERE request_id=?",
+                (
+                    final_state,
+                    str(message_id or "") or None,
+                    str(error_code or "") or None,
+                    self._now(),
+                    str(request_id),
+                ),
+            )
+
+    def daily_sent_count(self):
+        start = self._now() - (self._now() % 86400)
+        with self._db() as connection:
+            return int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM product_image_send_requests WHERE state='SENT' AND updated_at>=?",
+                    (start,),
+                ).fetchone()[0]
+            )
+
 
     def resolve_for_send(self, product_tag, variant=""):
         tag_key = normalize_tag(product_tag)
