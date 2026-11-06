@@ -267,6 +267,54 @@ class ChatServiceEngagementTests(unittest.TestCase):
         second = self.service.send_automated_text("default", "chat-1@c.us", "自动", "00000000-0000-0000-0000-000000000002")
         self.assertEqual(first, second); self.assertEqual(self.client.calls, 1)
 
+    def test_automated_image_send_is_idempotent_and_archives_product_origin(self):
+        events = []
+        service = ChatService(
+            self.database,
+            self.client,
+            _Codec(),
+            b"s" * 32,
+            clock=self.clock,
+            outbound_recorder=lambda *args, **kwargs: events.append((args, kwargs)),
+        )
+        image = base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+        )
+        request_id = "00000000-0000-0000-0000-000000000012"
+        first = service.send_automated_image(
+            "default", "chat-1@c.us", "product.png", "image/png", image, "产品说明", request_id
+        )
+        second = service.send_automated_image(
+            "default", "chat-1@c.us", "product.png", "image/png", image, "产品说明", request_id
+        )
+        self.assertEqual(first, second)
+        self.assertEqual(first["state"], "SENT")
+        self.assertEqual(self.client.calls, 1)
+        self.assertEqual(events[0][1]["origin"], "product_image")
+
+    def test_automated_image_rejects_invalid_data(self):
+        with self.assertRaises(Exception):
+            self.service.send_automated_image(
+                "default", "chat-1@c.us", "product.png", "image/png", b"bad", "", str(uuid.uuid4())
+            )
+        self.assertEqual(self.client.calls, 0)
+
+    def test_automated_image_unknown_is_not_retried(self):
+        self.client.mode = "unknown"
+        request_id = "00000000-0000-0000-0000-000000000013"
+        image = base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+        )
+        with self.assertRaises(Exception):
+            self.service.send_automated_image(
+                "default", "chat-1@c.us", "product.png", "image/png", image, "", request_id
+            )
+        with self.assertRaises(Exception):
+            self.service.send_automated_image(
+                "default", "chat-1@c.us", "product.png", "image/png", image, "", request_id
+            )
+        self.assertEqual(self.client.calls, 1)
+
     def test_automated_unknown_is_stored_without_auto_retry(self):
         self.client.mode = "unknown"
         with self.assertRaises(Exception): self.service.send_automated_text("default", "chat-1@c.us", "自动", "00000000-0000-0000-0000-000000000003")

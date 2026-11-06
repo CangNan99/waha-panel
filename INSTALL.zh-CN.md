@@ -3,7 +3,7 @@
 本指南适用于 GitHub 仓库 `CangNan99/waha-panel` 的便携发布版。它安装两个可以独立更新的 Docker 服务：
 
 - WAHA：`devlikeapro/waha:latest-2026.9.1`
-- 管理面板：`docker.io/cangnan88/waha-panel:1.0.24`
+- 管理面板：`docker.io/cangnan88/waha-panel:1.0.25`
 
 面板默认仅监听服务器本机，不会把管理端口直接暴露到公网。面板使用 SQLite，不部署额外数据库服务；数据通过 Docker 命名卷持久化保存。
 
@@ -113,7 +113,7 @@ docker network ls --filter name=waha-release-internal
 
 - `waha-release_sessions`：WAHA 会话认证状态；
 - `waha-release_media`：WhatsApp 媒体文件；
-- `waha-release_panel_data`：面板 SQLite、知识库、聊天记录和系统记录。
+- `waha-release_panel_data`：面板 SQLite、知识库、聊天记录、系统记录和 `product-images/` 图片目录。
 
 发布包默认创建内部网络 `waha-release-internal`。面板在容器内通过 `http://waha:3000` 访问 WAHA，宿主机端口只是映射入口。
 
@@ -136,6 +136,12 @@ docker compose ps
 ```
 
 不要使用 `docker compose down -v` 做普通重启或更新，它可能删除持久化卷。
+
+### 产品图片库
+
+管理员登录后打开左侧“产品图片”页面，上传 JPG、PNG 或 WebP，绑定规范化产品标签，并设置主图和优先级。全局自动发送开关默认开启，每日上限默认 20；关闭后所有聊天都会停止 AI 自动发图。AI 只在客户当前消息明确包含标签时调用工具，无法唯一匹配主图时发送普通文字。WAHA 发送结果未知会保存为 `UNKNOWN`，系统不会自动重试，避免重复发送。
+
+图片文件位于面板数据卷的 `product-images/` 目录，接口只允许管理员访问，预览响应使用 `private, no-store`。备份时必须同时保存 `panel.sqlite3` 和 `product-images/`；恢复时也必须成对恢复，不能只恢复数据库或图片目录。
 
 ## 5. 创建并连接 WhatsApp 会话
 

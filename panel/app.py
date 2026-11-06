@@ -95,6 +95,9 @@ try:
     )
     from .chat_automation import ChatAutomationService
     from .chat_page import chat_management_page
+    from .product_image_service import ProductImageService
+    from .product_image_page import product_image_page
+    from .product_image_service import ProductImageError
     from .customer_memory_service import CustomerMemoryService
     from .aliyun_translation_service import AliyunTranslationError, AliyunTranslationService
     from .global_translation_service import GlobalTranslationError, GlobalTranslationService
@@ -135,6 +138,9 @@ except ImportError:  # Supports the existing `python app.py` container entrypoin
     )
     from chat_automation import ChatAutomationService
     from chat_page import chat_management_page
+    from product_image_service import ProductImageService
+    from product_image_page import product_image_page
+    from product_image_service import ProductImageError
     from customer_memory_service import CustomerMemoryService
     from aliyun_translation_service import AliyunTranslationError, AliyunTranslationService
     from global_translation_service import GlobalTranslationError, GlobalTranslationService
@@ -699,6 +705,10 @@ def init_db(path, seed_business=True):
         )
         if "enabled" not in _table_columns(connection, "global_translation_settings"):
             connection.executescript(global_translation_toggle_migration.read_text(encoding="utf-8"))
+        product_image_migration = (
+            Path(__file__).with_name("migrations") / "014_product_image_library.sql"
+        )
+        connection.executescript(product_image_migration.read_text(encoding="utf-8"))
         system_labels_migration = (
             Path(__file__).with_name("migrations") / "012_customer_system_labels.sql"
         )
@@ -1032,9 +1042,17 @@ class PanelState:
         self.admin_username = str(admin_username or "")
         self.admin_password = str(admin_password or "")
         self.admin_service = AdminService(self.database_path)
+        self.product_images = ProductImageService(
+            self.database_path,
+            self.database_path.parent / "product-images",
+            clock=time.time,
+            logger=lambda level, message: self.log(
+                str(level or "INFO").upper(), "product.image", message, DEFAULT_SESSION_NAME
+            ),
+        )
         self._admin_db_auth = as_bool(os.environ.get("PANEL_ADMIN_DB_AUTH", "0"))
         self._update_service = UpdateService(
-            current_panel=os.environ.get("PANEL_VERSION", "1.0.24"),
+            current_panel=os.environ.get("PANEL_VERSION", "1.0.25"),
             current_waha=os.environ.get("WAHA_IMAGE_TAG", "latest-2026.9.1"),
         )
         self.sleep_fn = sleep_fn or time.sleep
@@ -2376,6 +2394,25 @@ class PanelState:
                 "sends the real credentials after the tool succeeds. Do not include a customer ID, "
                 "package, duration, API key or password in tool arguments."
             )
+        product_image_enabled = False
+        try:
+            product_settings = self.product_images.settings_payload()
+            product_image_enabled = bool(
+                include_tools
+                and product_settings.get("auto_send_enabled")
+                and self.product_images.list_assets()["total"] > 0
+            )
+        except Exception:
+            product_settings = {"auto_send_enabled": False, "daily_limit": 0}
+        if product_image_enabled:
+            system_parts.append(
+                "PRODUCT IMAGE RULES: Call send_product_image only when the current customer message "
+                "explicitly asks about or requests the named product. Use an exact product tag from the "
+                "current message; never guess a tag from older history, customer memory, or a vague request. "
+                "The server selects one unique active primary image and sends it directly. Never call the "
+                "tool more than once for one customer message, never expose internal IDs, filesystem paths, "
+                "or image URLs, and use ordinary text when the product tag is missing or uncertain."
+            )
         user_content = incoming_text
         if isinstance(image_content, dict):
             mime_type = str(image_content.get("mime_type") or "image/png").strip().lower()
@@ -2425,6 +2462,21 @@ class PanelState:
                 "parameters": {"type": "object", "additionalProperties": False,
                     "properties": {"language": {"type": "string", "enum": list(IPTV_LANGUAGES)}},
                     "required": ["language"]},
+            }})
+        if product_image_enabled:
+            tools.append({"type": "function", "function": {
+                "name": "send_product_image",
+                "description": "客户当前明确询问对应产品时发送一张已配置的产品图片",
+                "parameters": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "product_tag": {"type": "string"},
+                        "variant": {"type": "string"},
+                        "caption": {"type": "string"},
+                    },
+                    "required": ["product_tag"],
+                },
             }})
         if tools:
             request_payload["tools"] = tools
@@ -2479,6 +2531,18 @@ class PanelState:
                         if set(arguments) == {"language"} and arguments.get("language") in IPTV_LANGUAGES:
                             return json.dumps(arguments), "iptv_trial_tool"
                         continue
+                    if function.get("name") == "send_product_image" and product_image_enabled:
+                        if set(arguments) - {"product_tag", "variant", "caption"}:
+                            continue
+                        if not isinstance(arguments.get("product_tag"), str) or not arguments.get("product_tag", "").strip():
+                            continue
+                        if any(
+                            key in arguments and not isinstance(arguments.get(key), str)
+                            for key in ("variant", "caption")
+                        ):
+                            continue
+                        return json.dumps(arguments, ensure_ascii=False), "product_image_tool"
+
                     if function.get("name") != "query_order" or not self.commerce_config.enabled:
                         continue
                     if set(arguments) - {"query_type", "order_id", "email", "selected_order_id"}:
@@ -2494,6 +2558,134 @@ class PanelState:
             mapped = _map_ai_error(error)
             self.log("ERROR", "ai.reply", _ai_error_log_message(mapped), name)
             return "", mapped.code
+
+    def _execute_product_image(self, session, chat_id, message_id, original_timestamp,
+                                ticket, arguments, incoming, context, dispatch):
+        """Validate and deliver one strictly tagged product image."""
+        session = normalize_session_name(session)
+        if not dispatch or self.chat is None:
+            return {"action": "ignored", "reason": "产品图片发送条件不满足", "session": session}
+        try:
+            args = json.loads(arguments) if isinstance(arguments, str) else arguments
+        except (TypeError, ValueError):
+            args = None
+        if not isinstance(args, dict) or set(args) - {"product_tag", "variant", "caption"}:
+            return {"action": "ignored", "reason": "产品图片工具参数无效", "session": session}
+        product_tag = args.get("product_tag")
+        variant = args.get("variant", "")
+        caption = args.get("caption", "")
+        if (
+            not isinstance(product_tag, str)
+            or not product_tag.strip()
+            or not isinstance(variant, str)
+            or not isinstance(caption, str)
+            or len(product_tag.strip()) > 120
+            or len(variant.strip()) > 120
+            or len(caption) > 4096
+        ):
+            return {"action": "ignored", "reason": "产品图片工具参数无效", "session": session}
+        # Tool authorization is based on the current customer message only.
+        # Conversation history is context for the model, never permission to
+        # send a product image.
+        current = str(incoming or "")
+        normalized_current = re.sub(r"\s+", " ", current).casefold()
+        normalized_tag = re.sub(r"\s+", " ", product_tag).strip().casefold()
+        if normalized_tag.isascii() and re.fullmatch(r"[a-z0-9][a-z0-9 _+.-]*", normalized_tag):
+            tag_pattern = r"(?<![a-z0-9])" + re.escape(normalized_tag) + r"(?![a-z0-9])"
+            tag_is_present = re.search(tag_pattern, normalized_current) is not None
+        else:
+            tag_is_present = normalized_tag in normalized_current
+        if not normalized_tag or not tag_is_present:
+            self.log("INFO", "product_image.not_found", "当前消息未明确包含产品标签", session)
+            return {"action": "ignored", "reason": "当前消息未明确询问该产品", "session": session}
+        try:
+            settings = self.product_images.settings_payload()
+            if not settings.get("auto_send_enabled"):
+                return {"action": "ignored", "reason": "产品图片自动发送已关闭", "session": session}
+            if self.product_images.daily_sent_count() >= int(settings.get("daily_limit", 20)):
+                self.log("INFO", "product_image.limit", "已达到产品图片每日发送上限", session)
+                return {"action": "ignored", "reason": "已达到产品图片每日上限", "session": session}
+            if self.chat.is_human_takeover(session, chat_id):
+                return {"action": "ignored", "reason": "人工接管中", "session": session}
+            if self._reply_ticket(session, original_timestamp, chat_id) != ticket:
+                return {"action": "ignored", "reason": "发送前回复条件已变化", "session": session}
+            if not self._sync_reply_connections():
+                return {"action": "ignored", "reason": "WhatsApp 会话状态暂不可用", "session": session}
+            remote = extract_sessions(self.client.get_sessions())
+            if not classify_session_state(session_state_for(remote, session)):
+                return {"action": "ignored", "reason": "WhatsApp 会话未连接", "session": session}
+            resolved = self.product_images.resolve_for_send(product_tag, variant)
+            if resolved.get("status") != "FOUND":
+                code = str(resolved.get("code") or resolved.get("status") or "NOT_FOUND")
+                self.log("INFO", "product_image." + code.lower(), "产品图片未找到唯一匹配", session)
+                return {"action": "ignored", "reason": "没有唯一可发送的产品图片", "session": session}
+            if not caption.strip():
+                template = str(resolved.get("caption_template") or "")
+                caption = template.replace("{product_tag}", product_tag).strip()
+            reservation = self.product_images.reserve_send(
+                session, chat_id, message_id, resolved["asset_id"], resolved["tag_key"], caption
+            )
+            if not reservation:
+                return {"action": "ignored", "reason": "产品图片发送请求未能预留", "session": session}
+            if not reservation.get("reserved"):
+                state = str(reservation.get("state") or "PENDING")
+                self.log("INFO", "product_image." + state.lower(), "产品图片请求已处理，跳过重复发送", session)
+                return {"action": "ignored", "reason": "产品图片请求已处理", "session": session}
+            content_type, body = self.product_images.preview(resolved["asset_id"])
+            with self.reply_policy.lock:
+                if self._reply_ticket(session, original_timestamp, chat_id) != ticket:
+                    self.product_images.finish_send(reservation["request_id"], "FAILED", error_code="POLICY_CHANGED")
+                    return {"action": "ignored", "reason": "发送前回复条件已变化", "session": session}
+                result = self.chat.send_automated_image(
+                    session,
+                    chat_id,
+                    resolved["original_filename"],
+                    content_type,
+                    body,
+                    caption,
+                    reservation["request_id"],
+                    origin="product_image",
+                )
+            message_id_value = None
+            if isinstance(result, dict) and result.get("message_ref"):
+                try:
+                    _message_chat, message_id_value = self.chat._decode_message(session, result["message_ref"])
+                except Exception:
+                    message_id_value = None
+            self.product_images.finish_send(
+                reservation["request_id"],
+                "SENT",
+                message_id=message_id_value,
+            )
+            self.log("INFO", "product_image.sent", "已发送产品图片", session)
+            return {"action": "replied", "mode": "product_image", "session": session, "text": "产品图片已发送"}
+        except ChatSendError as error:
+            state = str(getattr(error, "state", "FAILED") or "FAILED").upper()
+            code = str(getattr(error, "code", "WAHA_SEND_FAILED") or "WAHA_SEND_FAILED")
+            if "reservation" in locals() and reservation and reservation.get("reserved"):
+                try:
+                    self.product_images.finish_send(reservation["request_id"], state, error_code=code)
+                except Exception:
+                    pass
+            event = "product_image.send_unknown" if state == "UNKNOWN" else "product_image.send_failed"
+            self.log("WARN" if state == "UNKNOWN" else "ERROR", event, "产品图片发送结果未确认" if state == "UNKNOWN" else "产品图片发送失败", session)
+            return {"action": "ignored", "reason": "产品图片发送结果未确认" if state == "UNKNOWN" else "产品图片发送失败", "session": session}
+        except ProductImageError as error:
+            if "reservation" in locals() and reservation and reservation.get("reserved"):
+                try:
+                    self.product_images.finish_send(reservation["request_id"], "FAILED", error_code=getattr(error, "code", "PRODUCT_IMAGE_ERROR"))
+                except Exception:
+                    pass
+            self.log("WARN", "product_image.send_failed", "产品图片发送未完成", session)
+            return {"action": "ignored", "reason": "产品图片发送未完成", "session": session}
+        except Exception:
+            if "reservation" in locals() and reservation and reservation.get("reserved"):
+                try:
+                    self.product_images.finish_send(reservation["request_id"], "FAILED", error_code="PRODUCT_IMAGE_ERROR")
+                except Exception:
+                    pass
+            self.log("ERROR", "product_image.send_failed", "产品图片发送未完成", session)
+            return {"action": "ignored", "reason": "产品图片发送未完成", "session": session}
 
     def _execute_iptv_trial(self, session, chat_id, message_id, original_timestamp,
                             ticket, policy_token, arguments, incoming, context, dispatch):
@@ -2786,6 +2978,9 @@ class PanelState:
         if image_content is not None:
             ai_kwargs["image_content"] = image_content
         reply, mode = self._ai_reply(settings, incoming_for_ai, **ai_kwargs)
+        if mode == "product_image_tool":
+            return self._execute_product_image(session_name, chat_id, message_id, original_timestamp,
+                ticket, reply, incoming_for_ai, context, dispatch)
         if mode == "iptv_trial_tool":
             return self._execute_iptv_trial(session_name, chat_id, message_id, original_timestamp,
                 ticket, iptv_token, reply, incoming_for_ai, context, dispatch)
@@ -4841,9 +5036,167 @@ class PanelHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    @staticmethod
+    def _product_image_public(asset):
+        if not isinstance(asset, dict):
+            return asset
+        allowed = {
+            "asset_id", "title", "caption_template", "original_filename", "mime_type",
+            "byte_size", "width", "height", "active", "is_active", "sort_order",
+            "created_at", "updated_at", "tags", "reused", "status", "code", "tag_key", "variant",
+        }
+        return {key: value for key, value in asset.items() if key in allowed}
+
+    def read_product_image_form(self):
+        maximum = 11 * 1024 * 1024
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError as error:
+            raise ValueError("请求长度不正确") from error
+        if length <= 0 or length > maximum:
+            raise RequestTooLarge("图片上传请求不能超过 11MB")
+        content_type = self.headers.get("Content-Type", "")
+        if not content_type.lower().startswith("multipart/form-data;"):
+            raise UnsupportedRequestMedia("图片上传必须使用 multipart/form-data")
+        body = self.rfile.read(length)
+        try:
+            envelope = BytesParser(policy=email_policy).parsebytes(
+                ("Content-Type: " + content_type + "\r\nMIME-Version: 1.0\r\n\r\n").encode("utf-8")
+                + body
+            )
+        except Exception as error:
+            raise ValueError("图片上传表单格式不正确") from error
+        if not envelope.is_multipart():
+            raise ValueError("图片上传表单格式不正确")
+        allowed = {"title", "tags", "caption_template", "image"}
+        values = {}
+        for part in envelope.iter_parts():
+            name = part.get_param("name", header="content-disposition")
+            if not name or name not in allowed or name in values:
+                raise ValueError("图片上传表单字段无效或重复")
+            if part.is_multipart():
+                raise ValueError("图片上传表单不支持嵌套内容")
+            raw = part.get_payload(decode=True) or b""
+            filename = part.get_filename()
+            if name == "image":
+                if not filename:
+                    raise ValueError("请选择图片文件")
+                values[name] = {
+                    "filename": filename,
+                    "content_type": part.get_content_type(),
+                    "data": raw,
+                }
+            else:
+                if filename:
+                    raise ValueError("文字字段不能作为文件上传")
+                try:
+                    values[name] = raw.decode(part.get_content_charset() or "utf-8")
+                except (LookupError, UnicodeError) as error:
+                    raise ValueError("图片上传文字字段编码无效") from error
+        if not values.get("image") or not str(values.get("title") or "").strip():
+            raise ValueError("图片上传缺少标题或图片")
+        values.setdefault("tags", "[]")
+        values.setdefault("caption_template", "")
+        try:
+            tags = json.loads(values["tags"])
+        except (TypeError, json.JSONDecodeError):
+            tags = [item.strip() for item in str(values["tags"]).split(",") if item.strip()]
+        if not isinstance(tags, list):
+            raise ValueError("产品标签必须是数组")
+        values["tags"] = tags
+        return values
+
+    def send_product_image_get(self, route):
+        self.require_admin_auth()
+        service = self.state.product_images
+        if route == "/api/product-images":
+            query = parse_qs(urlparse(self.path).query, keep_blank_values=True)
+            include_inactive = as_bool(query.get("include_inactive", ["0"])[0])
+            payload = service.list_assets(query.get("tag", [""])[0], include_inactive)
+            payload["items"] = [self._product_image_public(item) for item in payload["items"]]
+            self.send_json(payload)
+            return
+        prefix = "/api/product-images/"
+        if route.startswith(prefix) and route.endswith("/preview"):
+            asset_id = unquote(route[len(prefix):-len("/preview")])
+            if not asset_id or "/" in asset_id:
+                raise ValueError("图片编号无效")
+            content_type, body = service.preview(asset_id)
+            self.send_media(HTTPStatus.OK, content_type, body)
+            return
+        if route == "/api/product-tags":
+            self.send_json(service.list_tags())
+            return
+        if route == "/api/product-image-settings":
+            self.send_json(service.settings_payload())
+            return
+        raise ValueError("产品图片查询路径不正确")
+
+    def send_product_image_post(self, route):
+        self.require_csrf()
+        service = self.state.product_images
+        if route == "/api/product-images":
+            form = self.read_product_image_form()
+            image = form["image"]
+            result = service.upload(
+                image["filename"], image["content_type"], image["data"],
+                form["title"], form["tags"], form.get("caption_template", ""),
+            )
+            self.send_json(self._product_image_public(result), HTTPStatus.CREATED)
+            return
+        if route == "/api/product-tags":
+            self.send_json(service.create_tag(self.read_api_json()), HTTPStatus.CREATED)
+            return
+        raise ValueError("产品图片写入路径不正确")
+
+    def send_product_image_put(self, route):
+        self.require_csrf()
+        service = self.state.product_images
+        if route == "/api/product-image-settings":
+            self.send_json(service.save_settings(self.read_api_json()))
+            return
+        if route == "/api/product-tags" or route.startswith("/api/product-tags/"):
+            if route == "/api/product-tags" or route.endswith("/"):
+                raise ValueError("标签编号无效")
+            tag_id = route.rsplit("/", 1)[1]
+            self.send_json(service.update_tag(int(tag_id), self.read_api_json()))
+            return
+        prefix = "/api/product-images/"
+        if route.startswith(prefix):
+            asset_id = unquote(route[len(prefix):])
+            if not asset_id or "/" in asset_id:
+                raise ValueError("图片编号无效")
+            self.send_json(self._product_image_public(service.update_asset(asset_id, self.read_api_json())))
+            return
+        raise ValueError("产品图片更新路径不正确")
+
+    def send_product_image_delete(self, route):
+        self.require_csrf()
+        service = self.state.product_images
+        if route.startswith("/api/product-images/"):
+            asset_id = unquote(route[len("/api/product-images/"):])
+            if not asset_id or "/" in asset_id:
+                raise ValueError("图片编号无效")
+            self.send_json(self._product_image_public(service.disable_asset(asset_id)))
+            return
+        if route.startswith("/api/product-tags/"):
+            tag_id = route.rsplit("/", 1)[1]
+            self.send_json(service.delete_tag(int(tag_id)))
+            return
+        raise ValueError("产品图片删除路径不正确")
+
     def do_GET(self):
         route = urlparse(self.path).path
         try:
+            if route == "/product-images":
+                self.require_admin_auth()
+                self.send_ui_bytes(product_image_page().encode("utf-8"), "text/html; charset=utf-8")
+                return
+            if route == "/api/product-images" or route.startswith("/api/product-images/") or route in {
+                "/api/product-tags", "/api/product-image-settings",
+            }:
+                self.send_product_image_get(route)
+                return
             if route in {"/api/overview", "/api/logs"}:
                 self.require_admin_auth()
                 try:
@@ -4981,6 +5334,9 @@ class PanelHandler(BaseHTTPRequestHandler):
                 self.send_json({"message": "Not found"}, HTTPStatus.NOT_FOUND)
         except (ChatServiceError, TranslationError, RequestTooLarge, UnsupportedRequestMedia) as error:
             self.send_service_error(error)
+        except ProductImageError as error:
+            status = HTTPStatus.NOT_FOUND if getattr(error, "code", "") in {"PRODUCT_IMAGE_NOT_FOUND", "TAG_NOT_FOUND"} else HTTPStatus.CONFLICT if getattr(error, "code", "") in {"TAG_EXISTS"} else HTTPStatus.BAD_REQUEST
+            self.send_json({"message": str(error), "code": getattr(error, "code", "PRODUCT_IMAGE_ERROR")}, status)
         except AdminServiceError as error:
             self.send_service_error(error)
         except WahaApiError as error:
@@ -5008,7 +5364,9 @@ class PanelHandler(BaseHTTPRequestHandler):
                 return
             if route != "/api/webhook":
                 self.require_mutation_auth()
-            if route.startswith("/api/chat/sessions/"):
+            if route == "/api/product-images" or route == "/api/product-tags":
+                self.send_product_image_post(route)
+            elif route.startswith("/api/chat/sessions/"):
                 self.send_chat_post(route)
             elif route.startswith("/api/translation/"):
                 self.send_translation_write(route, "POST")
@@ -5048,6 +5406,9 @@ class PanelHandler(BaseHTTPRequestHandler):
                 self.send_json({"message": "Not found"}, HTTPStatus.NOT_FOUND)
         except (ChatServiceError, TranslationError, RequestTooLarge, UnsupportedRequestMedia) as error:
             self.send_service_error(error)
+        except ProductImageError as error:
+            status = HTTPStatus.NOT_FOUND if getattr(error, "code", "") in {"PRODUCT_IMAGE_NOT_FOUND", "TAG_NOT_FOUND"} else HTTPStatus.CONFLICT if getattr(error, "code", "") in {"TAG_EXISTS"} else HTTPStatus.BAD_REQUEST
+            self.send_json({"message": str(error), "code": getattr(error, "code", "PRODUCT_IMAGE_ERROR")}, status)
         except AdminServiceError as error:
             self.send_service_error(error)
         except WahaApiError as error:
@@ -5069,7 +5430,9 @@ class PanelHandler(BaseHTTPRequestHandler):
         method = self.command.upper()
         try:
             self.require_mutation_auth()
-            if route.startswith("/api/chat/sessions/"):
+            if route == "/api/product-image-settings" or route == "/api/product-tags" or route.startswith("/api/product-tags/") or route.startswith("/api/product-images/"):
+                self.send_product_image_put(route)
+            elif route.startswith("/api/chat/sessions/"):
                 self.send_chat_labels_write(route, "PUT")
             elif route.startswith("/api/translation/"):
                 self.send_translation_write(route, "PUT")
@@ -5083,6 +5446,9 @@ class PanelHandler(BaseHTTPRequestHandler):
                 self.send_json({"message": "Not found"}, HTTPStatus.NOT_FOUND)
         except (ChatServiceError, TranslationError, RequestTooLarge, UnsupportedRequestMedia) as error:
             self.send_service_error(error)
+        except ProductImageError as error:
+            status = HTTPStatus.NOT_FOUND if getattr(error, "code", "") in {"PRODUCT_IMAGE_NOT_FOUND", "TAG_NOT_FOUND"} else HTTPStatus.CONFLICT if getattr(error, "code", "") in {"TAG_EXISTS"} else HTTPStatus.BAD_REQUEST
+            self.send_json({"message": str(error), "code": getattr(error, "code", "PRODUCT_IMAGE_ERROR")}, status)
         except AdminServiceError as error:
             self.send_service_error(error)
         except AdminAuthError as error:
@@ -5107,6 +5473,15 @@ class PanelHandler(BaseHTTPRequestHandler):
             return
         except PermissionError as error:
             self.send_json({"message": str(error)}, HTTPStatus.FORBIDDEN)
+            return
+        if route.startswith("/api/product-images/") or route.startswith("/api/product-tags/"):
+            try:
+                self.send_product_image_delete(route)
+            except ProductImageError as error:
+                status = HTTPStatus.NOT_FOUND if getattr(error, "code", "") in {"PRODUCT_IMAGE_NOT_FOUND", "TAG_NOT_FOUND"} else HTTPStatus.BAD_REQUEST
+                self.send_json({"message": str(error), "code": getattr(error, "code", "PRODUCT_IMAGE_ERROR")}, status)
+            except (ValueError, KeyError) as error:
+                self.send_json({"message": str(error)}, HTTPStatus.BAD_REQUEST)
             return
         if route.startswith("/api/chat/sessions/"):
             try:

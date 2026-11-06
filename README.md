@@ -4,7 +4,7 @@
 
 ## 界面预览
 
-1.0.24 makes translation a persisted global switch shared by every chat, while retaining the IPTV fixes from 1.0.23. The screenshots below use demonstration data.
+1.0.25 adds an administrator product image library and direct AI image sending while retaining the persisted global translation switch from 1.0.24. The screenshots below use demonstration data.
 
 ![状态概览](docs/assets/overview-1.0.15.png)
 
@@ -53,12 +53,19 @@ pwsh -File .\install.ps1
 
 - 多 WhatsApp 会话统一管理
 - AI 自动回复、摘要和标签
+- Administrator product image library with strict product-tag matching and direct AI sending
 - IPTV 测试账号自动开通、加密保存与重复领取保护（[配置说明](docs/iptv-trials.md)）
 - 聊天列表、消息收发和人工接管
 - 打开聊天时定位最新消息，新消息到达时自动跟随
 - 图片、文字等消息发送
 - Docker 卷持久化、备份和独立更新
 - 本地端口部署，可配合 Nginx 反向代理和 HTTPS 使用
+
+### Product image library and automatic sending
+
+Use the “产品图片” administrator page to upload JPG, PNG, or WebP assets and bind product tags, caption templates, priorities, and primary-image state. The global automatic-send switch is enabled by default with a daily limit of 20 images; disabling it stops automatic image sending in every chat. The AI tool is allowed only when the customer’s current message explicitly contains the product tag. Missing tags, disabled assets, or multiple primary assets at the same priority fall back to text. Each customer message sends at most one image, and an unconfirmed WAHA result is stored as `UNKNOWN` without an automatic retry.
+
+Image metadata and files live together in the `panel_data` volume. Backups and restores must include both SQLite and the `product-images/` directory. Management endpoints require administrator authentication, and previews are private no-store responses rather than public image URLs.
 
 ## 更新
 
@@ -84,6 +91,7 @@ pwsh -File .\update.ps1 -Component waha
 
 | 版本 | 更新内容 | 详细说明 |
 | --- | --- | --- |
+| 1.0.25 | Added the administrator product image library, strict tag matching, direct AI image sending, daily limits, UNKNOWN no-retry handling, and coupled backups. | [docs/releases/1.0.25.md](docs/releases/1.0.25.md) |
 | 1.0.24 | Made translation a persisted global on/off switch shared by every chat. | [docs/releases/1.0.24.md](docs/releases/1.0.24.md) |
 | 1.0.23 | Prevented duplicate IPTV supplier requests while an automatic trial is still being created. | [docs/releases/1.0.23.md](docs/releases/1.0.23.md) |
 | 1.0.22 | Improved IPTV short-message triggers and recovery for legacy unknown automatic trials. | [docs/releases/1.0.22.md](docs/releases/1.0.22.md) |
@@ -116,7 +124,7 @@ pwsh -File .\update.ps1 -Component waha
 pwsh -File .\backup.ps1
 ```
 
-备份结果位于 `backups/`，包含面板 SQLite、WAHA 会话和媒体卷的压缩文件。备份目录可能包含敏感业务数据，应限制访问权限。
+备份结果位于 `backups/`，包含 panel SQLite, the `product-images/` directory, WAHA sessions, and media volumes, plus a panel-data manifest. Restore SQLite and `product-images/` together so metadata and files stay aligned. Backup directories may contain sensitive business data and should be access restricted.
 
 ## 详细文档
 
@@ -128,6 +136,6 @@ pwsh -File .\backup.ps1
 当前镜像版本：
 
 - `devlikeapro/waha:latest-2026.9.1`
-- `docker.io/cangnan88/waha-panel:1.0.24`
+- `docker.io/cangnan88/waha-panel:1.0.25`
 
 如需域名访问，只反代到面板端口 `127.0.0.1:3003`。WAHA API 端口 `3002` 默认不应公开。请在反向代理层启用 HTTPS，并确保代理不会记录 `Authorization`、APIKey 或密码字段。
