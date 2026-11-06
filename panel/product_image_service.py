@@ -74,7 +74,7 @@ def normalize_tag(value):
 
 def display_tag(value):
     text = unicodedata.normalize("NFKC", str(value or ""))
-    return re.sub(r"\s+", " ", text).strip()[:TAG_LIMIT]
+    return re.sub(r"\s+", " ", text).strip()
 
 
 class ProductImageService:

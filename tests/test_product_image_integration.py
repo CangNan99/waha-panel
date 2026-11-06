@@ -107,6 +107,16 @@ class ProductImageIntegrationTests(unittest.TestCase):
         self.assertEqual(self.execute({"product_tag": "iptv"}, "disabled")["action"], "replied")
         self.assertEqual(self.client.image_calls, 1)
 
+    def test_product_tag_must_be_a_complete_ascii_token_in_current_message(self):
+        self.state.product_images.upload(
+            "pro.png", "image/png", self._alt_png(), "专业版", ["pro"], ""
+        )
+        self.assertEqual(
+            self.execute({"product_tag": "pro"}, "substring", incoming="这是 problem 说明")["action"],
+            "ignored",
+        )
+        self.assertEqual(self.client.image_calls, 0)
+
     @staticmethod
     def _alt_png():
         output = io.BytesIO()

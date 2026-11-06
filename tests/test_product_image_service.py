@@ -122,6 +122,12 @@ class ProductImageServiceTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.service.save_settings({"daily_limit": 1001})
 
+    def test_overlong_tags_are_rejected_instead_of_silently_truncated(self):
+        with self.assertRaises(ValueError):
+            self.service.upload(
+                "long.png", "image/png", _image_bytes(), "长标签", ["x" * 121]
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

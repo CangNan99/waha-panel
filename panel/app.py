@@ -2590,7 +2590,12 @@ class PanelState:
         current = str(incoming or "")
         normalized_current = re.sub(r"\s+", " ", current).casefold()
         normalized_tag = re.sub(r"\s+", " ", product_tag).strip().casefold()
-        if not normalized_tag or normalized_tag not in normalized_current:
+        if normalized_tag.isascii() and re.fullmatch(r"[a-z0-9][a-z0-9 _+.-]*", normalized_tag):
+            tag_pattern = r"(?<![a-z0-9])" + re.escape(normalized_tag) + r"(?![a-z0-9])"
+            tag_is_present = re.search(tag_pattern, normalized_current) is not None
+        else:
+            tag_is_present = normalized_tag in normalized_current
+        if not normalized_tag or not tag_is_present:
             self.log("INFO", "product_image.not_found", "当前消息未明确包含产品标签", session)
             return {"action": "ignored", "reason": "当前消息未明确询问该产品", "session": session}
         try:
