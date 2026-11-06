@@ -36,17 +36,22 @@ class GlobalTranslationService:
     def _preference(self):
         with closing(self._connect()) as connection:
             row = connection.execute(
-                "SELECT provider,scene,updated_at FROM global_translation_settings WHERE id=1"
+                "SELECT provider,scene,enabled,updated_at FROM global_translation_settings WHERE id=1"
             ).fetchone()
         if not row:
-            return {"provider": "aliyun_professional", "scene": "communication", "updated_at": None}
+            return {"provider": "aliyun_professional", "scene": "communication", "enabled": False, "updated_at": None}
         provider = str(row["provider"] or "aliyun_professional")
         scene = str(row["scene"] or "communication")
         if provider not in PROVIDERS:
             provider = "aliyun_professional"
         if scene not in SCENES:
             scene = "communication"
-        return {"provider": provider, "scene": scene, "updated_at": row["updated_at"]}
+        return {
+            "provider": provider,
+            "scene": scene,
+            "enabled": bool(row["enabled"]),
+            "updated_at": row["updated_at"],
+        }
 
     @staticmethod
     def _configured(settings, provider):
@@ -68,6 +73,7 @@ class GlobalTranslationService:
         return {
             "provider": preference["provider"],
             "scene": preference["scene"],
+            "enabled": preference["enabled"],
             "updated_at": preference["updated_at"],
             "aliyun_configured": self._configured(aliyun, "aliyun_professional"),
             "ai_configured": self._configured(ai, "ai_model"),
@@ -80,16 +86,22 @@ class GlobalTranslationService:
     def save_settings(self, payload):
         if not isinstance(payload, dict):
             raise GlobalTranslationError("INVALID_PROVIDER_SETTINGS", "翻译引擎设置格式不正确")
-        provider = str(payload.get("provider") or self._preference()["provider"]).strip()
-        scene = str(payload.get("scene") or self._preference()["scene"]).strip()
+        current = self._preference()
+        provider = str(payload.get("provider") or current["provider"]).strip()
+        scene = str(payload.get("scene") or current["scene"]).strip()
+        enabled = current["enabled"]
+        if "enabled" in payload:
+            if not isinstance(payload["enabled"], bool):
+                raise GlobalTranslationError("INVALID_ENABLED", "全局翻译开关格式不正确")
+            enabled = payload["enabled"]
         if provider not in PROVIDERS:
             raise GlobalTranslationError("INVALID_PROVIDER", "翻译引擎选择无效")
         if scene not in SCENES:
             raise GlobalTranslationError("INVALID_SCENE", "翻译场景选择无效")
         with closing(self._connect()) as connection:
             connection.execute(
-                "UPDATE global_translation_settings SET provider=?,scene=?,updated_at=? WHERE id=1",
-                (provider, scene, int(self.clock())),
+                "UPDATE global_translation_settings SET provider=?,scene=?,enabled=?,updated_at=? WHERE id=1",
+                (provider, scene, int(enabled), int(self.clock())),
             )
             connection.commit()
         return self.settings_payload()

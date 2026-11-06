@@ -107,8 +107,19 @@ class GlobalTranslationServiceTests(unittest.TestCase):
         payload = self.service.settings_payload()
         self.assertEqual(payload["provider"], "aliyun_professional")
         self.assertEqual(payload["scene"], "communication")
+        self.assertFalse(payload["enabled"])
         self.assertTrue(payload["aliyun_configured"])
         self.assertTrue(payload["ai_configured"])
+
+    def test_global_enabled_state_is_persisted_and_shared_with_provider_changes(self):
+        enabled = self.service.save_settings({"enabled": True})
+        self.assertTrue(enabled["enabled"])
+        self.assertTrue(self.service.settings_payload()["enabled"])
+        switched = self.service.save_settings({"provider": "ai_model"})
+        self.assertTrue(switched["enabled"])
+        disabled = self.service.save_settings({"enabled": False})
+        self.assertFalse(disabled["enabled"])
+        self.assertFalse(self.service.settings_payload()["enabled"])
 
     def test_provider_switch_is_persisted_and_invalid_value_does_not_overwrite(self):
         saved = self.service.save_settings({"provider": "ai_model"})

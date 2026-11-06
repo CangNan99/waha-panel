@@ -61,6 +61,7 @@ class Handler(BaseHTTPRequestHandler):
     counters = Counter()
     controls = {"delay_media": 0, "delay_metadata": 0, "fail": "", "latest": 80, "event_type": "heartbeat"}
     notes = {'customer-a':'报价跟进','customer-b':''}
+    translation_enabled = False
 
     @classmethod
     def prepare_monitoring(cls):
@@ -159,6 +160,11 @@ class Handler(BaseHTTPRequestHandler):
                               "ai_base_url": "", "ai_model": "测试模型", "ai_api_key_configured": True})
         if path == "/api/knowledge":
             return self.send({"items": []})
+        if path == "/api/translation/preferences":
+            return self.send({"provider": "aliyun_professional", "scene": "communication",
+                              "enabled": self.translation_enabled, "aliyun_configured": True,
+                              "ai_configured": True, "access_key_id_configured": True,
+                              "access_key_secret_configured": True, "last_test_status": "never"})
         if path.startswith("/api/translation"):
             return self.send({"access_key_id_configured": True, "access_key_secret_configured": True,
                               "api_key_configured": True, "base_url": "", "model": "测试模型", "last_test_status": "never"})
@@ -220,6 +226,11 @@ class Handler(BaseHTTPRequestHandler):
                 if module in sys.modules:
                     importlib.reload(sys.modules[module])
             return self.send({"reloaded": True})
+        if self.path == "/api/translation/preferences":
+            self.translation_enabled = bool(data.get("enabled", self.translation_enabled))
+            return self.send({"provider": "aliyun_professional", "scene": "communication",
+                              "enabled": self.translation_enabled, "aliyun_configured": True,
+                              "ai_configured": True})
         if self.path.endswith('/notes/normalize'):
             return self.send({'note_zh':'客户希望购买 iPhone 16，预算 800 USD'})
         if self.path.endswith('/note'):

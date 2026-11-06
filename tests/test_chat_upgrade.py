@@ -248,7 +248,7 @@ class SettingsAndContextTests(UpgradeTestCase):
         init_db(self.database, seed_business=False)
         with sqlite3.connect(self.database) as connection:
             row = connection.execute(
-                "SELECT provider,scene FROM global_translation_settings WHERE id=1"
+                "SELECT provider,scene,enabled FROM global_translation_settings WHERE id=1"
             ).fetchone()
             tables = {
                 item[0]
@@ -256,7 +256,7 @@ class SettingsAndContextTests(UpgradeTestCase):
                     "SELECT name FROM sqlite_master WHERE type='table'"
                 )
             }
-        self.assertEqual(row, ("aliyun_professional", "communication"))
+        self.assertEqual(row, ("aliyun_professional", "communication", 0))
         self.assertIn("translation_settings", tables)
         self.assertIn("aliyun_translation_settings", tables)
 
@@ -533,6 +533,7 @@ class MemoryAndTranslationRouteTests(UpgradeTestCase):
                 return {
                     "provider": "aliyun_professional",
                     "scene": "communication",
+                    "enabled": False,
                     "aliyun_configured": True,
                     "ai_configured": False,
                     "aliyun_last_test_status": "success",
@@ -541,7 +542,7 @@ class MemoryAndTranslationRouteTests(UpgradeTestCase):
 
             def save_settings(self, payload):
                 calls.append(("save", payload))
-                return {"provider": payload["provider"], "scene": "communication"}
+                return {"provider": payload["provider"], "scene": "communication", "enabled": bool(payload.get("enabled"))}
 
             def test_connection(self):
                 calls.append(("test", None))
@@ -552,9 +553,10 @@ class MemoryAndTranslationRouteTests(UpgradeTestCase):
         reader.send_translation_get("/api/translation/preferences")
         self.assertTrue(reader.responses[0][0]["aliyun_configured"])
         self.assertNotIn("secret", json.dumps(reader.responses[0][0]))
-        writer = self.handler({"provider": "ai_model"})
+        writer = self.handler({"provider": "ai_model", "enabled": True})
         writer.send_translation_write("/api/translation/preferences", "PUT")
-        self.assertEqual(calls[0], ("save", {"provider": "ai_model"}))
+        self.assertEqual(calls[0], ("save", {"provider": "ai_model", "enabled": True}))
+        self.assertTrue(writer.responses[0][0]["enabled"])
         tester = self.handler({})
         tester.send_translation_write("/api/translation/preferences/test", "POST")
         self.assertEqual(tester.responses[0][0]["provider"], "ai_model")

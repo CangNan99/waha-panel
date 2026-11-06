@@ -189,6 +189,17 @@ class ActivationClientTests(unittest.TestCase):
                 self.assertFalse(classify_trial_intent(text)['requested'])
         self.assertEqual(infer_trial_language('', '客户：Quero um teste IPTV'), 'pt')
 
+    def test_short_trial_word_uses_recent_iptv_context_as_a_request(self):
+        context = '客服：Your IPTV account is ready.'
+        for text in ('测试', '试用', '体验', 'test', 'trial', 'teste'):
+            with self.subTest(text=text):
+                result = classify_trial_intent(text, context)
+                self.assertTrue(result['requested'])
+                self.assertEqual(result['reason'], 'short_context_request')
+        for text in ('测试', 'test', 'trial'):
+            with self.subTest(text=text, context='汽车配件报价'):
+                self.assertFalse(classify_trial_intent(text, '客服：汽车配件报价已发出。')['requested'])
+
     def test_customer_language_ignores_agent_messages_and_prefers_latest_customer_text(self):
         english_customer = [
             {'from_me': False, 'body': 'Can I get an IPTV trial?'},
@@ -308,6 +319,27 @@ class IptvServiceTests(unittest.TestCase):
         retried = reopened.retry_due_once(send_callback=lambda *_args: True)
         self.assertEqual(len(retried), 1)
         self.assertEqual(len(self.supplier.calls), 2)
+        self.assertEqual(self.rows()[0]['state'], 'sent')
+
+    def test_legacy_unknown_without_retry_row_is_requeued_on_explicit_request(self):
+        self.supplier.fail = IptvError('upstream_unknown', '供应商响应不确定', uncertain=True)
+        with self.assertRaises(IptvError) as first:
+            self.create()
+        self.assertEqual(first.exception.code, 'upstream_unknown')
+        with closing(sqlite3.connect(self.path)) as connection:
+            connection.execute('DELETE FROM iptv_trial_retries')
+            connection.commit()
+        self.supplier.fail = None
+        with self.assertRaises(IptvError) as queued:
+            self.service.create_trial('sales', '123456789@c.us', 'event-2')
+        self.assertEqual(queued.exception.code, 'retry_queued')
+        with closing(sqlite3.connect(self.path)) as connection:
+            retry = connection.execute(
+                'SELECT record_type,phase,attempt_count FROM iptv_trial_retries'
+            ).fetchone()
+        self.assertEqual(retry, ('automatic', 'create', 0))
+        processed = self.service.retry_due_once(send_callback=lambda *args, **kwargs: True)
+        self.assertEqual(len(processed), 1)
         self.assertEqual(self.rows()[0]['state'], 'sent')
 
     def test_manual_cards_can_repeat_after_automatic_trial_and_are_idempotent_per_request(self):
@@ -453,6 +485,22 @@ class IptvServiceTests(unittest.TestCase):
             thread.join(4)
         self.assertEqual(errors, [])
         self.assertEqual(len(self.supplier.calls), 1)
+
+    def test_in_flight_creation_without_retry_stays_pending(self):
+        customer_key = self.service._customer_key('legacy-customer@c.us')
+        with closing(sqlite3.connect(self.path)) as connection:
+            connection.execute(
+                "INSERT INTO iptv_trials(id,provider,customer_key,session_name,message_key,state,created_at,updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                ('in-flight', 'activationpanel', customer_key, 'sales', 'legacy-message', 'creating', self.now, self.now),
+            )
+            connection.commit()
+        with self.assertRaises(IptvError) as caught:
+            self.service.create_trial('sales', 'legacy-customer@c.us', 'fresh-request')
+        self.assertEqual(caught.exception.code, 'trial_pending')
+        with closing(sqlite3.connect(self.path)) as connection:
+            self.assertEqual(connection.execute('SELECT count(*) FROM iptv_trial_retries').fetchone()[0], 0)
+        self.assertEqual(self.supplier.calls, [])
 
     def test_delivery_failure_reuses_created_result_and_public_records_are_safe(self):
         result = self.create()
