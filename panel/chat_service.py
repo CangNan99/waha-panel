@@ -1,4 +1,5 @@
 import base64
+import base64
 import hashlib
 import io
 import json
@@ -926,6 +927,117 @@ class ChatService:
                 connection.execute("UPDATE automated_send_requests SET state=?,error_code=?,updated_at=? WHERE client_request_id=?", (state,code,int(self.clock()),request_id)); connection.commit()
             finally: connection.close()
             raise ChatSendError("文字消息发送失败，请先刷新聊天记录确认状态", state, code) from error
+
+    def send_automated_image(
+        self,
+        session,
+        chat_id,
+        filename,
+        declared_type,
+        data,
+        caption,
+        client_request_id,
+        origin="product_image",
+    ):
+        """Send a validated image without changing human-takeover state.
+
+        Product-image orchestration owns its product-specific ledger.  This
+        method only uses the existing generic automated-send ledger to make a
+        WAHA request safe against repeated calls while the request is in
+        flight or after a terminal result.
+        """
+        name = _session_name(session)
+        chat_id = str(chat_id or "").strip()
+        if not chat_id:
+            raise ChatAccessError("聊天编号无效")
+        safe_name, mimetype = self._validated_image(filename, declared_type, data)
+        safe_caption = str(caption or "").strip()
+        if len(safe_caption) > 4096:
+            raise ImageValidationError("图片说明文字过长")
+        request_id = self._request_id(client_request_id)
+        payload_hash = self._payload_hash("automated_image", safe_name, mimetype, data, safe_caption)
+        connection = sqlite3.connect(self.database_path)
+        connection.row_factory = sqlite3.Row
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM automated_send_requests WHERE client_request_id=?", (request_id,)
+            ).fetchone()
+            if row:
+                if (row["session_name"], row["chat_id"], row["payload_hash"]) != (
+                    name,
+                    chat_id,
+                    payload_hash,
+                ):
+                    raise SendConflictError("发送请求编号已用于其他内容")
+                connection.commit()
+                if row["state"] == "SENT":
+                    result = {"request_id": request_id, "state": "SENT", "kind": "image"}
+                    if row["waha_message_id"]:
+                        result["message_ref"] = self._encode_message(
+                            name, chat_id, row["waha_message_id"]
+                        )
+                    return result
+                state = "UNKNOWN" if row["state"] == "PENDING" else row["state"]
+                raise ChatSendError(
+                    "图片发送失败，请先刷新聊天记录确认状态",
+                    state,
+                    row["error_code"] or "WAHA_SEND_UNKNOWN",
+                )
+            connection.execute(
+                "INSERT INTO automated_send_requests(client_request_id,session_name,chat_id,payload_hash,state,waha_message_id,error_code,updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                (request_id, name, chat_id, payload_hash, "PENDING", None, None, int(self.clock())),
+            )
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+        try:
+            encoded = base64.b64encode(data).decode("ascii")
+            response = self.client.send_image(name, chat_id, safe_name, mimetype, encoded, safe_caption)
+            message_id = _value_id(response.get("id") if isinstance(response, dict) else response)
+            connection = sqlite3.connect(self.database_path)
+            try:
+                connection.execute(
+                    "UPDATE automated_send_requests SET state='SENT',waha_message_id=?,updated_at=? WHERE client_request_id=?",
+                    (message_id or None, int(self.clock()), request_id),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+            self._notify_outbound(
+                name,
+                chat_id,
+                message_id,
+                format_media_context(
+                    "outbound",
+                    "image",
+                    filename=safe_name,
+                    mime=mimetype,
+                    caption=safe_caption,
+                ),
+                request_id,
+                origin=origin,
+            )
+            result = {"request_id": request_id, "state": "SENT", "kind": "image"}
+            if message_id:
+                result["message_ref"] = self._encode_message(name, chat_id, message_id)
+            return result
+        except Exception as error:
+            state, code = self._error_state(error)
+            connection = sqlite3.connect(self.database_path)
+            try:
+                connection.execute(
+                    "UPDATE automated_send_requests SET state=?,error_code=?,updated_at=? WHERE client_request_id=?",
+                    (state, code, int(self.clock()), request_id),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+            raise ChatSendError("图片发送失败，请先刷新聊天记录确认状态", state, code) from error
 
     @staticmethod
     def _label_value(value):
