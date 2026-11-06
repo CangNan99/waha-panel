@@ -144,6 +144,8 @@ class ProductImageRouteTests(unittest.TestCase):
         status, _, body = self.request("/product-images")
         self.assertEqual(status, 200)
         self.assertNotIn(str(self.temp.name), body.decode("utf-8"))
+        self.assertIn("设为主图", body.decode("utf-8"))
+        self.assertIn("保存优先级", body.decode("utf-8"))
 
     def test_asset_update_disable_tag_crud_and_settings_round_trip(self):
         _, _, uploaded = self.upload()
