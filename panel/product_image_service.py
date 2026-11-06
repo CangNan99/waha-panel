@@ -313,6 +313,102 @@ class ProductImageService:
             )
         return {"auto_send_enabled": enabled, "daily_limit": daily_limit}
 
+    def list_tags(self):
+        with self._db() as connection:
+            rows = connection.execute(
+                "SELECT t.id,t.tag_key,t.display_name,t.created_at,t.updated_at,COUNT(at.asset_id) AS asset_count "
+                "FROM product_image_tags t LEFT JOIN product_image_asset_tags at ON at.tag_id=t.id "
+                "GROUP BY t.id ORDER BY t.tag_key"
+            ).fetchall()
+        return {
+            "items": [
+                {
+                    "id": int(row["id"]),
+                    "tag_key": str(row["tag_key"]),
+                    "display_name": str(row["display_name"]),
+                    "asset_count": int(row["asset_count"]),
+                    "created_at": int(row["created_at"]),
+                    "updated_at": int(row["updated_at"]),
+                }
+                for row in rows
+            ]
+        }
+
+    def create_tag(self, payload):
+        if not isinstance(payload, dict):
+            raise ProductImageValidationError("标签数据格式无效", "INVALID_TAG")
+        label = display_tag(payload.get("display_name") or payload.get("tag") or payload.get("tag_key"))
+        key = normalize_tag(payload.get("tag_key") or label)
+        if not key or not label:
+            raise ProductImageValidationError("产品标签不能为空", "TAGS_REQUIRED")
+        now = self._now()
+        with self._db() as connection:
+            try:
+                connection.execute(
+                    "INSERT INTO product_image_tags(tag_key,display_name,created_at,updated_at) VALUES (?,?,?,?)",
+                    (key, label, now, now),
+                )
+            except sqlite3.IntegrityError as error:
+                raise ProductImageValidationError("产品标签已存在", "TAG_EXISTS") from error
+            row = connection.execute(
+                "SELECT id,tag_key,display_name,created_at,updated_at FROM product_image_tags WHERE tag_key=?",
+                (key,),
+            ).fetchone()
+        return {
+            "id": int(row["id"]),
+            "tag_key": str(row["tag_key"]),
+            "display_name": str(row["display_name"]),
+            "asset_count": 0,
+            "created_at": int(row["created_at"]),
+            "updated_at": int(row["updated_at"]),
+        }
+
+    def update_tag(self, tag_id, payload):
+        if not isinstance(payload, dict):
+            raise ProductImageValidationError("标签数据格式无效", "INVALID_TAG")
+        now = self._now()
+        with self._db() as connection:
+            current = connection.execute(
+                "SELECT * FROM product_image_tags WHERE id=?", (int(tag_id),)
+            ).fetchone()
+            if not current:
+                raise ProductImageNotFoundError("标签不存在", "TAG_NOT_FOUND")
+            label = display_tag(payload.get("display_name", current["display_name"]))
+            key = normalize_tag(payload.get("tag_key", current["tag_key"]))
+            if not key or not label:
+                raise ProductImageValidationError("产品标签不能为空", "TAGS_REQUIRED")
+            try:
+                connection.execute(
+                    "UPDATE product_image_tags SET tag_key=?,display_name=?,updated_at=? WHERE id=?",
+                    (key, label, now, int(tag_id)),
+                )
+            except sqlite3.IntegrityError as error:
+                raise ProductImageValidationError("产品标签已存在", "TAG_EXISTS") from error
+            row = connection.execute(
+                "SELECT t.id,t.tag_key,t.display_name,t.created_at,t.updated_at,COUNT(at.asset_id) AS asset_count "
+                "FROM product_image_tags t LEFT JOIN product_image_asset_tags at ON at.tag_id=t.id "
+                "WHERE t.id=? GROUP BY t.id",
+                (int(tag_id),),
+            ).fetchone()
+        return {
+            "id": int(row["id"]),
+            "tag_key": str(row["tag_key"]),
+            "display_name": str(row["display_name"]),
+            "asset_count": int(row["asset_count"]),
+            "created_at": int(row["created_at"]),
+            "updated_at": int(row["updated_at"]),
+        }
+
+    def delete_tag(self, tag_id):
+        with self._db() as connection:
+            row = connection.execute(
+                "SELECT id FROM product_image_tags WHERE id=?", (int(tag_id),)
+            ).fetchone()
+            if not row:
+                raise ProductImageNotFoundError("标签不存在", "TAG_NOT_FOUND")
+            connection.execute("DELETE FROM product_image_tags WHERE id=?", (int(tag_id),))
+        return {"deleted": True, "id": int(tag_id)}
+
     def upload(self, filename, declared_type, data, title, tags, caption_template=""):
         raw, safe_name, mime_type, extension, width, height = self._validate_bytes(
             filename, declared_type, data

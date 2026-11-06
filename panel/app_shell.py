@@ -145,7 +145,8 @@ def app_shell_page(initial_path="/"):
         f'<a href="{href}" data-shell-nav="{view}"><span class="shell-menu-icon" aria-hidden="true"><svg class="icon"><use href="#{symbol}"/></svg></span><span>{label}</span></a>'
         for view, href, label, symbol in (
             ("dashboard", "/", "工作台", "ui-home"), ("chat", f"/sessions/{html.escape(session)}/chats", "聊天管理", "ui-chat"),
-            ("settings", "/settings", "自动回复", "ui-bolt"), ("overview", "/overview?scope=all", "状态概览", "ui-chart"),
+            ("settings", "/settings", "自动回复", "ui-bolt"), ("product-images", "/product-images", "产品图片", "ui-image"),
+            ("overview", "/overview?scope=all", "状态概览", "ui-chart"),
             ("logs", "/logs", "系统日志", "ui-file"),
         )
     ) + '''</nav><div class="shell-context"><label for="shellSession">当前会话</label><select id="shellSession" aria-label="当前会话"><option value="''' + html.escape(session) + '''">''' + html.escape(session) + '''</option></select><label for="shellTheme">界面主题</label><select id="shellTheme" aria-label="界面主题"><option value="daylight">白天</option><option value="night">夜间</option></select><button id="shellTranslationSettings" type="button" hidden>机器翻译设置</button><div id="shellDirtyNotice" hidden role="status">当前设置尚未保存</div></div></aside>
