@@ -4,7 +4,7 @@
 
 ## 界面预览
 
-1.0.23 keeps the IPTV short-message triggers and legacy unknown-record recovery from 1.0.22, and prevents an in-flight creation from being queued a second time. The screenshots below use demonstration data.
+1.0.24 makes translation a persisted global switch shared by every chat, while retaining the IPTV fixes from 1.0.23. The screenshots below use demonstration data.
 
 ![状态概览](docs/assets/overview-1.0.15.png)
 
@@ -84,6 +84,7 @@ pwsh -File .\update.ps1 -Component waha
 
 | 版本 | 更新内容 | 详细说明 |
 | --- | --- | --- |
+| 1.0.24 | Made translation a persisted global on/off switch shared by every chat. | [docs/releases/1.0.24.md](docs/releases/1.0.24.md) |
 | 1.0.23 | Prevented duplicate IPTV supplier requests while an automatic trial is still being created. | [docs/releases/1.0.23.md](docs/releases/1.0.23.md) |
 | 1.0.22 | Improved IPTV short-message triggers and recovery for legacy unknown automatic trials. | [docs/releases/1.0.22.md](docs/releases/1.0.22.md) |
 | 1.0.21 | Multimodal customer image recognition, customer-language IPTV follow-ups, short follow-up delays, human-takeover auto-resume, and the 1.0.20 IPTV reliability improvements. | [docs/releases/1.0.21.md](docs/releases/1.0.21.md) |
@@ -127,6 +128,6 @@ pwsh -File .\backup.ps1
 当前镜像版本：
 
 - `devlikeapro/waha:latest-2026.9.1`
-- `docker.io/cangnan88/waha-panel:1.0.23`
+- `docker.io/cangnan88/waha-panel:1.0.24`
 
 如需域名访问，只反代到面板端口 `127.0.0.1:3003`。WAHA API 端口 `3002` 默认不应公开。请在反向代理层启用 HTTPS，并确保代理不会记录 `Authorization`、APIKey 或密码字段。

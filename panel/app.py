@@ -694,6 +694,11 @@ def init_db(path, seed_business=True):
             Path(__file__).with_name("migrations") / "011_global_translation_settings.sql"
         )
         connection.executescript(global_translation_migration.read_text(encoding="utf-8"))
+        global_translation_toggle_migration = (
+            Path(__file__).with_name("migrations") / "013_global_translation_toggle.sql"
+        )
+        if "enabled" not in _table_columns(connection, "global_translation_settings"):
+            connection.executescript(global_translation_toggle_migration.read_text(encoding="utf-8"))
         system_labels_migration = (
             Path(__file__).with_name("migrations") / "012_customer_system_labels.sql"
         )
@@ -1029,7 +1034,7 @@ class PanelState:
         self.admin_service = AdminService(self.database_path)
         self._admin_db_auth = as_bool(os.environ.get("PANEL_ADMIN_DB_AUTH", "0"))
         self._update_service = UpdateService(
-            current_panel=os.environ.get("PANEL_VERSION", "1.0.23"),
+            current_panel=os.environ.get("PANEL_VERSION", "1.0.24"),
             current_waha=os.environ.get("WAHA_IMAGE_TAG", "latest-2026.9.1"),
         )
         self.sleep_fn = sleep_fn or time.sleep
