@@ -2489,9 +2489,171 @@ class PanelState:
             raw = body
         return self._validated_ai_image_content(raw)
 
+    @staticmethod
+    def _order_tool_schema():
+        return [{
+            "type": "function",
+            "function": {
+                "name": "query_order",
+                "description": "查询当前客户自己的 WooCommerce 订单或 PayPal 支付状态",
+                "parameters": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "query_type": {"type": "string", "enum": ["order_status", "payment_status"]},
+                        "order_id": {"type": "string"},
+                        "email": {"type": "string"},
+                        "selected_order_id": {"type": "string"},
+                    },
+                    "required": ["query_type"],
+                },
+            },
+        }]
+
+    @staticmethod
+    def _validated_order_tool_call(tool_calls):
+        for tool_call in list(tool_calls or []):
+            function = tool_call.get("function") if isinstance(tool_call, dict) else None
+            if not isinstance(function, dict) or function.get("name") != "query_order":
+                continue
+            try:
+                arguments = json.loads(function.get("arguments") or "{}")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            if not isinstance(arguments, dict) or set(arguments) - {
+                "query_type", "order_id", "email", "selected_order_id"
+            }:
+                continue
+            if arguments.get("query_type") not in {"order_status", "payment_status"}:
+                continue
+            return arguments
+        return None
+
+    def _ai_vision_reply(self, settings, incoming_text, image_bytes, image_mime,
+                         customer_id=None, conversation_context="", session_name=DEFAULT_SESSION_NAME):
+        name = normalize_session_name(session_name)
+        if self.ai_profiles is None or self.glm is None:
+            raise GLMError("视觉模型未配置", "AI_NOT_CONFIGURED")
+        reasoning_profile = self.ai_profiles.effective_profile(
+            name, "vision_reasoning", settings
+        )
+        capability = "vision_reasoning" if reasoning_profile else "vision_understanding"
+        profile = reasoning_profile or self.ai_profiles.effective_profile(name, capability, settings)
+        if not profile:
+            raise GLMError("视觉模型未配置", "AI_NOT_CONFIGURED")
+        knowledge_context = self._knowledge_context(name)
+        try:
+            business_context = self.business.get_business_context(customer_id=customer_id)
+        except KeyError:
+            business_context = None
+        business_rules = (
+            "IMPORTANT BUSINESS DATA RULES\n"
+            "The BUSINESS CONTEXT supplied by the database is the current source of truth.\n"
+            "Never use prices, coupons, package contents, payment methods, shipping information "
+            "or website information remembered from previous conversations when they conflict with BUSINESS CONTEXT.\n"
+            "Never invent a missing business value. If a required value is unavailable, tell the customer that you need to check the information.\n"
+            "A historical customer quote applies only to that specific customer and must never be presented as the normal public product price."
+        )
+        system_parts = [part for part in (
+            settings.get("system_prompt", "").strip(),
+            f"人设：{settings.get('persona', '').strip()}" if settings.get("persona", "").strip() else "",
+            f"知识库：\n{knowledge_context}" if knowledge_context else "",
+            (
+                "当前对话上下文（按时间从早到晚，仅作参考；请优先回答当前客户消息）：\n"
+                + conversation_context
+            ) if conversation_context else "",
+            (
+                "BUSINESS CONTEXT (database source of truth):\n"
+                + json.dumps(business_context, ensure_ascii=False)
+            ) if business_context else "",
+            business_rules if business_context else "",
+        ) if part]
+        tools = self._order_tool_schema() if self.commerce_config.enabled else None
+        prompt = str(incoming_text or "").strip() or "客户发送了一张图片，请识别图片内容并给出合适回复。"
+        result = self._glm_call(lambda: self.glm.chat_vision(
+            profile,
+            prompt,
+            image_bytes,
+            image_mime,
+            reasoning=capability == "vision_reasoning",
+            context={"system": "\n\n".join(system_parts)},
+            tools=tools,
+        ))
+        tool_request = self._validated_order_tool_call(result.tool_calls)
+        if tool_request is not None:
+            return json.dumps(tool_request, ensure_ascii=False), "order_tool"
+        return result.content, "glm_vision"
+
+    def _ai_glm_text_reply(self, settings, incoming_text, customer_id, conversation_context,
+                           include_tools, session_name, profile):
+        name = normalize_session_name(session_name)
+        knowledge_context = self._knowledge_context(name)
+        try:
+            business_context = self.business.get_business_context(customer_id=customer_id)
+        except KeyError:
+            business_context = None
+        system_parts = [part for part in (
+            settings.get("system_prompt", "").strip(),
+            f"人设：{settings.get('persona', '').strip()}" if settings.get("persona", "").strip() else "",
+            f"知识库：\n{knowledge_context}" if knowledge_context else "",
+            (
+                "当前对话上下文（按时间从早到晚，仅作参考；请优先回答当前客户消息）：\n"
+                + conversation_context
+            ) if conversation_context else "",
+            (
+                "BUSINESS CONTEXT (database source of truth):\n"
+                + json.dumps(business_context, ensure_ascii=False)
+            ) if business_context else "",
+        ) if part]
+        tools = self._order_tool_schema() if include_tools and self.commerce_config.enabled else None
+        result = self._glm_call(lambda: self.glm.chat_text(
+            profile,
+            [
+                {"role": "system", "content": "\n\n".join(system_parts)},
+                {"role": "user", "content": incoming_text},
+            ],
+            tools=tools,
+        ))
+        tool_request = self._validated_order_tool_call(result.tool_calls)
+        if tool_request is not None:
+            return json.dumps(tool_request, ensure_ascii=False), "order_tool"
+        return result.content, "ai"
+
     def _ai_reply(self, settings, incoming_text, customer_id=None, conversation_context="", include_tools=False,
                   session_name=DEFAULT_SESSION_NAME, image_content=None):
         name = normalize_session_name(session_name)
+        if isinstance(image_content, dict) and self.ai_profiles is not None and self.glm is not None:
+            image_data = str(image_content.get("data") or "").strip()
+            try:
+                image_bytes = base64.b64decode(image_data, validate=True) if image_data else b""
+            except (ValueError, TypeError):
+                image_bytes = b""
+            if image_bytes:
+                return self._ai_vision_reply(
+                    settings,
+                    incoming_text,
+                    image_bytes,
+                    image_content.get("mime_type"),
+                    customer_id=customer_id,
+                    conversation_context=conversation_context,
+                    session_name=name,
+                )
+        if self.ai_profiles is not None and self.glm is not None:
+            profile = self.ai_profiles.effective_profile(name, "language", settings)
+            if profile and profile.get("provider") == "glm":
+                try:
+                    return self._ai_glm_text_reply(
+                        settings,
+                        incoming_text,
+                        customer_id,
+                        conversation_context,
+                        include_tools,
+                        name,
+                        profile,
+                    )
+                except Exception as error:
+                    self.log("ERROR", "ai.reply", redact_error(error, profile.get("api_key")), name)
+                    return settings.get("default_reply_text", "").strip() or DEFAULT_REPLY_TEXT, "fixed_fallback"
         base_url = settings.get("ai_base_url", "").strip()
         model = settings.get("ai_model", "").strip()
         api_key = settings.get("ai_api_key", "")
@@ -3034,9 +3196,16 @@ class PanelState:
             raw_message_id = raw_message_id.get("_serialized") or raw_message_id.get("id") or ""
         message_id = str(raw_message_id)
         body_text = message.get("body") or message.get("text") or ""
+        media = message.get("media") if isinstance(message.get("media"), dict) else {}
+        media_mime = str(media.get("mimetype") or message.get("mimetype") or "").lower()
         is_group = as_bool(message.get("isGroup")) or "@g.us" in chat_id
         is_status = "status" in event_name or "@broadcast" in chat_id or message_type == "status"
         is_media = as_bool(message.get("hasMedia")) or bool(message.get("media")) or message_type in {"image", "video", "audio", "document", "sticker", "ptt", "location", "contact"}
+        is_image = is_media and (
+            message_type == "image"
+            or media_mime.startswith("image/")
+            or str(message.get("mimetype") or "").lower().startswith("image/")
+        )
         self._publish_chat_event(
             session_name, event_name, message, chat_id, message_id, from_me, is_media, message_type
         )
@@ -3076,8 +3245,19 @@ class PanelState:
         if from_me or is_group or is_status:
             return {"action": "ignored", "reason": "消息不符合自动回复范围", "session": session_name}
         settings = self._settings(session_name)
+        glm_vision_profile = None
+        if media_kind == "image" and self.ai_profiles is not None:
+            try:
+                glm_vision_profile = (
+                    self.ai_profiles.effective_profile(session_name, "vision_reasoning", settings)
+                    or self.ai_profiles.effective_profile(session_name, "vision_understanding", settings)
+                )
+            except AIProfileError:
+                glm_vision_profile = None
         media_types = normalize_media_types(settings.get("auto_reply_media_types", DEFAULT_AUTO_REPLY_MEDIA_TYPES))
-        if media_kind and not media_types.get(media_kind, False):
+        if media_kind and not media_types.get(media_kind, False) and not (
+            media_kind == "image" and glm_vision_profile is not None
+        ):
             return {"action": "ignored", "reason": "该媒体类型未启用", "session": session_name}
         customer_text = sanitize_context_content(body_text)
         if not media_kind and not customer_text:
@@ -3119,7 +3299,10 @@ class PanelState:
         if self.iptv is not None:
             incoming_for_ai = self.iptv.sanitize_context(chat_id, incoming_for_ai, session=session_name)
         image_content = None
-        if media_kind == "image" and as_bool(settings.get("auto_reply_image_vision", "0")):
+        image_vision_requested = media_kind == "image" and (
+            as_bool(settings.get("auto_reply_image_vision", "0")) or glm_vision_profile is not None
+        )
+        if image_vision_requested:
             try:
                 image_content = self._load_ai_image_content(
                     session_name, chat_id, message_id, message
@@ -3132,6 +3315,8 @@ class PanelState:
                     "AI_IMAGE_UNAVAILABLE：客户图片无法读取或校验，已回退为图片标记",
                     session_name,
                 )
+                if glm_vision_profile is not None:
+                    return {"action": "ignored", "reason": "图片读取失败", "session": session_name}
         ai_kwargs = {
             "customer_id": chat_id,
             "conversation_context": context,
@@ -3188,7 +3373,8 @@ class PanelState:
                     return {"action": "ignored", "reason": "发送前回复条件已变化", "session": session_name}
                 self._send_text(session_name, chat_id, reply, origin="auto_ai")
         conversation_type = "热对话" if is_hot else "冷对话"
-        self.log("INFO", "auto_reply.sent", f"已处理私聊文字消息（{mode}，{conversation_type}）", session_name)
+        message_kind = "图片" if is_image else "文字"
+        self.log("INFO", "auto_reply.sent", f"已处理私聊{message_kind}消息（{mode}，{conversation_type}）", session_name)
         return {"action": "replied", "mode": mode, "chat_id": chat_id, "text": reply, "session": session_name}
 
     def log(self, level, event, message, session_name=DEFAULT_SESSION_NAME):
