@@ -4,7 +4,7 @@
 
 ## 界面预览
 
-1.0.25 新增管理员产品图片库和 AI 直接发图，同时保留 1.0.24 的全局翻译总开关。以下界面截图均使用演示数据。
+1.0.26 新增加密 GLM 能力配置、客户图片自动回复、视觉推理、图像生成预览和确认发送，同时保留产品图片库和全局翻译总开关。以下界面截图均使用演示数据。
 
 ![状态概览](docs/assets/overview-1.0.15.png)
 
@@ -117,6 +117,7 @@ pwsh -File .\update.ps1 -Component waha
 
 | 版本 | 更新内容 | 详细说明 |
 | --- | --- | --- |
+| 1.0.26 | 新增加密 GLM 能力配置、客户图片自动回复、视觉推理、图像生成预览与发送，以及受限的生成图片交付。 | [docs/releases/1.0.26.md](docs/releases/1.0.26.md) |
 | 1.0.25 | 新增管理员产品图片库、严格标签匹配和 AI 直接发图；加入每日上限、UNKNOWN 不重试、私有预览与同卷备份说明。 | [docs/releases/1.0.25.md](docs/releases/1.0.25.md) |
 | 1.0.24 | 将翻译改为所有聊天共用、跨刷新保留的全局开关。 | [docs/releases/1.0.24.md](docs/releases/1.0.24.md) |
 | 1.0.23 | 避免 IPTV 自动开卡仍在上游处理中时重复发起供应商请求。 | [docs/releases/1.0.23.md](docs/releases/1.0.23.md) |
@@ -162,6 +163,6 @@ pwsh -File .\backup.ps1
 当前镜像版本：
 
 - `devlikeapro/waha:latest-2026.9.1`
-- `docker.io/cangnan88/waha-panel:1.0.25`
+- `docker.io/cangnan88/waha-panel:1.0.26`
 
 如需域名访问，只反代到面板端口 `127.0.0.1:3003`。WAHA API 端口 `3002` 默认不应公开。请在反向代理层启用 HTTPS，并确保代理不会记录 `Authorization`、APIKey 或密码字段。

@@ -4,7 +4,7 @@
 
 ## 界面预览
 
-1.0.25 adds an administrator product image library and direct AI image sending while retaining the persisted global translation switch from 1.0.24. The screenshots below use demonstration data.
+1.0.26 adds GLM multimodal language, vision understanding, vision reasoning, and image generation while retaining the product image library and global translation switch. The screenshots below use demonstration data.
 
 ![状态概览](docs/assets/overview-1.0.15.png)
 
@@ -91,6 +91,7 @@ pwsh -File .\update.ps1 -Component waha
 
 | 版本 | 更新内容 | 详细说明 |
 | --- | --- | --- |
+| 1.0.26 | Added encrypted GLM capability profiles, customer-image auto-reply, vision reasoning, image generation preview/send, and bounded image delivery. | [docs/releases/1.0.26.md](docs/releases/1.0.26.md) |
 | 1.0.25 | Added the administrator product image library, strict tag matching, direct AI image sending, daily limits, UNKNOWN no-retry handling, and coupled backups. | [docs/releases/1.0.25.md](docs/releases/1.0.25.md) |
 | 1.0.24 | Made translation a persisted global on/off switch shared by every chat. | [docs/releases/1.0.24.md](docs/releases/1.0.24.md) |
 | 1.0.23 | Prevented duplicate IPTV supplier requests while an automatic trial is still being created. | [docs/releases/1.0.23.md](docs/releases/1.0.23.md) |
@@ -136,6 +137,6 @@ pwsh -File .\backup.ps1
 当前镜像版本：
 
 - `devlikeapro/waha:latest-2026.9.1`
-- `docker.io/cangnan88/waha-panel:1.0.25`
+- `docker.io/cangnan88/waha-panel:1.0.26`
 
 如需域名访问，只反代到面板端口 `127.0.0.1:3003`。WAHA API 端口 `3002` 默认不应公开。请在反向代理层启用 HTTPS，并确保代理不会记录 `Authorization`、APIKey 或密码字段。
