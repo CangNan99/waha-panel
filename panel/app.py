@@ -71,6 +71,12 @@ except ImportError:
     from visual_theme import ICON_SPRITE, SHARED_CSS, DASHBOARD_CSS, SETTINGS_CSS
 
 try:
+    from .ai_profiles import (
+        AIProfileError,
+        AIProfileStore,
+        AIProfileUnavailableError,
+        ProfileValidationError,
+    )
     from .admin_service import (
         AdminAuthUnavailableError,
         AdminConflictError,
@@ -114,6 +120,12 @@ try:
     from .translation_service import TranslationError, TranslationService
     from .update_service import UpdateService
 except ImportError:  # Supports the existing `python app.py` container entrypoint.
+    from ai_profiles import (
+        AIProfileError,
+        AIProfileStore,
+        AIProfileUnavailableError,
+        ProfileValidationError,
+    )
     from admin_service import (
         AdminAuthUnavailableError,
         AdminConflictError,
@@ -677,6 +689,16 @@ def init_db(path, seed_business=True):
         connection.executescript(multi_session_migration.read_text(encoding="utf-8"))
         chat_ai_migration = Path(__file__).with_name("migrations") / "004_chat_ai_assistant.sql"
         connection.executescript(chat_ai_migration.read_text(encoding="utf-8"))
+        _add_column_if_missing(
+            connection,
+            "translation_settings",
+            "provider TEXT NOT NULL DEFAULT 'openai_compatible'",
+        )
+        _add_column_if_missing(
+            connection,
+            "translation_settings",
+            "reasoning_mode TEXT NOT NULL DEFAULT 'disabled'",
+        )
         chat_metadata_migration = Path(__file__).with_name("migrations") / "006_chat_metadata.sql"
         connection.executescript(chat_metadata_migration.read_text(encoding="utf-8"))
         engagement_migration = Path(__file__).with_name("migrations") / "007_chat_engagement.sql"
@@ -725,6 +747,8 @@ def init_db(path, seed_business=True):
         )
         _add_column_if_missing(connection, "chat_takeovers", "last_manual_sent_at INTEGER")
         _add_column_if_missing(connection, "chat_takeovers", "auto_resume_at INTEGER")
+        glm_migration = Path(__file__).with_name("migrations") / "007_glm_multimodal.sql"
+        connection.executescript(glm_migration.read_text(encoding="utf-8"))
         admin_migration_path = Path(__file__).with_name("migrations") / "005_admin_users.sql"
         connection.executescript(admin_migration_path.read_text(encoding="utf-8"))
         apply_admin_migration(connection)
@@ -1065,6 +1089,7 @@ class PanelState:
         self.memory = None
         self.aliyun_translation = None
         self.global_translation = None
+        self.ai_profiles = None
         self.data_cipher = None
         self.iptv = None
         self.csrf_token = None
@@ -1255,6 +1280,7 @@ class PanelState:
                 str(level or "INFO").upper(), "global.translation", message, DEFAULT_SESSION_NAME
             ),
         )
+        self.ai_profiles = AIProfileStore(self.database_path, cipher)
         self.chat_capability_error = ""
         return self.chat
 
@@ -1511,9 +1537,26 @@ class PanelState:
                 connection.close()
         return values
 
+    def ai_profiles_payload(self, session_name=DEFAULT_SESSION_NAME):
+        name = normalize_session_name(session_name)
+        if self.ai_profiles is None:
+            raise AIProfileUnavailableError("GLM 配置暂不可用，请检查面板数据加密密钥")
+        self.ensure_managed_session(name)
+        return self.ai_profiles.profile_payload(name)
+
+    def save_ai_profiles(self, session_name, payload):
+        name = normalize_session_name(session_name)
+        if self.ai_profiles is None:
+            raise AIProfileUnavailableError("GLM 配置暂不可用，请检查面板数据加密密钥")
+        self.ensure_managed_session(name)
+        return self.ai_profiles.save_profiles(name, payload)
+
     def settings_payload(self, session_name=DEFAULT_SESSION_NAME):
         name = normalize_session_name(session_name)
         values = self._settings(name)
+        profiles = {"available": False}
+        if self.ai_profiles is not None:
+            profiles = {"available": True, **self.ai_profiles.profile_payload(name)}
         return {
             "session_name": name,
             "auto_reply_enabled": as_bool(values.get("auto_reply_enabled", "0")),
@@ -1524,6 +1567,7 @@ class PanelState:
             "ai_base_url": values.get("ai_base_url", ""),
             "ai_model": values.get("ai_model", ""),
             "ai_api_key_configured": bool(values.get("ai_api_key", "")),
+            "ai_profiles": profiles,
             "theme": normalize_theme(values.get("theme", "daylight")),
             "auto_reply_context_per_side": normalize_context_per_side(
                 values.get("auto_reply_context_per_side", CONTEXT_PER_SIDE_MIN)
@@ -1563,6 +1607,8 @@ class PanelState:
             raise ValueError("设置格式不正确")
         name = normalize_session_name(session_name)
         self.ensure_managed_session(name)
+        if "ai_profiles" in payload:
+            self.save_ai_profiles(name, payload.get("ai_profiles"))
         updates = {}
         if "auto_reply_context_per_side" in payload:
             try:
