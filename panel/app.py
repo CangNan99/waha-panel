@@ -1725,7 +1725,20 @@ class PanelState:
         name = normalize_session_name(session_name)
         self.ensure_managed_session(name)
         if "ai_profiles" in payload:
-            self.save_ai_profiles(name, payload.get("ai_profiles"))
+            profile_payload = payload.get("ai_profiles")
+            raw_profiles = profile_payload.get("profiles", profile_payload) if isinstance(profile_payload, dict) else {}
+            has_profile_values = any(
+                isinstance(item, dict)
+                and (
+                    str(item.get("base_url") or "").strip()
+                    or str(item.get("model") or "").strip()
+                    or str(item.get("api_key") or "").strip()
+                    or item.get("clear_api_key") is True
+                )
+                for item in raw_profiles.values()
+            ) if isinstance(raw_profiles, dict) else False
+            if self.ai_profiles is not None or has_profile_values:
+                self.save_ai_profiles(name, profile_payload)
         updates = {}
         if "auto_reply_context_per_side" in payload:
             try:

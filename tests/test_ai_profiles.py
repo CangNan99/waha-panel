@@ -168,6 +168,18 @@ class PanelStateProfileAvailabilityTests(unittest.TestCase):
         with self.assertRaises(AIProfileUnavailableError):
             self.state.save_ai_profiles("default", profile_payload())
 
+    def test_empty_profile_payload_does_not_block_legacy_save_without_key(self):
+        saved = self.state.save_settings({
+            "default_reply_text": "旧文本仍可保存",
+            "ai_profiles": {"profiles": {
+                "language": {"provider": "glm", "base_url": "", "model": "", "api_key": ""},
+                "vision_understanding": {"provider": "glm", "base_url": "", "model": "", "api_key": ""},
+                "vision_reasoning": {"provider": "glm", "base_url": "", "model": "", "api_key": ""},
+                "image_generation": {"provider": "glm", "base_url": "", "model": "", "api_key": ""},
+            }},
+        }, "default")
+        self.assertEqual(saved["default_reply_text"], "旧文本仍可保存")
+
 
 if __name__ == "__main__":
     unittest.main()
