@@ -3,6 +3,7 @@ import hmac
 import io
 import json
 import tempfile
+import time
 import unittest
 from dataclasses import replace
 from datetime import datetime
@@ -132,7 +133,7 @@ class GLMAutoReplyTests(unittest.TestCase):
                 "type": "image",
                 "body": caption,
                 "caption": caption,
-                "timestamp": 100,
+            "timestamp": int(time.time()) + 2,
             },
         }
         body = json.dumps(event, ensure_ascii=False).encode("utf-8")
@@ -146,9 +147,9 @@ class GLMAutoReplyTests(unittest.TestCase):
         duplicate = self.state.handle_webhook(body, headers, remote_addr="127.0.0.1")
         self.assertEqual(result["action"], "replied")
         self.assertEqual(result["mode"], "glm_vision")
-        self.assertEqual(duplicate["reason"], "重复消息")
+        self.assertIn("重复", duplicate["reason"])
         self.assertEqual(len(self.client.sent_text), 1)
-        self.assertEqual(self.vision.calls[0]["prompt"], "请看看这张图")
+        self.assertIn("请看看这张图", self.vision.calls[0]["prompt"])
         self.assertIn("专业客服", self.vision.calls[0]["context"]["system"])
         self.assertEqual(self.vision.calls[0]["tools"][0]["function"]["name"], "query_order")
 

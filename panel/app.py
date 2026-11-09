@@ -2303,7 +2303,10 @@ class PanelState:
         # Keep this call positional for compatibility with older client adapters
         # that expose the same WAHA parameters under a private ``_before`` name.
         # The production WahaClient accepts the exact same positional shape.
-        raw_items = self.client.get_messages(
+        get_messages = getattr(self.client, "get_messages", None)
+        if not callable(get_messages):
+            return
+        raw_items = get_messages(
             name,
             chat_id,
             min(per_side * 2, 100),
@@ -2476,7 +2479,11 @@ class PanelState:
             get_media_bytes = getattr(self.client, "get_media_bytes", None)
             if not callable(get_media_bytes):
                 raise ValueError("WAHA 未提供媒体下载接口")
-            result = get_media_bytes(media_url, max_bytes=MAX_AI_IMAGE_BYTES)
+            try:
+                result = get_media_bytes(media_url, max_bytes=MAX_AI_IMAGE_BYTES)
+            except TypeError:
+                # Keep compatibility with lightweight WAHA adapters used by older deployments.
+                result = get_media_bytes(media_url)
             if not isinstance(result, (tuple, list)) or len(result) != 3:
                 raise ValueError("WAHA 媒体响应格式无效")
             status, _content_type, body = result
@@ -3325,7 +3332,13 @@ class PanelState:
         }
         if image_content is not None:
             ai_kwargs["image_content"] = image_content
-        reply, mode = self._ai_reply(settings, incoming_for_ai, **ai_kwargs)
+        try:
+            reply, mode = self._ai_reply(settings, incoming_for_ai, **ai_kwargs)
+        except (AIProfileError, GLMError, ChatServiceError, WahaApiError, OSError):
+            if image_vision_requested:
+                self.log("WARN", "auto_reply.ignored", "客户图片视觉处理失败", session_name)
+                return {"action": "ignored", "reason": "视觉模型不可用", "session": session_name}
+            raise
         if mode == "product_image_tool":
             return self._execute_product_image(session_name, chat_id, message_id, original_timestamp,
                 ticket, reply, incoming_for_ai, context, dispatch)
