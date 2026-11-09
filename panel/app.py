@@ -1101,6 +1101,7 @@ class PanelState:
         self._translation_limit_lock = threading.Lock()
         self._translation_request_times = []
         self._translation_slots = threading.BoundedSemaphore(2)
+        self._glm_slots = threading.BoundedSemaphore(2)
         self._session_avatar_lock = threading.RLock()
         self._session_avatar_cache = {}
         self._session_avatar_slots = threading.BoundedSemaphore(2)
@@ -1286,8 +1287,11 @@ class PanelState:
         )
         self.ai_profiles = AIProfileStore(self.database_path, cipher)
         self.glm = GLMService(
-            logger=lambda level, message: self.log(
-                str(level or "INFO").upper(), "glm.service", message, DEFAULT_SESSION_NAME
+            logger=lambda level, message, session_name=None: self.log(
+                str(level or "INFO").upper(),
+                "glm.service",
+                message,
+                normalize_session_name(session_name or DEFAULT_SESSION_NAME),
             )
         )
         self.chat_capability_error = ""
@@ -1570,8 +1574,6 @@ class PanelState:
         return profile
 
     def _glm_call(self, callback):
-        if not hasattr(self, "_glm_slots"):
-            self._glm_slots = threading.BoundedSemaphore(2)
         if not self._glm_slots.acquire(blocking=False):
             raise GLMError("已有两项 GLM 请求正在处理，请稍后重试", "AI_BUSY")
         try:

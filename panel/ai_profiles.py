@@ -230,6 +230,7 @@ class AIProfileStore:
         return self.profile_payload(name)
 
     def effective_profile(self, session, capability, legacy_settings=None):
+        name = self._session_name(session)
         capability = str(capability or "").strip()
         if capability not in CAPABILITIES:
             raise ProfileValidationError("AI 能力类型无效")
@@ -243,6 +244,7 @@ class AIProfileStore:
                 raise AIProfileError("AI 密钥无法读取", "AI_KEY_UNREADABLE") from error
             if api_key:
                 return {
+                    "session_name": name,
                     "provider": row["provider"],
                     "capability": capability,
                     "base_url": row["base_url"],
@@ -257,6 +259,7 @@ class AIProfileStore:
             api_key = str(legacy.get("ai_api_key") or "").strip()
             if base_url and model and api_key:
                 return {
+                    "session_name": name,
                     "provider": "openai_compatible",
                     "capability": "language",
                     "base_url": base_url,

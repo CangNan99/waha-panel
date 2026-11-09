@@ -5,11 +5,12 @@ import hmac
 import json
 import secrets
 import socket
+import threading
 import time
 from dataclasses import dataclass
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
 
 try:
     from .chat_service import ChatService, ImageValidationError
@@ -29,6 +30,11 @@ IMAGE_EXTENSIONS = {
 TEST_PNG_BYTES = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
 )
+
+
+class _NoRedirectHandler(HTTPRedirectHandler):
+    def redirect_request(self, _request, _fp, _code, _msg, _headers, _newurl):
+        return None
 
 
 class GLMError(RuntimeError):
@@ -60,6 +66,7 @@ class GeneratedImageStore:
         self.max_items = max(1, int(max_items))
         self.ttl = max(1, int(ttl))
         self._items = {}
+        self._lock = threading.RLock()
 
     def _purge(self):
         now = int(self.clock())
@@ -85,59 +92,63 @@ class GeneratedImageStore:
         body = bytes(data or b"")
         if len(body) > MAX_GENERATED_IMAGE_BYTES:
             raise GLMError("生成图片超过 10MB 限制", "IMAGE_TOO_LARGE")
-        self._purge()
-        while len(self._items) >= self.max_items:
-            oldest = min(self._items.items(), key=lambda pair: pair[1]["created_at"])[0]
-            self._items.pop(oldest, None)
-        reference = secrets.token_urlsafe(24)
-        now = int(self.clock())
-        self._items[reference] = {
-            "session": str(session),
-            "chat_key_hmac": str(chat_key_hmac),
-            "mime_type": str(mime_type),
-            "data": body,
-            "created_at": now,
-            "expires_at": now + self.ttl,
-            "state": "AVAILABLE",
-            "request_id": "",
-        }
-        return reference
+        with self._lock:
+            self._purge()
+            while len(self._items) >= self.max_items:
+                oldest = min(self._items.items(), key=lambda pair: pair[1]["created_at"])[0]
+                self._items.pop(oldest, None)
+            reference = secrets.token_urlsafe(24)
+            now = int(self.clock())
+            self._items[reference] = {
+                "session": str(session),
+                "chat_key_hmac": str(chat_key_hmac),
+                "mime_type": str(mime_type),
+                "data": body,
+                "created_at": now,
+                "expires_at": now + self.ttl,
+                "state": "AVAILABLE",
+                "request_id": "",
+            }
+            return reference
 
     def get(self, session, chat_key_hmac, reference):
-        item = self._item(session, chat_key_hmac, reference)
-        if item["state"] == "CONSUMED":
-            raise GLMError("生成图片已被消费", "GENERATED_IMAGE_CONSUMED")
-        return item["mime_type"], item["data"]
+        with self._lock:
+            item = self._item(session, chat_key_hmac, reference)
+            if item["state"] == "CONSUMED":
+                raise GLMError("生成图片已被消费", "GENERATED_IMAGE_CONSUMED")
+            return item["mime_type"], item["data"]
 
     def reserve(self, session, chat_key_hmac, reference, request_id):
-        item = self._item(session, chat_key_hmac, reference)
-        request_id = str(request_id)
-        if item["state"] == "CONSUMED":
-            if item["request_id"] == request_id:
-                return item["mime_type"], item["data"]
-            raise GLMError("生成图片已被消费", "GENERATED_IMAGE_CONSUMED")
-        if item["state"] == "RESERVED" and item["request_id"] != request_id:
-            raise GLMError("生成图片正在被其他发送请求使用", "GENERATED_IMAGE_BUSY")
-        item["state"] = "RESERVED"
-        item["request_id"] = request_id
-        return item["mime_type"], item["data"]
+        with self._lock:
+            item = self._item(session, chat_key_hmac, reference)
+            request_id = str(request_id)
+            if item["state"] == "CONSUMED":
+                if item["request_id"] == request_id:
+                    return item["mime_type"], item["data"]
+                raise GLMError("生成图片已被消费", "GENERATED_IMAGE_CONSUMED")
+            if item["state"] == "RESERVED" and item["request_id"] != request_id:
+                raise GLMError("生成图片正在被其他发送请求使用", "GENERATED_IMAGE_BUSY")
+            item["state"] = "RESERVED"
+            item["request_id"] = request_id
+            return item["mime_type"], item["data"]
 
     def finalize(self, session, chat_key_hmac, reference, request_id, outcome):
-        item = self._item(session, chat_key_hmac, reference)
-        if item["state"] == "CONSUMED" and item["request_id"] == str(request_id):
+        with self._lock:
+            item = self._item(session, chat_key_hmac, reference)
+            if item["state"] == "CONSUMED" and item["request_id"] == str(request_id):
+                return item["state"]
+            if item["state"] != "RESERVED" or item["request_id"] != str(request_id):
+                raise GLMError("生成图片发送请求无效", "GENERATED_IMAGE_REQUEST_INVALID")
+            outcome = str(outcome or "").upper()
+            if outcome == "FAILED":
+                item["state"] = "AVAILABLE"
+                item["request_id"] = ""
+            elif outcome in {"SENT", "UNKNOWN"}:
+                item["state"] = "CONSUMED"
+                item["request_id"] = str(request_id)
+            else:
+                raise GLMError("生成图片发送结果无效", "GENERATED_IMAGE_OUTCOME_INVALID")
             return item["state"]
-        if item["state"] != "RESERVED" or item["request_id"] != str(request_id):
-            raise GLMError("生成图片发送请求无效", "GENERATED_IMAGE_REQUEST_INVALID")
-        outcome = str(outcome or "").upper()
-        if outcome == "FAILED":
-            item["state"] = "AVAILABLE"
-            item["request_id"] = ""
-        elif outcome in {"SENT", "UNKNOWN"}:
-            item["state"] = "CONSUMED"
-            item["request_id"] = str(request_id)
-        else:
-            raise GLMError("生成图片发送结果无效", "GENERATED_IMAGE_OUTCOME_INVALID")
-        return item["state"]
 
 
 class GLMService:
@@ -211,7 +222,9 @@ class GLMService:
             tool_calls=tuple(tool_calls),
         )
 
-    def _request_json(self, endpoint, api_key, payload, timeout=30, accept="application/json"):
+    def _request_json(
+        self, endpoint, api_key, payload, timeout=30, accept="application/json", session_name=None
+    ):
         body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         request = Request(endpoint, data=body, method="POST", headers={
             "Authorization": "Bearer " + api_key,
@@ -227,24 +240,31 @@ class GLMService:
         except GLMError:
             raise
         except HTTPError as error:
-            self._safe_log("error", f"glm HTTP error: {getattr(error, 'code', 'unknown')}")
+            self._safe_log(
+                "error", f"glm HTTP error: {getattr(error, 'code', 'unknown')}", session_name
+            )
             raise GLMError("GLM 服务请求失败", "AI_UPSTREAM_ERROR") from error
         except (URLError, TimeoutError, OSError) as error:
-            self._safe_log("error", "glm connection error")
+            self._safe_log("error", "glm connection error", session_name)
             raise GLMError("无法连接 GLM 服务", "AI_CONNECTION_ERROR") from error
         try:
             return json.loads(raw.decode("utf-8"))
         except (UnicodeError, ValueError, json.JSONDecodeError) as error:
             raise GLMError("GLM 服务返回内容格式异常", "AI_RESPONSE_INVALID") from error
 
-    def _safe_log(self, level, message):
+    def _safe_log(self, level, message, session_name=None):
         if not self.logger:
             return
         try:
-            self.logger(level, message)
+            self.logger(level, message, session_name)
         except TypeError:
             try:
-                self.logger(message)
+                self.logger(level, message)
+            except TypeError:
+                try:
+                    self.logger(message)
+                except Exception:
+                    return
             except Exception:
                 return
         except Exception:
@@ -259,7 +279,12 @@ class GLMService:
         payload.update(self._thinking_payload(profile))
         if tools:
             payload["tools"] = tools
-        return self._result(self._request_json(self._endpoint(profile, "/chat/completions"), api_key, payload))
+        return self._result(self._request_json(
+            self._endpoint(profile, "/chat/completions"),
+            api_key,
+            payload,
+            session_name=profile.get("session_name") if isinstance(profile, dict) else None,
+        ))
 
     def chat_vision(self, profile, prompt, image_bytes, mime_type, reasoning=False, context=None, tools=None):
         prompt = self._prompt(prompt)
@@ -293,7 +318,12 @@ class GLMService:
         payload.update(self._thinking_payload(profile, reasoning=reasoning))
         if tools:
             payload["tools"] = tools
-        return self._result(self._request_json(self._endpoint(profile, "/chat/completions"), api_key, payload))
+        return self._result(self._request_json(
+            self._endpoint(profile, "/chat/completions"),
+            api_key,
+            payload,
+            session_name=profile.get("session_name") if isinstance(profile, dict) else None,
+        ))
 
     def _fetch_generated_url(self, profile, url):
         parsed = urlsplit(str(url or ""))
@@ -301,15 +331,25 @@ class GLMService:
             raise GLMError("生成图片地址无效", "INVALID_GENERATED_IMAGE_URL")
         configured_host = urlsplit(self._profile_value(profile, "base_url")).hostname or ""
         host = parsed.hostname.lower()
-        allowed = host == configured_host.lower() or host.endswith(".bigmodel.cn") or host.endswith(".z.ai")
+        allowed = (
+            host == configured_host.lower()
+            or host.endswith(".bigmodel.cn")
+            or host.endswith(".z.ai")
+            or host == "chatglm.cn"
+            or host.endswith(".chatglm.cn")
+        )
         if not allowed:
             raise GLMError("生成图片地址不属于 GLM 服务", "UNSAFE_GENERATED_IMAGE_URL")
         request = Request(str(url), headers={
             "Accept": "image/png, image/jpeg, image/webp, application/octet-stream",
-            "Authorization": "Bearer " + self._profile_value(profile, "api_key"),
         })
         try:
-            with self.opener(request, timeout=15) as response:
+            if self.opener is urlopen:
+                opener = build_opener(_NoRedirectHandler())
+                response_context = opener.open(request, timeout=15)
+            else:
+                response_context = self.opener(request, timeout=15)
+            with response_context as response:
                 body = response.read()
                 content_type = getattr(response, "headers", {}).get("Content-Type", "image/png")
         except (HTTPError, URLError, TimeoutError, OSError) as error:
@@ -327,7 +367,11 @@ class GLMService:
         if size:
             payload["size"] = str(size)[:32]
         envelope = self._request_json(
-            self._endpoint(profile, "/images/generations"), api_key, payload, timeout=30
+            self._endpoint(profile, "/images/generations"),
+            api_key,
+            payload,
+            timeout=30,
+            session_name=profile.get("session_name") if isinstance(profile, dict) else None,
         )
         try:
             item = envelope["data"][0]
