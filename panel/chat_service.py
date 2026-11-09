@@ -738,6 +738,27 @@ class ChatService:
             raise ImageValidationError("当前媒体不是可显示图片")
         return status, content_type, body
 
+    def image_for_ai(self, session, chat_ref, message_ref):
+        """Read and validate one image message for a server-side AI request."""
+        name = _session_name(session)
+        chat_id = self._decode_chat(name, chat_ref)
+        message_chat, message_id = self._decode_message(name, message_ref)
+        if not __import__("hmac").compare_digest(chat_id, message_chat):
+            raise ChatAccessError("消息不属于当前聊天")
+        message = self.client.get_message(name, chat_id, message_id, download_media=True)
+        media = message.get("media") if isinstance(message, dict) and isinstance(message.get("media"), dict) else {}
+        media_url = media.get("url") or (message.get("mediaUrl") if isinstance(message, dict) else None)
+        if not media_url:
+            raise ChatAccessError("消息没有可读取的媒体")
+        _status, content_type, body = self.client.get_media_bytes(media_url)
+        declared_type = str(content_type or media.get("mimetype") or "").lower().split(";", 1)[0].strip()
+        extensions = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp"}
+        if declared_type not in extensions:
+            raise ImageValidationError("当前媒体不是受支持的图片")
+        filename = "ai-image" + extensions[declared_type]
+        _safe_name, normalized_type = self._validated_image(filename, declared_type, body)
+        return {"filename": filename, "mime_type": normalized_type, "data": body}
+
     @staticmethod
     def _request_id(value):
         try:

@@ -26,6 +26,9 @@ IMAGE_EXTENSIONS = {
     "image/png": ".png",
     "image/webp": ".webp",
 }
+TEST_PNG_BYTES = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+)
 
 
 class GLMError(RuntimeError):
@@ -110,6 +113,8 @@ class GeneratedImageStore:
         item = self._item(session, chat_key_hmac, reference)
         request_id = str(request_id)
         if item["state"] == "CONSUMED":
+            if item["request_id"] == request_id:
+                return item["mime_type"], item["data"]
             raise GLMError("生成图片已被消费", "GENERATED_IMAGE_CONSUMED")
         if item["state"] == "RESERVED" and item["request_id"] != request_id:
             raise GLMError("生成图片正在被其他发送请求使用", "GENERATED_IMAGE_BUSY")
@@ -119,6 +124,8 @@ class GeneratedImageStore:
 
     def finalize(self, session, chat_key_hmac, reference, request_id, outcome):
         item = self._item(session, chat_key_hmac, reference)
+        if item["state"] == "CONSUMED" and item["request_id"] == str(request_id):
+            return item["state"]
         if item["state"] != "RESERVED" or item["request_id"] != str(request_id):
             raise GLMError("生成图片发送请求无效", "GENERATED_IMAGE_REQUEST_INVALID")
         outcome = str(outcome or "").upper()
@@ -341,3 +348,17 @@ class GLMService:
         if item.get("url"):
             return self._fetch_generated_url(profile, item["url"])
         raise GLMError("GLM 图像生成结果为空", "AI_RESPONSE_INVALID")
+
+    def test_connection(self, profile, capability="language"):
+        capability = str(capability or "language")
+        if capability in {"vision_understanding", "vision_reasoning"}:
+            result = self.chat_vision(
+                profile,
+                "只返回：连接正常",
+                TEST_PNG_BYTES,
+                "image/png",
+                reasoning=capability == "vision_reasoning",
+            )
+        else:
+            result = self.chat_text(profile, [{"role": "user", "content": "只返回：连接正常"}])
+        return {"ok": True, "content": result.content}

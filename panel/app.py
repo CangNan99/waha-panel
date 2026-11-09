@@ -101,6 +101,7 @@ try:
     )
     from .chat_automation import ChatAutomationService
     from .chat_page import chat_management_page
+    from .glm_service import GLMError, GLMService, GeneratedImageStore
     from .product_image_service import ProductImageService
     from .product_image_page import product_image_page
     from .product_image_service import ProductImageError
@@ -150,6 +151,7 @@ except ImportError:  # Supports the existing `python app.py` container entrypoin
     )
     from chat_automation import ChatAutomationService
     from chat_page import chat_management_page
+    from glm_service import GLMError, GLMService, GeneratedImageStore
     from product_image_service import ProductImageService
     from product_image_page import product_image_page
     from product_image_service import ProductImageError
@@ -1090,6 +1092,8 @@ class PanelState:
         self.aliyun_translation = None
         self.global_translation = None
         self.ai_profiles = None
+        self.glm = None
+        self.generated_images = GeneratedImageStore()
         self.data_cipher = None
         self.iptv = None
         self.csrf_token = None
@@ -1281,6 +1285,11 @@ class PanelState:
             ),
         )
         self.ai_profiles = AIProfileStore(self.database_path, cipher)
+        self.glm = GLMService(
+            logger=lambda level, message: self.log(
+                str(level or "INFO").upper(), "glm.service", message, DEFAULT_SESSION_NAME
+            )
+        )
         self.chat_capability_error = ""
         return self.chat
 
@@ -1550,6 +1559,114 @@ class PanelState:
             raise AIProfileUnavailableError("GLM 配置暂不可用，请检查面板数据加密密钥")
         self.ensure_managed_session(name)
         return self.ai_profiles.save_profiles(name, payload)
+
+    def _effective_ai_profile(self, session_name, capability):
+        if self.ai_profiles is None or self.glm is None:
+            raise AIProfileUnavailableError("GLM 功能暂不可用，请检查面板数据加密密钥")
+        name = normalize_session_name(session_name)
+        profile = self.ai_profiles.effective_profile(name, capability, self._settings(name))
+        if not profile:
+            raise GLMError("请先配置对应的 AI 模型", "AI_NOT_CONFIGURED")
+        return profile
+
+    def _glm_call(self, callback):
+        if not hasattr(self, "_glm_slots"):
+            self._glm_slots = threading.BoundedSemaphore(2)
+        if not self._glm_slots.acquire(blocking=False):
+            raise GLMError("已有两项 GLM 请求正在处理，请稍后重试", "AI_BUSY")
+        try:
+            return callback()
+        finally:
+            self._glm_slots.release()
+
+    def test_ai_profile(self, session_name, capability):
+        capability = str(capability or "").strip()
+        profile = self._effective_ai_profile(session_name, capability)
+        if capability == "image_generation":
+            return {"ok": True, "capability": capability, "configuration_only": True}
+        result = self._glm_call(lambda: self.glm.test_connection(profile, capability))
+        return {"ok": True, "capability": capability, "configuration_only": False, **result}
+
+    def vision_for_message(self, session_name, chat_ref, message_ref, prompt, mode):
+        mode = str(mode or "").strip()
+        if mode not in {"vision_understanding", "vision_reasoning"}:
+            raise GLMError("视觉能力类型无效", "INVALID_VISION_MODE")
+        profile = self._effective_ai_profile(session_name, mode)
+        chat = self.require_chat_service_for_ai()
+        image = chat.image_for_ai(session_name, chat_ref, message_ref)
+        result = self._glm_call(lambda: self.glm.chat_vision(
+            profile,
+            prompt or "请识别图片内容并给出准确回答。",
+            image["data"],
+            image["mime_type"],
+            reasoning=mode == "vision_reasoning",
+        ))
+        return {
+            "mode": mode,
+            "content": result.content,
+            "context_message_count": 0,
+        }
+
+    def require_chat_service_for_ai(self):
+        if self.chat is None:
+            raise AIProfileUnavailableError("聊天服务暂不可用，请检查面板数据加密密钥")
+        return self.chat
+
+    def generate_image(self, session_name, chat_ref, prompt, size=None):
+        profile = self._effective_ai_profile(session_name, "image_generation")
+        chat = self.require_chat_service_for_ai()
+        name = normalize_session_name(session_name)
+        chat_id = chat._decode_chat(name, chat_ref)
+        chat_key = chat._chat_key(name, chat_id)
+        result = self._glm_call(lambda: self.glm.generate_image(profile, prompt, size=size))
+        reference = self.generated_images.put(name, chat_key, result.mime_type, result.data)
+        return {
+            "image_ref": reference,
+            "mime_type": result.mime_type,
+            "expires_in": self.generated_images.ttl,
+        }
+
+    def generated_image(self, session_name, chat_ref, image_ref):
+        chat = self.require_chat_service_for_ai()
+        name = normalize_session_name(session_name)
+        chat_id = chat._decode_chat(name, chat_ref)
+        chat_key = chat._chat_key(name, chat_id)
+        return self.generated_images.get(name, chat_key, image_ref)
+
+    def send_generated_image(self, session_name, chat_ref, image_ref, caption, client_request_id):
+        chat = self.require_chat_service_for_ai()
+        name = normalize_session_name(session_name)
+        chat_id = chat._decode_chat(name, chat_ref)
+        chat_key = chat._chat_key(name, chat_id)
+        mime_type, data = self.generated_images.reserve(name, chat_key, image_ref, client_request_id)
+        extension = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp"}.get(mime_type, ".png")
+        try:
+            result = chat.send_image(
+                name,
+                chat_ref,
+                "generated" + extension,
+                mime_type,
+                data,
+                caption,
+                client_request_id,
+            )
+        except ChatSendError as error:
+            self.generated_images.finalize(
+                name, chat_key, image_ref, client_request_id,
+                "UNKNOWN" if error.state == "UNKNOWN" else "FAILED",
+            )
+            raise
+        except ChatServiceError:
+            self.generated_images.finalize(
+                name, chat_key, image_ref, client_request_id, "FAILED"
+            )
+            raise
+        outcome = str(result.get("state") or "FAILED").upper()
+        self.generated_images.finalize(
+            name, chat_key, image_ref, client_request_id,
+            "UNKNOWN" if outcome == "UNKNOWN" else "SENT" if outcome == "SENT" else "FAILED",
+        )
+        return result
 
     def settings_payload(self, session_name=DEFAULT_SESSION_NAME):
         name = normalize_session_name(session_name)
@@ -4241,6 +4358,7 @@ class PanelHandler(BaseHTTPRequestHandler):
             "follow-ups", "labels", "summary", "memory", "memory/rebuild", "notes/normalize",
             "machine-translations", "machine-translations/cache",
             "iptv/manual-card",
+            "vision", "generate-image", "generated-image", "send-generated-image",
         }
         if action not in allowed and not (
             len(parts) == 4 and parts[1] == "follow-ups" and parts[2] and parts[3] == "cancel"
@@ -4343,6 +4461,14 @@ class PanelHandler(BaseHTTPRequestHandler):
             if not chat_ref:
                 raise ValueError("缺少聊天引用")
             self.send_media(*chat.avatar(name, chat_ref))
+            return
+        if action == "generated-image":
+            chat_ref = query.get("chat_ref", [""])[0]
+            image_ref = query.get("image_ref", [""])[0]
+            if not chat_ref or not image_ref:
+                raise ValueError("缺少聊天或生成图片引用")
+            content_type, body = self.state.generated_image(name, chat_ref, image_ref)
+            self.send_media(HTTPStatus.OK, content_type, body)
             return
         if action == "events":
             after = self.headers.get("Last-Event-ID") or query.get("after", [0])[0]
@@ -4565,6 +4691,26 @@ class PanelHandler(BaseHTTPRequestHandler):
                 result = chat.send_text(
                     name, chat_ref, payload.get("text"), payload.get("client_request_id")
                 )
+            elif action == "vision":
+                result = self.state.vision_for_message(
+                    name,
+                    chat_ref,
+                    payload.get("message_ref"),
+                    payload.get("prompt"),
+                    payload.get("mode"),
+                )
+            elif action == "generate-image":
+                result = self.state.generate_image(
+                    name, chat_ref, payload.get("prompt"), payload.get("size")
+                )
+            elif action == "send-generated-image":
+                result = self.state.send_generated_image(
+                    name,
+                    chat_ref,
+                    payload.get("image_ref"),
+                    payload.get("caption"),
+                    payload.get("client_request_id"),
+                )
             elif action == "takeover":
                 result = chat.takeover(name, chat_ref)
             elif action == "resume-ai":
@@ -4753,15 +4899,26 @@ class PanelHandler(BaseHTTPRequestHandler):
             status = HTTPStatus.SERVICE_UNAVAILABLE
         elif isinstance(error, (AdminConflictError, LastActiveAdministratorError)):
             status = HTTPStatus.CONFLICT
-        elif code in {"CHAT_CAPABILITY_UNAVAILABLE", "TRANSLATION_UNAVAILABLE", "MEMORY_UNAVAILABLE", "ALIYUN_TRANSLATION_UNAVAILABLE"}:
+        elif code in {
+            "CHAT_CAPABILITY_UNAVAILABLE", "TRANSLATION_UNAVAILABLE", "MEMORY_UNAVAILABLE",
+            "ALIYUN_TRANSLATION_UNAVAILABLE", "AI_PROFILE_UNAVAILABLE",
+        }:
             status = HTTPStatus.SERVICE_UNAVAILABLE
-        elif code in {"SESSION_NOT_CONNECTED", "TRANSLATION_NOT_CONFIGURED", "ALIYUN_CONFIG_MISSING", "AI_CONFIG_MISSING", "AI_AUTH_ERROR"}:
+        elif code in {
+            "SESSION_NOT_CONNECTED", "TRANSLATION_NOT_CONFIGURED", "ALIYUN_CONFIG_MISSING",
+            "AI_CONFIG_MISSING", "AI_AUTH_ERROR", "AI_NOT_CONFIGURED",
+            "GENERATED_IMAGE_BUSY", "GENERATED_IMAGE_CONSUMED", "GENERATED_IMAGE_REQUEST_INVALID",
+        }:
             status = HTTPStatus.CONFLICT
+        elif code == "GENERATED_IMAGE_NOT_FOUND":
+            status = HTTPStatus.NOT_FOUND
         elif code == "AI_PAYMENT_REQUIRED":
             status = HTTPStatus.PAYMENT_REQUIRED
         elif code in {"AI_RATE_LIMIT", "AI_BUSY", "ALIYUN_RATE_LIMIT", "ALIYUN_BUSY"}:
             status = HTTPStatus.TOO_MANY_REQUESTS
-        elif code in {"AI_CONNECTION_ERROR", "AI_UPSTREAM_ERROR", "AI_RESPONSE_INVALID"}:
+        elif code in {
+            "AI_CONNECTION_ERROR", "AI_UPSTREAM_ERROR", "AI_RESPONSE_INVALID", "AI_IMAGE_FETCH_ERROR",
+        }:
             status = HTTPStatus.BAD_GATEWAY
         payload = {"code": code, "message": getattr(error, "public_message", str(error))}
         if isinstance(error, ChatSendError):
@@ -5378,7 +5535,7 @@ class PanelHandler(BaseHTTPRequestHandler):
                 self.wfile.write(body)
             else:
                 self.send_json({"message": "Not found"}, HTTPStatus.NOT_FOUND)
-        except (ChatServiceError, TranslationError, RequestTooLarge, UnsupportedRequestMedia) as error:
+        except (ChatServiceError, TranslationError, AIProfileError, GLMError, RequestTooLarge, UnsupportedRequestMedia) as error:
             self.send_service_error(error)
         except ProductImageError as error:
             status = HTTPStatus.NOT_FOUND if getattr(error, "code", "") in {"PRODUCT_IMAGE_NOT_FOUND", "TAG_NOT_FOUND"} else HTTPStatus.CONFLICT if getattr(error, "code", "") in {"TAG_EXISTS"} else HTTPStatus.BAD_REQUEST
@@ -5450,7 +5607,7 @@ class PanelHandler(BaseHTTPRequestHandler):
                 self.send_json(result, HTTPStatus.OK)
             else:
                 self.send_json({"message": "Not found"}, HTTPStatus.NOT_FOUND)
-        except (ChatServiceError, TranslationError, RequestTooLarge, UnsupportedRequestMedia) as error:
+        except (ChatServiceError, TranslationError, AIProfileError, GLMError, RequestTooLarge, UnsupportedRequestMedia) as error:
             self.send_service_error(error)
         except ProductImageError as error:
             status = HTTPStatus.NOT_FOUND if getattr(error, "code", "") in {"PRODUCT_IMAGE_NOT_FOUND", "TAG_NOT_FOUND"} else HTTPStatus.CONFLICT if getattr(error, "code", "") in {"TAG_EXISTS"} else HTTPStatus.BAD_REQUEST
@@ -5490,7 +5647,7 @@ class PanelHandler(BaseHTTPRequestHandler):
                 self.send_business_write(route, "PUT")
             else:
                 self.send_json({"message": "Not found"}, HTTPStatus.NOT_FOUND)
-        except (ChatServiceError, TranslationError, RequestTooLarge, UnsupportedRequestMedia) as error:
+        except (ChatServiceError, TranslationError, AIProfileError, GLMError, RequestTooLarge, UnsupportedRequestMedia) as error:
             self.send_service_error(error)
         except ProductImageError as error:
             status = HTTPStatus.NOT_FOUND if getattr(error, "code", "") in {"PRODUCT_IMAGE_NOT_FOUND", "TAG_NOT_FOUND"} else HTTPStatus.CONFLICT if getattr(error, "code", "") in {"TAG_EXISTS"} else HTTPStatus.BAD_REQUEST
@@ -5552,7 +5709,7 @@ class PanelHandler(BaseHTTPRequestHandler):
         if route in {"/api/translation/cache", "/api/translation/aliyun/cache"}:
             try:
                 self.send_translation_write(route, "DELETE")
-            except (ChatServiceError, TranslationError, RequestTooLarge, UnsupportedRequestMedia) as error:
+            except (ChatServiceError, TranslationError, AIProfileError, GLMError, RequestTooLarge, UnsupportedRequestMedia) as error:
                 self.send_service_error(error)
             except AdminAuthError as error:
                 self.send_admin_auth_required(error)
@@ -5568,7 +5725,7 @@ class PanelHandler(BaseHTTPRequestHandler):
         if route == "/api/sessions" or route.startswith("/api/sessions/"):
             try:
                 self.send_session_delete(route)
-            except (ChatServiceError, TranslationError, RequestTooLarge, UnsupportedRequestMedia) as error:
+            except (ChatServiceError, TranslationError, AIProfileError, GLMError, RequestTooLarge, UnsupportedRequestMedia) as error:
                 self.send_service_error(error)
             except WahaApiError as error:
                 self.state.log("ERROR", "session.delete", str(error))
