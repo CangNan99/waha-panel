@@ -170,7 +170,7 @@ class PanelStateProfileAvailabilityTests(unittest.TestCase):
 
     def test_empty_profile_payload_does_not_block_legacy_save_without_key(self):
         saved = self.state.save_settings({
-            "default_reply_text": "旧文本仍可保存",
+            "persona": "旧文本仍可保存",
             "ai_profiles": {"profiles": {
                 "language": {"provider": "glm", "base_url": "", "model": "", "api_key": ""},
                 "vision_understanding": {"provider": "glm", "base_url": "", "model": "", "api_key": ""},
@@ -178,7 +178,7 @@ class PanelStateProfileAvailabilityTests(unittest.TestCase):
                 "image_generation": {"provider": "glm", "base_url": "", "model": "", "api_key": ""},
             }},
         }, "default")
-        self.assertEqual(saved["default_reply_text"], "旧文本仍可保存")
+        self.assertEqual(self.state._settings("default")["persona"], "旧文本仍可保存")
 
 
 if __name__ == "__main__":
