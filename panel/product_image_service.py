@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import json
 import os
 import re
 import sqlite3
@@ -28,6 +29,9 @@ IMAGE_TYPES = {
 TAG_LIMIT = 120
 TITLE_LIMIT = 200
 CAPTION_LIMIT = 4096
+PRODUCT_NAME_LIMIT = 200
+SKU_LIMIT = 120
+ALIAS_LIMIT = 120
 
 
 class ProductImageError(RuntimeError):
@@ -114,9 +118,26 @@ class ProductImageService:
             connection.close()
 
     def _ensure_schema(self):
-        migration = Path(__file__).with_name("migrations") / "014_product_image_library.sql"
+        migration_root = Path(__file__).with_name("migrations")
         with self._db() as connection:
-            connection.executescript(migration.read_text(encoding="utf-8"))
+            connection.executescript(
+                (migration_root / "014_product_image_library.sql").read_text(encoding="utf-8")
+            )
+            connection.executescript(
+                (migration_root / "019_product_image_matching.sql").read_text(encoding="utf-8")
+            )
+            columns = {
+                str(row[1])
+                for row in connection.execute("PRAGMA table_info(product_image_assets)")
+            }
+            for definition in (
+                "product_name TEXT NOT NULL DEFAULT ''",
+                "sku TEXT NOT NULL DEFAULT ''",
+                "aliases_json TEXT NOT NULL DEFAULT '[]'",
+            ):
+                name = definition.split(" ", 1)[0]
+                if name not in columns:
+                    connection.execute("ALTER TABLE product_image_assets ADD COLUMN " + definition)
 
     def _log(self, level, message):
         if not self.logger:
@@ -198,6 +219,46 @@ class ProductImageService:
             raise ProductImageValidationError("图片说明过长", "CAPTION_TOO_LONG")
         return caption
 
+    @staticmethod
+    def _clean_match_text(value, field, limit):
+        text = display_tag(value)
+        if len(text) > limit:
+            raise ProductImageValidationError(f"{field}过长", "MATCH_METADATA_TOO_LONG")
+        return text
+
+    @classmethod
+    def _clean_match_metadata(cls, product_name="", sku="", aliases=()):
+        cleaned_name = cls._clean_match_text(product_name, "产品名称", PRODUCT_NAME_LIMIT)
+        cleaned_sku = cls._clean_match_text(sku, "SKU", SKU_LIMIT)
+        if aliases is None:
+            aliases = []
+        if isinstance(aliases, str):
+            aliases = [aliases]
+        if not isinstance(aliases, (list, tuple, set)):
+            raise ProductImageValidationError("产品别名格式无效", "INVALID_ALIASES")
+        cleaned_aliases = []
+        seen = set()
+        for alias in aliases:
+            label = cls._clean_match_text(alias, "产品别名", ALIAS_LIMIT)
+            key = normalize_tag(label)
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            cleaned_aliases.append(label)
+        return cleaned_name, cleaned_sku, cleaned_aliases
+
+    @classmethod
+    def _decode_aliases(cls, value):
+        try:
+            aliases = json.loads(str(value or "[]"))
+        except (TypeError, ValueError):
+            aliases = []
+        try:
+            _, _, cleaned = cls._clean_match_metadata(aliases=aliases)
+        except ProductImageValidationError:
+            cleaned = []
+        return cleaned
+
     @classmethod
     def _clean_tags(cls, values):
         if isinstance(values, str):
@@ -241,6 +302,9 @@ class ProductImageService:
             "created_at": int(row["created_at"]),
             "updated_at": int(row["updated_at"]),
             "tags": list(tags or []),
+            "product_name": str(row["product_name"] or ""),
+            "sku": str(row["sku"] or ""),
+            "aliases": ProductImageService._decode_aliases(row["aliases_json"]),
         }
         if reused:
             item["reused"] = True
@@ -410,13 +474,27 @@ class ProductImageService:
             connection.execute("DELETE FROM product_image_tags WHERE id=?", (int(tag_id),))
         return {"deleted": True, "id": int(tag_id)}
 
-    def upload(self, filename, declared_type, data, title, tags, caption_template=""):
+    def upload(
+        self,
+        filename,
+        declared_type,
+        data,
+        title,
+        tags,
+        caption_template="",
+        product_name="",
+        sku="",
+        aliases=(),
+    ):
         raw, safe_name, mime_type, extension, width, height = self._validate_bytes(
             filename, declared_type, data
         )
         cleaned_title = self._clean_title(title, Path(safe_name).stem)
         cleaned_caption = self._clean_caption(caption_template)
         cleaned_tags = self._clean_tags(tags)
+        cleaned_name, cleaned_sku, cleaned_aliases = self._clean_match_metadata(
+            product_name, sku, aliases
+        )
         sha256 = hashlib.sha256(raw).hexdigest()
         now = self._now()
         with self._db() as connection:
@@ -442,8 +520,8 @@ class ProductImageService:
                     os.fsync(handle.fileno())
                 os.replace(temp_path, target)
                 connection.execute(
-                    "INSERT INTO product_image_assets(id,title,caption_template,relative_path,original_filename,mime_type,byte_size,width,height,sha256,active,sort_order,created_at,updated_at) "
-                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "INSERT INTO product_image_assets(id,title,caption_template,relative_path,original_filename,mime_type,byte_size,width,height,sha256,active,sort_order,created_at,updated_at,product_name,sku,aliases_json) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (
                         asset_id,
                         cleaned_title,
@@ -459,6 +537,9 @@ class ProductImageService:
                         0,
                         now,
                         now,
+                        cleaned_name,
+                        cleaned_sku,
+                        json.dumps(cleaned_aliases, ensure_ascii=False, separators=(",", ":")),
                     ),
                 )
                 for index, (key, label) in enumerate(cleaned_tags):
@@ -534,14 +615,29 @@ class ProductImageService:
             current = self._load_asset(connection, asset_id, include_inactive=True)
             title = self._clean_title(payload.get("title", current["title"]), current["title"])
             caption = self._clean_caption(payload.get("caption_template", current["caption_template"]))
+            product_name, sku, aliases = self._clean_match_metadata(
+                payload.get("product_name", current.get("product_name", "")),
+                payload.get("sku", current.get("sku", "")),
+                payload.get("aliases", current.get("aliases", [])),
+            )
             active = current["active"] if "active" not in payload else _truthy(payload["active"])
             try:
                 sort_order = int(payload.get("sort_order", current["sort_order"]))
             except (TypeError, ValueError) as error:
                 raise ProductImageValidationError("排序值无效", "INVALID_SORT_ORDER") from error
             connection.execute(
-                "UPDATE product_image_assets SET title=?,caption_template=?,active=?,sort_order=?,updated_at=? WHERE id=?",
-                (title, caption, 1 if active else 0, sort_order, now, str(asset_id)),
+                "UPDATE product_image_assets SET title=?,caption_template=?,active=?,sort_order=?,product_name=?,sku=?,aliases_json=?,updated_at=? WHERE id=?",
+                (
+                    title,
+                    caption,
+                    1 if active else 0,
+                    sort_order,
+                    product_name,
+                    sku,
+                    json.dumps(aliases, ensure_ascii=False, separators=(",", ":")),
+                    now,
+                    str(asset_id),
+                ),
             )
             if "tags" in payload:
                 cleaned_tags = self._clean_tags(payload.get("tags"))
@@ -732,35 +828,83 @@ class ProductImageService:
         if not tag_key:
             return {"status": "NOT_FOUND", "code": "NOT_FOUND", "tag_key": ""}
         with self._db() as connection:
-            params = [tag_key]
-            query = (
-                "SELECT a.*,at.priority,at.is_primary FROM product_image_assets a "
-                "JOIN product_image_asset_tags at ON at.asset_id=a.id "
-                "JOIN product_image_tags t ON t.id=at.tag_id "
-                "WHERE a.active=1 AND t.tag_key=? AND at.is_primary=1"
-            )
-            if variant_key:
-                query += (
-                    " AND EXISTS (SELECT 1 FROM product_image_asset_tags vat "
-                    "JOIN product_image_tags vt ON vt.id=vat.tag_id "
-                    "WHERE vat.asset_id=a.id AND vt.tag_key=?)"
+            rows = connection.execute(
+                "SELECT a.*,t.tag_key,at.priority,at.is_primary "
+                "FROM product_image_assets a "
+                "LEFT JOIN product_image_asset_tags at ON at.asset_id=a.id "
+                "LEFT JOIN product_image_tags t ON t.id=at.tag_id "
+                "WHERE a.active=1 ORDER BY a.id,at.priority,t.tag_key"
+            ).fetchall()
+            assets = {}
+            for row in rows:
+                asset_id = str(row["id"])
+                entry = assets.setdefault(
+                    asset_id,
+                    {
+                        "row": row,
+                        "fields": {
+                            "product_name": normalize_tag(row["product_name"]),
+                            "sku": normalize_tag(row["sku"]),
+                            "aliases": {
+                                normalize_tag(alias)
+                                for alias in self._decode_aliases(row["aliases_json"])
+                                if normalize_tag(alias)
+                            },
+                        },
+                        "tags": [],
+                    },
                 )
-                params.append(variant_key)
-            rows = connection.execute(query, params).fetchall()
-            if not rows:
+                if row["tag_key"]:
+                    entry["tags"].append(
+                        {
+                            "key": str(row["tag_key"]),
+                            "priority": int(row["priority"]),
+                            "is_primary": bool(row["is_primary"]),
+                        }
+                    )
+
+            candidates = []
+            for asset_id, entry in assets.items():
+                fields = entry["fields"]
+                tag_matches = [
+                    item for item in entry["tags"]
+                    if item["is_primary"] and item["key"] == tag_key
+                ]
+                scores = []
+                if fields["product_name"] == tag_key and fields["product_name"]:
+                    scores.append((0, 0))
+                if fields["sku"] == tag_key and fields["sku"]:
+                    scores.append((1, 0))
+                if tag_key in fields["aliases"]:
+                    scores.append((2, 0))
+                scores.extend((3, item["priority"]) for item in tag_matches)
+                if not scores:
+                    continue
+                if variant_key:
+                    variant_values = {
+                        fields["product_name"],
+                        fields["sku"],
+                        *fields["aliases"],
+                        *(item["key"] for item in entry["tags"]),
+                    }
+                    if variant_key not in variant_values:
+                        continue
+                candidates.append((min(scores), asset_id))
+
+            if not candidates:
                 self._log("INFO", f"product_image.not_found tag={tag_key[:80]}")
                 return {"status": "NOT_FOUND", "code": "NOT_FOUND", "tag_key": tag_key}
-            best_priority = min(int(row["priority"]) for row in rows)
-            candidates = [row for row in rows if int(row["priority"]) == best_priority]
-            if len(candidates) != 1:
+            best_score = min(score for score, _ in candidates)
+            best_ids = sorted(asset_id for score, asset_id in candidates if score == best_score)
+            if len(best_ids) != 1:
                 self._log("INFO", f"product_image.ambiguous tag={tag_key[:80]}")
                 return {
                     "status": "AMBIGUOUS",
                     "code": "AMBIGUOUS",
                     "tag_key": tag_key,
-                    "candidates": [str(row["id"])[:12] for row in candidates],
+                    "candidates": [asset_id[:12] for asset_id in best_ids],
                 }
-            asset = self._load_asset(connection, candidates[0]["id"], include_inactive=False)
+            asset = self._load_asset(connection, best_ids[0], include_inactive=False)
             asset["status"] = "FOUND"
             asset["code"] = "FOUND"
             asset["tag_key"] = tag_key

@@ -39,6 +39,10 @@ class ProductImageServiceTests(unittest.TestCase):
                     "SELECT name FROM sqlite_master WHERE type='table'"
                 )
             }
+            columns = {
+                row[1]
+                for row in connection.execute("PRAGMA table_info(product_image_assets)")
+            }
         finally:
             connection.close()
         self.assertTrue(
@@ -50,6 +54,7 @@ class ProductImageServiceTests(unittest.TestCase):
                 "product_image_send_requests",
             } <= tables
         )
+        self.assertTrue({"product_name", "sku", "aliases_json"} <= columns)
         self.assertEqual(
             self.service.settings_payload(),
             {"auto_send_enabled": True, "daily_limit": 20},
@@ -128,6 +133,85 @@ class ProductImageServiceTests(unittest.TestCase):
             self.service.upload(
                 "long.png", "image/png", _image_bytes(), "长标签", ["x" * 121]
             )
+
+    def test_product_matching_metadata_normalizes_and_resolves_exact_sources(self):
+        result = self.service.upload(
+            "g5.png",
+            "image/png",
+            _image_bytes(),
+            "G5 图片",
+            ["电视盒子"],
+            "了解 {product_tag}",
+            product_name="  G5  Ｐｌｕｓ ",
+            sku=" G5-PLUS ",
+            aliases=[" IPTV  Pro ", "高级版"],
+        )
+        self.assertEqual(result["product_name"], "G5 Plus")
+        self.assertEqual(result["sku"], "G5-PLUS")
+        self.assertEqual(result["aliases"], ["IPTV Pro", "高级版"])
+        for query in ("g5 plus", "g5-plus", "iptv pro", "高级版", "电视盒子"):
+            with self.subTest(query=query):
+                resolved = self.service.resolve_for_send(query)
+                self.assertEqual(resolved["status"], "FOUND", resolved)
+                self.assertEqual(resolved["asset_id"], result["asset_id"])
+        self.assertEqual(self.service.resolve_for_send("pro")["status"], "NOT_FOUND")
+
+    def test_product_matching_uses_source_rank_then_priority_and_reports_ties(self):
+        name_match = self.service.upload(
+            "name.png", "image/png", _image_bytes(), "名称命中", ["other"],
+            product_name="Shared Product",
+        )
+        tag_match = self.service.upload(
+            "tag.png", "image/png", _image_bytes(color=(99, 1, 2, 255)), "标签命中", ["shared product"]
+        )
+        resolved = self.service.resolve_for_send(" shared  product ")
+        self.assertEqual(resolved["status"], "FOUND", resolved)
+        self.assertEqual(resolved["asset_id"], name_match["asset_id"])
+
+        tie_a = self.service.upload(
+            "tie-a.png", "image/png", _image_bytes(color=(4, 5, 6, 255)), "并列一", ["one"],
+            product_name="Tie Product",
+        )
+        tie_b = self.service.upload(
+            "tie-b.png", "image/png", _image_bytes(color=(7, 8, 9, 255)), "并列二", ["two"],
+            product_name="Tie Product",
+        )
+        ambiguous = self.service.resolve_for_send("tie product")
+        self.assertEqual(ambiguous["status"], "AMBIGUOUS", ambiguous)
+        self.assertEqual(len(ambiguous["candidates"]), 2)
+        self.assertIn(tie_a["asset_id"][:12], ambiguous["candidates"])
+        self.assertIn(tie_b["asset_id"][:12], ambiguous["candidates"])
+
+    def test_product_matching_rejects_overlong_metadata(self):
+        cases = [
+            {"product_name": "x" * 201},
+            {"sku": "x" * 121},
+            {"aliases": ["x" * 121]},
+        ]
+        for metadata in cases:
+            with self.subTest(metadata=metadata):
+                with self.assertRaises(ValueError):
+                    self.service.upload(
+                        "metadata.png", "image/png", _image_bytes(), "元数据", ["metadata"],
+                        **metadata,
+                    )
+
+    def test_product_matching_variant_is_an_exact_secondary_key(self):
+        asset = self.service.upload(
+            "variant.png",
+            "image/png",
+            _image_bytes(),
+            "变体图片",
+            ["catalog", "blue"],
+            product_name="Variant Product",
+        )
+        found = self.service.resolve_for_send("variant product", " blue ")
+        self.assertEqual(found["status"], "FOUND", found)
+        self.assertEqual(found["asset_id"], asset["asset_id"])
+        self.assertEqual(
+            self.service.resolve_for_send("variant product", "red")["status"],
+            "NOT_FOUND",
+        )
 
 
 if __name__ == "__main__":

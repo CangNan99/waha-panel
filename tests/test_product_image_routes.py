@@ -109,7 +109,14 @@ class ProductImageRouteTests(unittest.TestCase):
 
     def upload(self, csrf=True):
         content_type, body = multipart_body(
-            {"title": "产品图", "tags": json.dumps([" IPTV ", "Premium"]), "caption_template": "欢迎了解"},
+            {
+                "title": "产品图",
+                "tags": json.dumps([" IPTV ", "Premium"]),
+                "caption_template": "欢迎了解",
+                "product_name": " G5  Plus ",
+                "sku": " G5-PLUS ",
+                "aliases": json.dumps([" IPTV Pro ", "高级版"]),
+            },
             "image",
             "product.png",
             "image/png",
@@ -132,6 +139,9 @@ class ProductImageRouteTests(unittest.TestCase):
         self.assertNotIn("relative_path", payload)
         self.assertNotIn("sha256", payload)
         self.assertNotIn(str(self.temp.name), json.dumps(payload, ensure_ascii=False))
+        self.assertEqual(payload["product_name"], "G5 Plus")
+        self.assertEqual(payload["sku"], "G5-PLUS")
+        self.assertEqual(payload["aliases"], ["IPTV Pro", "高级版"])
 
     def test_preview_is_private_and_metadata_never_exposes_filesystem_paths(self):
         _, _, uploaded = self.upload()
@@ -146,6 +156,7 @@ class ProductImageRouteTests(unittest.TestCase):
         self.assertNotIn(str(self.temp.name), body.decode("utf-8"))
         self.assertIn("设为主图", body.decode("utf-8"))
         self.assertIn("保存优先级", body.decode("utf-8"))
+        self.assertIn("asset-icon", body.decode("utf-8"))
 
     def test_asset_update_disable_tag_crud_and_settings_round_trip(self):
         _, _, uploaded = self.upload()
@@ -153,11 +164,21 @@ class ProductImageRouteTests(unittest.TestCase):
         status, _, updated = self.request(
             f"/api/product-images/{asset_id}",
             method="PUT",
-            payload={"title": "更新产品", "tags": ["新标签"], "active": True},
+            payload={
+                "title": "更新产品",
+                "tags": ["新标签"],
+                "product_name": "更新产品",
+                "sku": "UPDATED-1",
+                "aliases": ["更新别名"],
+                "active": True,
+            },
             csrf=True,
         )
         self.assertEqual(status, 200)
         self.assertEqual(updated["title"], "更新产品")
+        self.assertEqual(updated["product_name"], "更新产品")
+        self.assertEqual(updated["sku"], "UPDATED-1")
+        self.assertEqual(updated["aliases"], ["更新别名"])
         status, _, deleted = self.request(f"/api/product-images/{asset_id}", method="DELETE", csrf=True)
         self.assertEqual(status, 200)
         self.assertFalse(deleted["active"])

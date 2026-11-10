@@ -117,6 +117,33 @@ class ProductImageIntegrationTests(unittest.TestCase):
         )
         self.assertEqual(self.client.image_calls, 0)
 
+    def test_product_name_and_alias_match_exactly_without_substring_fallback(self):
+        self.state.product_images.upload(
+            "alias.png",
+            "image/png",
+            self._alt_png(),
+            "G5 图片",
+            ["catalog"],
+            "",
+            product_name="G5 Plus",
+            sku="G5-PLUS",
+            aliases=["IPTV Pro"],
+        )
+        sent = self.execute(
+            {"product_tag": "IPTV Pro"},
+            "alias-exact",
+            incoming="我想了解 IPTV Pro",
+        )
+        self.assertEqual(sent["action"], "replied", sent)
+        self.assertEqual(self.client.image_calls, 1)
+        ignored = self.execute(
+            {"product_tag": "pro"},
+            "alias-substring",
+            incoming="我想了解 problem",
+        )
+        self.assertEqual(ignored["action"], "ignored")
+        self.assertEqual(self.client.image_calls, 1)
+
     @staticmethod
     def _alt_png():
         output = io.BytesIO()

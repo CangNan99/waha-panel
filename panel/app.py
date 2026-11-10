@@ -733,6 +733,25 @@ def init_db(path, seed_business=True):
             Path(__file__).with_name("migrations") / "014_product_image_library.sql"
         )
         connection.executescript(product_image_migration.read_text(encoding="utf-8"))
+        product_image_matching_migration = (
+            Path(__file__).with_name("migrations") / "019_product_image_matching.sql"
+        )
+        connection.executescript(product_image_matching_migration.read_text(encoding="utf-8"))
+        _add_column_if_missing(
+            connection,
+            "product_image_assets",
+            "product_name TEXT NOT NULL DEFAULT ''",
+        )
+        _add_column_if_missing(
+            connection,
+            "product_image_assets",
+            "sku TEXT NOT NULL DEFAULT ''",
+        )
+        _add_column_if_missing(
+            connection,
+            "product_image_assets",
+            "aliases_json TEXT NOT NULL DEFAULT '[]'",
+        )
         customer_first_seen_migration = (
             Path(__file__).with_name("migrations") / "018_customer_first_seen.sql"
         )
@@ -2758,8 +2777,9 @@ class PanelState:
         if product_image_enabled:
             system_parts.append(
                 "PRODUCT IMAGE RULES: Call send_product_image only when the current customer message "
-                "explicitly asks about or requests the named product. Use an exact product tag from the "
-                "current message; never guess a tag from older history, customer memory, or a vague request. "
+                "explicitly asks about or requests the named product. Use an exact product name, SKU, "
+                "alias, or product tag from the current message; never guess a key from older history, "
+                "customer memory, fuzzy substrings, or a vague request. "
                 "The server selects one unique active primary image and sends it directly. Never call the "
                 "tool more than once for one customer message, never expose internal IDs, filesystem paths, "
                 "or image URLs, and use ordinary text when the product tag is missing or uncertain."
@@ -5516,7 +5536,8 @@ class PanelHandler(BaseHTTPRequestHandler):
         allowed = {
             "asset_id", "title", "caption_template", "original_filename", "mime_type",
             "byte_size", "width", "height", "active", "is_active", "sort_order",
-            "created_at", "updated_at", "tags", "reused", "status", "code", "tag_key", "variant",
+            "created_at", "updated_at", "tags", "product_name", "sku", "aliases",
+            "reused", "status", "code", "tag_key", "variant",
         }
         return {key: value for key, value in asset.items() if key in allowed}
 
@@ -5541,7 +5562,9 @@ class PanelHandler(BaseHTTPRequestHandler):
             raise ValueError("图片上传表单格式不正确") from error
         if not envelope.is_multipart():
             raise ValueError("图片上传表单格式不正确")
-        allowed = {"title", "tags", "caption_template", "image"}
+        allowed = {
+            "title", "tags", "caption_template", "product_name", "sku", "aliases", "image"
+        }
         values = {}
         for part in envelope.iter_parts():
             name = part.get_param("name", header="content-disposition")
@@ -5570,6 +5593,9 @@ class PanelHandler(BaseHTTPRequestHandler):
             raise ValueError("图片上传缺少标题或图片")
         values.setdefault("tags", "[]")
         values.setdefault("caption_template", "")
+        values.setdefault("product_name", "")
+        values.setdefault("sku", "")
+        values.setdefault("aliases", "[]")
         try:
             tags = json.loads(values["tags"])
         except (TypeError, json.JSONDecodeError):
@@ -5577,6 +5603,13 @@ class PanelHandler(BaseHTTPRequestHandler):
         if not isinstance(tags, list):
             raise ValueError("产品标签必须是数组")
         values["tags"] = tags
+        try:
+            aliases = json.loads(values["aliases"])
+        except (TypeError, json.JSONDecodeError):
+            aliases = [item.strip() for item in str(values["aliases"]).split(",") if item.strip()]
+        if not isinstance(aliases, list):
+            raise ValueError("产品别名必须是数组")
+        values["aliases"] = aliases
         return values
 
     def send_product_image_get(self, route):
@@ -5614,6 +5647,7 @@ class PanelHandler(BaseHTTPRequestHandler):
             result = service.upload(
                 image["filename"], image["content_type"], image["data"],
                 form["title"], form["tags"], form.get("caption_template", ""),
+                form.get("product_name", ""), form.get("sku", ""), form.get("aliases", []),
             )
             self.send_json(self._product_image_public(result), HTTPStatus.CREATED)
             return
