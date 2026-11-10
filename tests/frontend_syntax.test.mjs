@@ -6,6 +6,7 @@ import { checkInlineScripts } from '../scripts/check_frontend_syntax.mjs';
 
 const appSource = await readFile(new URL('../panel/app.py', import.meta.url), 'utf8');
 const chatSource = await readFile(new URL('../panel/chat_page.py', import.meta.url), 'utf8');
+const overviewSource = await readFile(new URL('../panel/static/views/overview.js', import.meta.url), 'utf8');
 const scripts = [...appSource.matchAll(/<script>\s*([\s\S]*?)\s*<\/script>/g)];
 
 test('IPTV shared playback server is labeled, restored, and included in settings saves', () => {
@@ -45,6 +46,12 @@ test('administrator save handlers close their forEach and addEventListener calls
 
 test('chat management inline JavaScript has valid syntax', () => {
   assert.doesNotThrow(() => checkInlineScripts(chatSource, 'panel/chat_page.py'));
+});
+
+test('overview renders per-account customer statistics from the monitoring payload', () => {
+  assert.match(overviewSource, /customer_counts/);
+  assert.match(overviewSource, /new_today/);
+  assert.match(overviewSource, /total/);
 });
 
 test('stale QR requests cannot update a newly selected session', async () => {

@@ -733,6 +733,10 @@ def init_db(path, seed_business=True):
             Path(__file__).with_name("migrations") / "014_product_image_library.sql"
         )
         connection.executescript(product_image_migration.read_text(encoding="utf-8"))
+        customer_first_seen_migration = (
+            Path(__file__).with_name("migrations") / "018_customer_first_seen.sql"
+        )
+        connection.executescript(customer_first_seen_migration.read_text(encoding="utf-8"))
         system_labels_migration = (
             Path(__file__).with_name("migrations") / "012_customer_system_labels.sql"
         )
@@ -3108,6 +3112,40 @@ class PanelState:
         finally:
             connection.close()
 
+    def _record_customer_first_seen(self, session_name, chat_id, received_at):
+        """Record a redacted first/last inbound timestamp for one customer chat."""
+        name = normalize_session_name(session_name)
+        customer = str(chat_id or "").strip()
+        if not customer:
+            return
+        if self.chat is not None:
+            customer_key = self.chat._chat_key(name, customer)
+        else:
+            customer_key = hmac.new(
+                self.webhook_secret.encode("utf-8"),
+                f"customer-stats-v1\x00{name}\x00{customer}".encode("utf-8"),
+                hashlib.sha256,
+            ).hexdigest()
+        stamp = int(received_at or self.clock())
+        now = int(self.clock())
+        connection = sqlite3.connect(self.database_path)
+        try:
+            connection.execute(
+                "INSERT OR IGNORE INTO customer_first_seen "
+                "(session_name,customer_key_hmac,first_inbound_at,last_inbound_at,created_at,updated_at) "
+                "VALUES (?,?,?,?,?,?)",
+                (name, customer_key, stamp, stamp, now, now),
+            )
+            connection.execute(
+                "UPDATE customer_first_seen SET last_inbound_at = CASE "
+                "WHEN last_inbound_at < ? THEN ? ELSE last_inbound_at END, updated_at = ? "
+                "WHERE session_name = ? AND customer_key_hmac = ?",
+                (stamp, stamp, now, name, customer_key),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
     def _reply_delays(self, _reply, is_hot, session_name=DEFAULT_SESSION_NAME):
         scale = normalize_reply_delay_scale(
             self._settings(session_name).get("auto_reply_delay_scale", DEFAULT_REPLY_DELAY_SCALE)
@@ -3266,6 +3304,10 @@ class PanelState:
             return {"action": "ignored", "reason": "重复或无法归档的消息", "session": session_name}
         if from_me or is_group or is_status:
             return {"action": "ignored", "reason": "消息不符合自动回复范围", "session": session_name}
+        try:
+            self._record_customer_first_seen(session_name, chat_id, original_timestamp)
+        except Exception:
+            self.log("WARN", "customer.stats", "客户统计记录失败", session_name)
         settings = self._settings(session_name)
         glm_vision_profile = None
         if media_kind == "image" and self.ai_profiles is not None:

@@ -719,6 +719,38 @@ class WebhookArchiveTests(UpgradeTestCase):
         self.assertEqual(self.client.send_calls, 1)
         self.assertEqual(self.count_message_id("in-1"), 1)
 
+    def test_customer_first_seen_records_non_group_inbound_once(self):
+        event = self.event(body="客户问题", message_id="customer-first-seen")
+        self.state.handle_webhook(event, dispatch=False)
+        self.state.handle_webhook(event, dispatch=False)
+        self.state.handle_webhook(
+            self.event(
+                body="群聊消息",
+                chat_id="group@g.us",
+                is_group=True,
+                message_id="customer-group",
+            ),
+            dispatch=False,
+        )
+        self.state.handle_webhook(
+            self.event(
+                body="状态消息",
+                chat_id="status@broadcast",
+                message_type="status",
+                message_id="customer-status",
+            ),
+            dispatch=False,
+        )
+        with sqlite3.connect(self.database) as connection:
+            rows = connection.execute(
+                "SELECT session_name,customer_key_hmac,first_inbound_at,last_inbound_at "
+                "FROM customer_first_seen"
+            ).fetchall()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0][0], "default")
+        self.assertNotIn("chat-1@c.us", rows[0][1])
+        self.assertLessEqual(rows[0][2], rows[0][3])
+
     def test_auto_reply_is_archived_with_auto_ai_origin(self):
         result = self.state.handle_webhook(
             self.event(body="客户问题", message_id="in-auto-origin"), dispatch=True
