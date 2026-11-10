@@ -9,7 +9,7 @@ import threading
 import time
 from dataclasses import dataclass
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
 
 try:
@@ -168,8 +168,20 @@ class GLMService:
 
     @staticmethod
     def _endpoint(profile, suffix):
-        base_url = GLMService._profile_value(profile, "base_url").rstrip("/")
-        return base_url + suffix
+        configured = GLMService._profile_value(profile, "base_url").rstrip("/")
+        try:
+            parsed = urlsplit(configured)
+        except ValueError as error:
+            raise GLMError("GLM 配置地址无效", "AI_INVALID_URL") from error
+        if parsed.query or parsed.fragment:
+            raise GLMError("GLM 配置地址无效", "AI_INVALID_URL")
+        path = parsed.path.rstrip("/")
+        for known_suffix in ("/chat/completions", "/images/generations"):
+            if path.endswith(known_suffix):
+                path = path[: -len(known_suffix)].rstrip("/")
+                break
+        endpoint_suffix = "/" + str(suffix or "").lstrip("/")
+        return urlunsplit((parsed.scheme, parsed.netloc, path + endpoint_suffix, "", ""))
 
     @staticmethod
     def _prompt(value):
