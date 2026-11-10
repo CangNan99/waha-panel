@@ -372,6 +372,24 @@ class ChatPageRegressionTests(unittest.TestCase):
         self.assertIn("客户备注", page)
         self.assertIn("sessionSelect", page)
 
+    def test_page_contains_protected_customer_image_preview_controls(self):
+        page = chat_management_page("default")
+        for control_id in (
+            "imagePreviewDialog",
+            "imagePreviewZoomIn",
+            "imagePreviewZoomOut",
+            "imagePreviewReset",
+            "imagePreviewClose",
+        ):
+            self.assertIn(f'id="{control_id}"', page)
+        for helper in ("openMessageImage", "closeMessageImage"):
+            self.assertIn(f"function {helper}", page)
+        self.assertIn("message-image", page)
+        self.assertIn("/media?", page)
+        self.assertIn("event.key==='Escape'", page)
+        self.assertIn("pointermove", page)
+        self.assertIn("deltaY", page)
+
     def test_page_contains_chat_engagement_controls(self):
         page = chat_management_page("default")
         for control_id in ("followUpButton", "labelButton", "summaryButton", "followUpDialog", "labelDialog", "summaryDialog"):

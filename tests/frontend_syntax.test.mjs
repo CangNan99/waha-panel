@@ -48,6 +48,20 @@ test('chat management inline JavaScript has valid syntax', () => {
   assert.doesNotThrow(() => checkInlineScripts(chatSource, 'panel/chat_page.py'));
 });
 
+test('customer message images expose a protected preview with bounded zoom controls', () => {
+  for (const id of ['imagePreviewDialog', 'imagePreviewZoomIn', 'imagePreviewZoomOut', 'imagePreviewReset', 'imagePreviewClose']) {
+    assert.match(chatSource, new RegExp(`id="${id}"`));
+  }
+  assert.match(chatSource, /function openMessageImage\(/);
+  assert.match(chatSource, /function closeMessageImage\(/);
+  assert.match(chatSource, /message-image/);
+  assert.match(chatSource, /\/media\?/);
+  assert.match(chatSource, /event\.key==='Escape'/);
+  assert.match(chatSource, /pointermove/);
+  assert.match(chatSource, /deltaY/);
+  assert.match(chatSource, /prefers-reduced-motion:reduce/);
+});
+
 test('overview renders per-account customer statistics from the monitoring payload', () => {
   assert.match(overviewSource, /customer_counts/);
   assert.match(overviewSource, /new_today/);
