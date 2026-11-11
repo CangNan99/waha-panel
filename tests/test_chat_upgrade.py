@@ -270,6 +270,75 @@ class SettingsAndContextTests(UpgradeTestCase):
         self.assertFalse(self.state.settings_payload("default")["customer_memory_enabled"])
         self.assertTrue(self.state.settings_payload("sales")["customer_memory_enabled"])
 
+    def test_ai_marketing_defaults_disabled_and_round_trips_per_session(self):
+        defaults = self.state.settings_payload("default")
+        self.assertFalse(defaults["ai_marketing_enabled"])
+        self.assertEqual(defaults["ai_marketing_idle_days"], 7)
+        self.assertEqual(defaults["ai_marketing_daily_limit"], 20)
+        self.assertEqual(defaults["ai_marketing_scan_interval_minutes"], 15)
+        self.assertEqual(defaults["ai_marketing_cooldown_days"], 30)
+        saved = self.state.save_settings({
+            "ai_marketing_enabled": True,
+            "ai_marketing_idle_days": 14,
+            "ai_marketing_daily_limit": 50,
+            "ai_marketing_scan_interval_minutes": 30,
+            "ai_marketing_cooldown_days": 45,
+            "ai_marketing_prompt": "介绍新套餐",
+        }, "sales")
+        self.assertTrue(saved["ai_marketing_enabled"])
+        self.assertEqual(saved["ai_marketing_idle_days"], 14)
+        self.assertEqual(saved["ai_marketing_daily_limit"], 50)
+        self.assertEqual(saved["ai_marketing_scan_interval_minutes"], 30)
+        self.assertEqual(saved["ai_marketing_cooldown_days"], 45)
+        self.assertEqual(saved["ai_marketing_prompt"], "介绍新套餐")
+        self.assertFalse(self.state.settings_payload("default")["ai_marketing_enabled"])
+
+    def test_invalid_ai_marketing_settings_do_not_overwrite(self):
+        self.state.save_settings({"ai_marketing_idle_days": 9, "ai_marketing_daily_limit": 21}, "default")
+        before = self.state.settings_payload("default")
+        for key, value in (
+            ("ai_marketing_idle_days", 0),
+            ("ai_marketing_idle_days", 366),
+            ("ai_marketing_daily_limit", 0),
+            ("ai_marketing_daily_limit", 1001),
+            ("ai_marketing_scan_interval_minutes", 4),
+            ("ai_marketing_scan_interval_minutes", 1441),
+            ("ai_marketing_cooldown_days", 0),
+            ("ai_marketing_cooldown_days", 366),
+            ("ai_marketing_daily_limit", "20.0"),
+        ):
+            with self.assertRaises(ValueError):
+                self.state.save_settings({key: value}, "default")
+            self.assertEqual(self.state.settings_payload("default"), before)
+
+    def test_settings_page_contains_ai_marketing_controls(self):
+        page = settings_page()
+        for marker in (
+            "marketingEnabled", "marketingIdleDays", "marketingDailyLimit",
+            "marketingScanInterval", "marketingCooldownDays", "marketingPrompt",
+        ):
+            self.assertIn(marker, page)
+
+    def test_marketing_generator_uses_history_without_reply_tools(self):
+        calls = []
+
+        def fake_reply(_settings, incoming, **kwargs):
+            calls.append((incoming, kwargs))
+            return "主动营销文案", "ai"
+
+        self.state._ai_reply = fake_reply
+        result = self.state._generate_marketing_message(
+            "default",
+            "chat-1@c.us",
+            [{"timestamp": 10, "from_me": False, "body": "想了解价格", "message_id": "m1"}],
+            "介绍新套餐",
+        )
+        self.assertEqual(result, ("主动营销文案", "ai"))
+        self.assertEqual(len(calls), 1)
+        self.assertIn("介绍新套餐", calls[0][0])
+        self.assertIn("客户：想了解价格", calls[0][1]["conversation_context"])
+        self.assertFalse(calls[0][1]["include_tools"])
+
     def test_reply_delay_scale_defaults_and_round_trips_per_session(self):
         self.assertEqual(self.state.settings_payload("default")["auto_reply_delay_scale"], 100)
         self.assertEqual(self.state.settings_payload("sales")["auto_reply_delay_scale"], 100)
