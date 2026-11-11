@@ -763,6 +763,66 @@ class WebhookArchiveTests(UpgradeTestCase):
             ).fetchone()[0]
         self.assertEqual(origin, "auto_ai")
 
+    def test_auto_reply_marks_purchase_intent_as_a_system_label(self):
+        result = self.state.handle_webhook(
+            self.event(body="我现在想购买并付款", message_id="purchase-intent"),
+            dispatch=True,
+        )
+        self.assertEqual(result["action"], "replied")
+        labels = self.state.chat.customer_labels("default", self.chat_ref)
+        self.assertIn("购买意向", labels["system"])
+
+    def test_intent_labels_are_idempotent_and_label_errors_do_not_block_reply(self):
+        self.assertEqual(
+            self.state.handle_webhook(
+                self.event(body="我想购买", message_id="purchase-intent-1"),
+                dispatch=True,
+            )["action"],
+            "replied",
+        )
+        self.assertEqual(
+            self.state.handle_webhook(
+                self.event(body="我想购买并付款", message_id="purchase-intent-2"),
+                dispatch=True,
+            )["action"],
+            "replied",
+        )
+        labels = self.state.chat.customer_labels("default", self.chat_ref)
+        self.assertEqual(labels["system"].count("购买意向"), 1)
+
+        with patch.object(
+            self.state.chat,
+            "add_system_label_by_chat_id",
+            side_effect=RuntimeError("label store unavailable"),
+        ):
+            result = self.state.handle_webhook(
+                self.event(body="我现在想购买", message_id="purchase-intent-3"),
+                dispatch=True,
+            )
+        self.assertEqual(result["action"], "replied")
+
+    def test_intent_labels_are_not_created_when_ai_has_no_reply(self):
+        self.state._ai_reply = lambda _settings, _incoming, **_kwargs: ("", "AI_CONNECTION_ERROR")
+        result = self.state.handle_webhook(
+            self.event(body="我现在想购买并付款", message_id="purchase-intent-error"),
+            dispatch=True,
+        )
+        self.assertEqual(result["action"], "ignored")
+        labels = self.state.chat.customer_labels("default", self.chat_ref)
+        self.assertNotIn("购买意向", labels["system"])
+
+    def test_automated_send_accepts_legacy_stable_follow_up_request_ids(self):
+        request_id = "iptv-manual-follow-up:card-1"
+        first = self.state.chat.send_automated_text(
+            "default", "chat-1@c.us", "自动跟进", request_id
+        )
+        second = self.state.chat.send_automated_text(
+            "default", "chat-1@c.us", "自动跟进", request_id
+        )
+        self.assertEqual(first["state"], "SENT")
+        self.assertEqual(second["state"], "SENT")
+        self.assertEqual(self.client.send_calls, 1)
+
     def test_enabled_image_vision_fetches_customer_image_without_archiving_bytes(self):
         self.state.save_settings({
             "auto_reply_media_types": {"image": True},

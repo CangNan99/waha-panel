@@ -768,6 +768,27 @@ class ChatService:
         return str(parsed)
 
     @staticmethod
+    def _automated_request_id(value):
+        """Accept UUIDs and legacy stable automation keys safely.
+
+        Browser initiated sends still require UUIDs. Follow-up tasks created by
+        older releases used stable names such as ``iptv-manual-follow-up:...``;
+        those keys are already protected by the automated-send ledger and must
+        remain reusable after an upgrade.
+        """
+        request_id = str(value or "").strip()
+        if (
+            not request_id
+            or len(request_id) > 200
+            or any(ord(char) < 32 or ord(char) == 127 for char in request_id)
+        ):
+            raise ChatSendError("发送请求编号无效", "FAILED", "INVALID_REQUEST_ID")
+        try:
+            return str(uuid.UUID(request_id))
+        except (ValueError, AttributeError):
+            return request_id
+
+    @staticmethod
     def _payload_hash(kind, *values):
         digest = hashlib.sha256()
         digest.update(str(kind).encode("utf-8"))
@@ -899,7 +920,7 @@ class ChatService:
             raise ChatSendError("请输入要发送的文字", "FAILED", "EMPTY_TEXT")
         if len(message) > 65535:
             raise ChatSendError("文字消息过长", "FAILED", "TEXT_TOO_LONG")
-        request_id = self._request_id(client_request_id)
+        request_id = self._automated_request_id(client_request_id)
         payload_hash = self._payload_hash("automated_text", message)
         connection = sqlite3.connect(self.database_path)
         connection.row_factory = sqlite3.Row

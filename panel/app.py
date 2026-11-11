@@ -58,6 +58,11 @@ try:
 except ImportError:
     from monitoring_service import MonitoringService, safe_log_message
 
+try:
+    from .customer_intent import classify_purchase_intent
+except ImportError:
+    from customer_intent import classify_purchase_intent
+
 UI_MONITORING_LOCK = threading.Lock()
 
 try:
@@ -2878,8 +2883,17 @@ class PanelState:
             "Authorization": f"Bearer {api_key}",
         }, method="POST")
         try:
-            with urlopen(request, timeout=30) as response:
-                result = json.loads(response.read().decode("utf-8"))
+            for attempt in range(2):
+                try:
+                    with urlopen(request, timeout=30) as response:
+                        result = json.loads(response.read().decode("utf-8"))
+                    break
+                except HTTPError:
+                    raise
+                except (URLError, TimeoutError, ConnectionError, OSError):
+                    if attempt >= 1:
+                        raise
+                    self.sleep_fn(0.5)
             choice = result["choices"][0]
             message_result = choice["message"]
             if message_result.get("refusal") or choice.get("finish_reason") not in (None, "stop", "tool_calls"):
@@ -3166,6 +3180,23 @@ class PanelState:
         finally:
             connection.close()
 
+    def _record_customer_intent_labels(self, session_name, chat_id, incoming_text):
+        """Persist deterministic purchase/high-interest labels for the customer."""
+        if self.chat is None:
+            return []
+        labels = classify_purchase_intent(incoming_text)
+        for label in labels:
+            try:
+                self.chat.add_system_label_by_chat_id(session_name, chat_id, label)
+            except Exception as error:
+                self.log(
+                    "WARN",
+                    "customer.intent_label",
+                    "意向标签写入失败：" + redact_error(error, self.api_key),
+                    session_name,
+                )
+        return labels
+
     def _reply_delays(self, _reply, is_hot, session_name=DEFAULT_SESSION_NAME):
         scale = normalize_reply_delay_scale(
             self._settings(session_name).get("auto_reply_delay_scale", DEFAULT_REPLY_DELAY_SCALE)
@@ -3416,6 +3447,12 @@ class PanelState:
                 self.log("WARN", "auto_reply.ignored", "客户图片视觉处理失败", session_name)
                 return {"action": "ignored", "reason": "视觉模型不可用", "session": session_name}
             raise
+        if (
+            isinstance(mode, str)
+            and not mode.startswith("AI_")
+            and mode not in {"fixed_fallback", "ai_empty", "ai_invalid_tool", "ai_tool_unavailable"}
+        ):
+            self._record_customer_intent_labels(session_name, chat_id, incoming_for_ai)
         if mode == "product_image_tool":
             return self._execute_product_image(session_name, chat_id, message_id, original_timestamp,
                 ticket, reply, incoming_for_ai, context, dispatch)

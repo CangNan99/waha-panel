@@ -7,7 +7,7 @@ import unittest
 from contextlib import closing
 from pathlib import Path
 from unittest.mock import patch
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 
 from panel.app import AIUpstreamError, PanelState, init_db, settings_page
 
@@ -227,6 +227,42 @@ class AutoReplyPolicyTests(unittest.TestCase):
         self.assertIn("AI_PAYMENT_REQUIRED", logs)
         self.assertNotIn("synthetic-ai-key", logs)
         self.assertNotIn("provider secret diagnostic", logs)
+
+    def test_legacy_ai_connection_retries_once_before_returning_a_reply(self):
+        self.state.save_settings({
+            "ai_base_url": "https://ai.example/v1",
+            "ai_model": "test",
+            "ai_api_key": "synthetic-ai-key",
+        })
+        response = io.BytesIO(json.dumps({
+            "choices": [{"message": {"content": "重试后回复"}, "finish_reason": "stop"}]
+        }).encode())
+        with patch("panel.app.urlopen", side_effect=[URLError("temporary DNS failure"), response]) as opener:
+            result = self.state._ai_reply(
+                self.state._settings(), "客户想购买", session_name="default"
+            )
+        self.assertEqual(result, ("重试后回复", "ai"))
+        self.assertEqual(opener.call_count, 2)
+
+    def test_legacy_ai_auth_error_is_not_retried(self):
+        self.state.save_settings({
+            "ai_base_url": "https://ai.example/v1",
+            "ai_model": "test",
+            "ai_api_key": "synthetic-ai-key",
+        })
+        error = HTTPError(
+            "https://ai.example/v1/chat/completions",
+            401,
+            "Unauthorized",
+            {},
+            io.BytesIO(b"provider diagnostic"),
+        )
+        with patch("panel.app.urlopen", side_effect=error) as opener:
+            result = self.state._ai_reply(
+                self.state._settings(), "客户想购买", session_name="default"
+            )
+        self.assertEqual(result, ("", "AI_AUTH_ERROR"))
+        self.assertEqual(opener.call_count, 1)
 
     def test_memory_completion_maps_payment_http_error_to_typed_code(self):
         settings = {
