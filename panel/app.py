@@ -112,7 +112,7 @@ try:
     from .product_catalog_service import ProductCatalogService
     from .product_match_service import ProductMatchService
     from .product_image_page import product_image_page
-    from .product_image_service import ProductImageError
+    from .product_image_service import ProductImageError, normalize_tag
     from .customer_memory_service import CustomerMemoryService
     from .aliyun_translation_service import AliyunTranslationError, AliyunTranslationService
     from .global_translation_service import GlobalTranslationError, GlobalTranslationService
@@ -165,7 +165,7 @@ except ImportError:  # Supports the existing `python app.py` container entrypoin
     from product_catalog_service import ProductCatalogService
     from product_match_service import ProductMatchService
     from product_image_page import product_image_page
-    from product_image_service import ProductImageError
+    from product_image_service import ProductImageError, normalize_tag
     from customer_memory_service import CustomerMemoryService
     from aliyun_translation_service import AliyunTranslationError, AliyunTranslationService
     from global_translation_service import GlobalTranslationError, GlobalTranslationService
@@ -207,6 +207,10 @@ DEFAULT_SETTINGS = {
     "customer_memory_enabled": "0",
     "auto_reply_image_vision": "0",
     "product_image_auto_send_enabled": "1",
+    "customer_image_recognition_enabled": "1",
+    "chat_product_image_enabled": "1",
+    "marketing_product_image_enabled": "1",
+    "product_image_global_kill_switch": "0",
     "auto_reply_media_types": json.dumps(
         {"image": False, "video": False, "audio": False, "file": False},
         ensure_ascii=False,
@@ -1786,6 +1790,8 @@ class PanelState:
         """Recognize one customer image and optionally send one product image."""
         name = normalize_session_name(session_name)
         settings = self._settings(name)
+        if not as_bool(settings.get("customer_image_recognition_enabled", "1")):
+            return {"action": "continue", "decision": "TEXT_ONLY", "reason_code": "RECOGNITION_SWITCH_OFF"}
         if not as_bool(settings.get("product_image_auto_send_enabled", True)):
             return {"action": "continue", "decision": "TEXT_ONLY", "reason_code": "SESSION_SWITCH_OFF"}
         try:
@@ -1986,6 +1992,10 @@ class PanelState:
             "customer_memory_enabled": as_bool(values.get("customer_memory_enabled", "0")),
             "auto_reply_image_vision": as_bool(values.get("auto_reply_image_vision", "0")),
             "product_image_auto_send_enabled": as_bool(values.get("product_image_auto_send_enabled", "1")),
+            "customer_image_recognition_enabled": as_bool(values.get("customer_image_recognition_enabled", "1")),
+            "chat_product_image_enabled": as_bool(values.get("chat_product_image_enabled", "1")),
+            "marketing_product_image_enabled": as_bool(values.get("marketing_product_image_enabled", "1")),
+            "product_image_global_kill_switch": as_bool(values.get("product_image_global_kill_switch", "0")),
             "auto_reply_media_types": normalize_media_types(
                 values.get("auto_reply_media_types", DEFAULT_AUTO_REPLY_MEDIA_TYPES)
             ),
@@ -2082,6 +2092,9 @@ class PanelState:
             updates["product_image_auto_send_enabled"] = (
                 "1" if as_bool(payload["product_image_auto_send_enabled"]) else "0"
             )
+        for key in ("customer_image_recognition_enabled", "chat_product_image_enabled", "marketing_product_image_enabled", "product_image_global_kill_switch"):
+            if key in payload:
+                updates[key] = "1" if as_bool(payload[key]) else "0"
         if "ai_marketing_enabled" in payload:
             updates["ai_marketing_enabled"] = (
                 "1" if as_bool(payload["ai_marketing_enabled"]) else "0"
@@ -3117,9 +3130,12 @@ class PanelState:
         product_image_enabled = False
         try:
             product_settings = self.product_images.settings_payload()
+            session_product_settings = self.settings_payload(name)
             product_image_enabled = bool(
                 include_tools
                 and product_settings.get("auto_send_enabled")
+                and session_product_settings.get("chat_product_image_enabled", True)
+                and not session_product_settings.get("product_image_global_kill_switch", False)
                 and self.product_images.list_assets()["total"] > 0
             )
         except Exception:
@@ -3192,11 +3208,12 @@ class PanelState:
                     "type": "object",
                     "additionalProperties": False,
                     "properties": {
-                        "product_tag": {"type": "string"},
+                        "product_key": {"type": "string"},
                         "variant": {"type": "string"},
                         "caption": {"type": "string"},
+                        "reason": {"type": "string"},
                     },
-                    "required": ["product_tag"],
+                    "required": ["product_key"],
                 },
             }})
         if tools:
@@ -3262,13 +3279,13 @@ class PanelState:
                             return json.dumps(arguments), "iptv_trial_tool"
                         continue
                     if function.get("name") == "send_product_image" and product_image_enabled:
-                        if set(arguments) - {"product_tag", "variant", "caption"}:
+                        if set(arguments) - {"product_key", "variant", "caption", "reason"}:
                             continue
-                        if not isinstance(arguments.get("product_tag"), str) or not arguments.get("product_tag", "").strip():
+                        if not isinstance(arguments.get("product_key"), str) or not arguments.get("product_key", "").strip():
                             continue
                         if any(
                             key in arguments and not isinstance(arguments.get(key), str)
-                            for key in ("variant", "caption")
+                            for key in ("variant", "caption", "reason")
                         ):
                             continue
                         return json.dumps(arguments, ensure_ascii=False), "product_image_tool"
@@ -3299,6 +3316,8 @@ class PanelState:
             args = json.loads(arguments) if isinstance(arguments, str) else arguments
         except (TypeError, ValueError):
             args = None
+        if isinstance(args, dict) and "product_key" in args and "product_tag" not in args:
+            args = {"product_tag": args.get("product_key"), "variant": args.get("variant", ""), "caption": args.get("caption", "")}
         if not isinstance(args, dict) or set(args) - {"product_tag", "variant", "caption"}:
             return {"action": "ignored", "reason": "产品图片工具参数无效", "session": session}
         product_tag = args.get("product_tag")
@@ -3330,7 +3349,10 @@ class PanelState:
             return {"action": "ignored", "reason": "当前消息未明确询问该产品", "session": session}
         try:
             settings = self.product_images.settings_payload()
-            if not settings.get("auto_send_enabled"):
+            session_settings = self.settings_payload(session)
+            if (not settings.get("auto_send_enabled") or
+                    not session_settings.get("chat_product_image_enabled", True) or
+                    session_settings.get("product_image_global_kill_switch", False)):
                 return {"action": "ignored", "reason": "产品图片自动发送已关闭", "session": session}
             if self.product_images.daily_sent_count() >= int(settings.get("daily_limit", 20)):
                 self.log("INFO", "product_image.limit", "已达到产品图片每日发送上限", session)
@@ -4129,6 +4151,73 @@ class PanelState:
                 return value
         return ""
 
+    def product_image_tool_schema(self, session_name, settings):
+        """Return the server-owned product image tool contract."""
+        settings = settings if isinstance(settings, dict) else {}
+        enabled = as_bool(settings.get("chat_product_image_enabled", settings.get("product_image_auto_send_enabled", True)))
+        if as_bool(settings.get("product_image_global_kill_switch", False)) or not enabled:
+            return []
+        try:
+            if not self.product_images.list_assets().get("total"):
+                return []
+        except Exception:
+            return []
+        return [{"type": "function", "function": {
+            "name": "send_product_image",
+            "description": "客户明确询问产品图片、效果、外观或套餐对比时发送一张已配置产品图片",
+            "parameters": {
+                "type": "object", "additionalProperties": False,
+                "properties": {
+                    "product_key": {"type": "string"},
+                    "variant": {"type": "string"},
+                    "caption": {"type": "string"},
+                    "reason": {"type": "string"},
+                },
+                "required": ["product_key"],
+            },
+        }}]
+
+    @staticmethod
+    def _product_interest(text):
+        text = str(text or "").strip().casefold()
+        return bool(text and re.search(r"(图片|照片|图看看|示例|效果|界面|外观|包装|对比|比较|试用|购买|了解|看看|发我|发一下)", text))
+
+    def validate_product_image_tool_call(self, arguments, incoming_text, context):
+        if not isinstance(arguments, dict) or set(arguments) - {"product_key", "variant", "caption", "reason"}:
+            return None
+        key = arguments.get("product_key")
+        if not isinstance(key, str) or not key.strip() or len(key.strip()) > 64 or re.search(r"[\\/:]|https?://|\n", key, re.I):
+            return None
+        if not self._product_interest(incoming_text):
+            return None
+        for field, limit in (("variant", 120), ("reason", 200)):
+            if field in arguments and (not isinstance(arguments[field], str) or len(arguments[field]) > limit):
+                return None
+        caption = arguments.get("caption", "")
+        if not isinstance(caption, str) or len(caption) > 400 or re.search(r"https?://|(?:[A-Za-z]:)?[\\/][^\n]*|内部|token|密码|api.?key", caption, re.I):
+            return None
+        normalized = normalize_tag(key)
+        products = self.product_catalog.list_products().get("items", [])
+        matches = [p for p in products if normalized in {normalize_tag(p.get("product_key")), normalize_tag(p.get("product_name")), normalize_tag(p.get("sku")), *(normalize_tag(a) for a in p.get("aliases", []))}]
+        if len(matches) != 1 or not matches[0].get("allow_ai_image_send", True):
+            return None
+        product = matches[0]
+        asset = self.product_images.resolve_product_asset(product["product_id"], arguments.get("variant", ""), "primary")
+        if asset.get("status") != "FOUND":
+            return None
+        return {"product": product, "asset": asset, "product_key": product["product_key"], "variant": asset.get("variant", ""), "caption": caption.strip(), "reason": str(arguments.get("reason") or "").strip()}
+
+    def execute_product_image_tool(self, session_name, chat_id, message_id, arguments):
+        session = normalize_session_name(session_name)
+        if not isinstance(arguments, dict):
+            return {"action": "ignored", "reason": "产品图片工具参数无效", "session": session}
+        settings = self.settings_payload(session)
+        if as_bool(settings.get("product_image_global_kill_switch")) or not as_bool(settings.get("chat_product_image_enabled")):
+            return {"action": "ignored", "reason": "聊天产品图片功能已关闭", "session": session}
+        checked = self.validate_product_image_tool_call(arguments, arguments.get("incoming_text", "图片"), "")
+        if not checked:
+            return {"action": "ignored", "reason": "产品图片发送条件不满足", "session": session}
+        return self._execute_product_image(session, chat_id, message_id, message_id, None, json.dumps({"product_tag": checked["product_key"], "variant": checked.get("variant", ""), "caption": checked.get("caption", "")}, ensure_ascii=False), arguments.get("incoming_text", ""), "", True)
     def session_avatar(self, session_name=DEFAULT_SESSION_NAME):
         name = normalize_session_name(session_name)
         now = int(self.clock())
