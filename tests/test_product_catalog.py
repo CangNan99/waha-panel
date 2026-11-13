@@ -17,6 +17,8 @@ class ProductCatalogTests(unittest.TestCase):
         self.s.save_product({'product_key':'one','product_name':'One'})
         with self.assertRaises(ProductCatalogValidationError): self.s.save_product({'product_key':'bad key','product_name':'Bad'})
         with self.assertRaises(ProductCatalogValidationError): self.s.save_product({'product_key':'one','product_name':'Dup'})
+        disabled=self.s.save_product({'product_key':'two','product_name':'Two','active':'false','allow_ai_image_send':'false'})
+        self.assertFalse(disabled['active']); self.assertFalse(disabled['allow_ai_image_send'])
     def test_inactive_filter_and_cross_session_rejection(self):
         p=self.s.save_product({'product_key':'one','product_name':'One'})
         self.s.disable_product(p['product_id'])

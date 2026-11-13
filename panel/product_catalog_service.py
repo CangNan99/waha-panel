@@ -1,6 +1,6 @@
 """Product catalog and additive compatibility migration for the image library."""
 from __future__ import annotations
-import json, re, sqlite3, time, uuid, unicodedata
+import hashlib, json, re, sqlite3, time, uuid, unicodedata
 from pathlib import Path
 from contextlib import contextmanager
 try:
@@ -31,12 +31,25 @@ class ProductCatalogService:
         finally: c.close()
     def _ensure_schema(self):
         with self._db() as c:
+            # A standalone catalog service may receive a brand-new database.
+            # Ensure the legacy image tables exist before adding catalog columns.
+            migration_root = Path(__file__).with_name('migrations')
+            c.executescript((migration_root / '014_product_image_library.sql').read_text(encoding='utf-8'))
+            c.executescript((migration_root / '019_product_image_matching.sql').read_text(encoding='utf-8'))
             c.executescript((Path(__file__).with_name('migrations')/'021_product_catalog.sql').read_text(encoding='utf-8'))
             cols={r[1] for r in c.execute('PRAGMA table_info(product_image_assets)')}
             defs=("product_id TEXT REFERENCES product_catalog(product_id) ON DELETE SET NULL", "variant TEXT NOT NULL DEFAULT ''", "reference_role TEXT NOT NULL DEFAULT 'primary'", "allow_visual_match INTEGER NOT NULL DEFAULT 1", "allow_auto_send INTEGER NOT NULL DEFAULT 1", "legacy_import_status TEXT NOT NULL DEFAULT 'pending'")
             for d in defs:
                 n=d.split()[0]
                 if n not in cols: c.execute('ALTER TABLE product_image_assets ADD COLUMN '+d)
+    @staticmethod
+    def _bool(value, default=True):
+        if value is None: return bool(default)
+        if isinstance(value, bool): return value
+        text = str(value).strip().casefold()
+        if text in {'1','true','yes','on','enabled'}: return True
+        if text in {'0','false','no','off','disabled'}: return False
+        raise ProductCatalogValidationError('布尔开关参数无效','INVALID_FLAG')
     @staticmethod
     def _text(v, limit, field, required=False):
         s=unicodedata.normalize('NFKC',str(v or '')).strip()
@@ -62,7 +75,7 @@ class ProductCatalogService:
             try: lang=json.loads(lang)
             except ValueError: raise ProductCatalogValidationError('多语言内容格式无效')
         if not isinstance(lang,dict): raise ProductCatalogValidationError('多语言内容格式无效')
-        return dict(product_key=key,product_name=name,sku=sku,aliases=out,category=cls._text(p.get('category'),120,'分类'),description=cls._text(p.get('description'),4000,'介绍'),selling_points=cls._text(p.get('selling_points'),4000,'卖点'),usage_scenarios=cls._text(p.get('usage_scenarios'),4000,'适用场景'),exclusion_scenarios=cls._text(p.get('exclusion_scenarios'),4000,'排除场景'),language_content=lang,active=bool(p.get('active',True)),allow_ai_image_send=bool(p.get('allow_ai_image_send',True)),allow_marketing_image_send=bool(p.get('allow_marketing_image_send',True)))
+        return dict(product_key=key,product_name=name,sku=sku,aliases=out,category=cls._text(p.get('category'),120,'分类'),description=cls._text(p.get('description'),4000,'介绍'),selling_points=cls._text(p.get('selling_points'),4000,'卖点'),usage_scenarios=cls._text(p.get('usage_scenarios'),4000,'适用场景'),exclusion_scenarios=cls._text(p.get('exclusion_scenarios'),4000,'排除场景'),language_content=lang,active=cls._bool(p.get('active'),True),allow_ai_image_send=cls._bool(p.get('allow_ai_image_send'),True),allow_marketing_image_send=cls._bool(p.get('allow_marketing_image_send'),True))
     @staticmethod
     def _dict(row):
         if row is None:return None
@@ -111,21 +124,34 @@ class ProductCatalogService:
             rows=c.execute("SELECT * FROM product_image_assets WHERE product_id IS NULL AND legacy_import_status='pending' ORDER BY id").fetchall()
             grouped={}
             for r in rows:
-                vals=[r['product_name'],r['sku']]
-                try: vals += json.loads(r['aliases_json'] or '[]')
-                except ValueError: pass
-                keys={normalize_tag(v) for v in vals if normalize_tag(v)}
-                for k in keys: grouped.setdefault(k,[]).append(r)
+                # Product name is the strongest legacy identity. Fall back to
+                # SKU, then the first alias when older rows lack a name.
+                identity = normalize_tag(r['product_name']) or normalize_tag(r['sku'])
+                if not identity:
+                    try: identity = next((normalize_tag(v) for v in json.loads(r['aliases_json'] or '[]') if normalize_tag(v)), '')
+                    except ValueError: identity = ''
+                grouped.setdefault(identity, []).append(r)
             for r in rows:
                 keys={normalize_tag(v) for v in [r['product_name'],r['sku']] if normalize_tag(v)}
                 try: keys |= {normalize_tag(v) for v in json.loads(r['aliases_json'] or '[]') if normalize_tag(v)}
                 except ValueError: pass
                 if not keys: c.execute("UPDATE product_image_assets SET legacy_import_status='review' WHERE id=?",(r['id'],)); review+=1; continue
-                candidates={x['id'] for k in keys for x in grouped.get(k,[])}
-                if len(candidates)>1: c.execute("UPDATE product_image_assets SET legacy_import_status='review' WHERE id=?",(r['id'],)); review+=1; continue
-                key=next(iter(keys)); prow=c.execute('SELECT * FROM product_catalog WHERE product_key=?',(key,)).fetchone()
+                identity = normalize_tag(r['product_name']) or normalize_tag(r['sku'])
+                if not identity:
+                    identity = next(iter(keys), '')
+                members = grouped.get(identity, [])
+                # Duplicate legacy rows sharing an identity cannot all be
+                # deterministically assigned. Keep the first stable row and
+                # mark subsequent rows for manual review.
+                if members and members[0]['id'] != r['id']:
+                    c.execute("UPDATE product_image_assets SET legacy_import_status='review' WHERE id=?",(r['id'],)); review+=1; continue
+                key=next(iter(keys)); product_key=re.sub(r'[^a-z0-9_-]+','-',key.casefold()).strip('-_')[:56]
+                if not product_key: product_key='legacy-'+hashlib.sha256(key.encode('utf-8')).hexdigest()[:24]
+                if not self.KEY_RE.fullmatch(product_key):
+                    c.execute("UPDATE product_image_assets SET legacy_import_status='review' WHERE id=?",(r['id'],)); review+=1; continue
+                prow=c.execute('SELECT * FROM product_catalog WHERE product_key=?',(product_key,)).fetchone()
                 if not prow:
-                    pid=str(uuid.uuid4()); name=r['product_name'] or r['sku'] or key; c.execute("INSERT INTO product_catalog(product_id,product_key,product_name,sku,aliases_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?)",(pid,re.sub(r'[^a-z0-9_-]+','-',key)[:64],name,r['sku'] or '',r['aliases_json'] or '[]',int(self.clock()),int(self.clock())))
+                    pid=str(uuid.uuid4()); name=r['product_name'] or r['sku'] or key; c.execute("INSERT INTO product_catalog(product_id,product_key,product_name,sku,aliases_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?)",(pid,product_key,name,r['sku'] or '',r['aliases_json'] or '[]',int(self.clock()),int(self.clock())))
                 else: pid=prow['product_id']
                 c.execute("UPDATE product_image_assets SET product_id=?,legacy_import_status='imported' WHERE id=?",(pid,r['id'])); imported+=1
         return {'imported':imported,'review':review,'total':imported+review}

@@ -97,6 +97,31 @@ class ProductImageIntegrationTests(unittest.TestCase):
         with closing(sqlite3.connect(self.database)) as connection:
             self.assertEqual(connection.execute("SELECT state FROM product_image_send_requests").fetchone()[0], "SENT")
 
+    def test_catalog_migration_preserves_legacy_asset_metadata_and_send_ledger(self):
+        # Re-running init_db must be additive and leave the legacy image row
+        # and its idempotency ledger readable.
+        init_db(self.database, seed_business=False)
+        with closing(sqlite3.connect(self.database)) as connection:
+            asset = connection.execute(
+                "SELECT product_name,sku,aliases_json,caption_template FROM product_image_assets WHERE id=?",
+                (self.asset["asset_id"],),
+            ).fetchone()
+            ledger = connection.execute(
+                "SELECT state FROM product_image_send_requests WHERE asset_id=?",
+                (self.asset["asset_id"],),
+            ).fetchone()
+        self.assertEqual(asset, ("", "", "[]", "了解 {product_tag}"))
+        self.assertIsNone(ledger)
+        self.execute({"product_tag": "iptv"}, "compatibility-ledger")
+        with closing(sqlite3.connect(self.database)) as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT state FROM product_image_send_requests WHERE message_key=?",
+                    ("compatibility-ledger",),
+                ).fetchone()[0],
+                "SENT",
+            )
+
     def test_no_match_ambiguous_and_disabled_assets_send_nothing(self):
         self.assertEqual(self.execute({"product_tag": "missing"})["action"], "ignored")
         second = self.state.product_images.upload(
