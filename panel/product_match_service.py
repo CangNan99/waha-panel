@@ -1,9 +1,8 @@
 """Server-side policy for structured GLM product-image recognition."""
 from __future__ import annotations
 
-import json
+import json, base64
 import re
-from urllib.parse import unquote, urlsplit
 
 try:
     from .glm_service import GLMError
@@ -57,7 +56,12 @@ class ProductMatchService:
             raise GLMError("产品识别结果格式异常", "PRODUCT_MATCH_INVALID")
         if not isinstance(payload, dict):
             raise GLMError("产品识别结果格式异常", "PRODUCT_MATCH_INVALID")
-        status = str(payload.get("match_status") or "unknown").strip().lower()
+        if set(payload) - cls._ALLOWED_TOP or "match_status" not in payload or "candidates" not in payload:
+            raise GLMError("产品识别结果字段无效", "PRODUCT_MATCH_INVALID")
+        status = payload.get("match_status")
+        if not isinstance(status, str):
+            raise GLMError("产品识别状态无效", "PRODUCT_MATCH_INVALID")
+        status = status.strip().lower()
         if status not in {"matched", "ambiguous", "unmatched", "unknown"}:
             raise GLMError("产品识别状态无效", "PRODUCT_MATCH_INVALID")
         candidates = payload.get("candidates", [])
@@ -67,7 +71,11 @@ class ProductMatchService:
         for candidate in candidates:
             if not isinstance(candidate, dict):
                 raise GLMError("产品识别候选无效", "PRODUCT_MATCH_INVALID")
+            if set(candidate) - cls._ALLOWED_CANDIDATE or not any(candidate.get(k) for k in ("product_key", "product_name", "sku")):
+                raise GLMError("产品识别候选字段无效", "PRODUCT_MATCH_INVALID")
             item = {k: candidate.get(k) for k in cls._ALLOWED_CANDIDATE if k in candidate}
+            if "confidence" not in item or isinstance(item["confidence"], bool):
+                raise GLMError("产品识别置信度无效", "PRODUCT_MATCH_INVALID")
             try:
                 confidence = float(item.get("confidence", 0))
             except (TypeError, ValueError) as exc:
@@ -79,15 +87,25 @@ class ProductMatchService:
                 if field in item:
                     item[field] = str(item[field] or "").strip()[:500]
             cleaned.append(item)
-        intent = str(payload.get("intent") or "unknown").strip().lower()
+        intent = payload.get("intent", "unknown")
+        if not isinstance(intent, str):
+            raise GLMError("产品识别意图无效", "PRODUCT_MATCH_INVALID")
+        intent = intent.strip().lower()
         if intent not in cls._INTENTS:
             intent = "unknown"
         return {
             "match_status": status,
             "candidates": cleaned,
             "intent": intent,
-            "needs_clarification": bool(payload.get("needs_clarification", False)),
+            "needs_clarification": cls._strict_bool(payload.get("needs_clarification", False)),
         }
+
+    @staticmethod
+    def _strict_bool(value):
+        if isinstance(value, bool): return value
+        if isinstance(value, str) and value.strip().lower() in {"true", "false"}:
+            return value.strip().lower() == "true"
+        raise GLMError("产品识别澄清标记无效", "PRODUCT_MATCH_INVALID")
 
     @classmethod
     def classify_confidence(cls, value):
@@ -104,7 +122,7 @@ class ProductMatchService:
         return "low"
 
     @classmethod
-    def evaluate(cls, candidates, catalog, intent):
+    def evaluate(cls, candidates, catalog, intent, match_status="matched", needs_clarification=False):
         catalog = catalog if isinstance(catalog, list) else []
         index = {}
         for product in catalog:
@@ -135,6 +153,9 @@ class ProductMatchService:
         elif intent in {"none", "unknown"}:
             decision = "TEXT_ONLY"
             reason = "NO_PRODUCT_INTENT"
+        elif match_status in {"ambiguous", "unmatched", "unknown"} or needs_clarification:
+            decision = "ASK_CLARIFICATION" if match_status == "ambiguous" or needs_clarification else "TEXT_ONLY"
+            reason = "MODEL_REQUIRES_CLARIFICATION" if decision == "ASK_CLARIFICATION" else "MODEL_UNMATCHED"
         elif len(matches) > 1 and abs(matches[0][0] - matches[1][0]) < 0.05:
             decision = "ASK_CLARIFICATION"
             reason = "AMBIGUOUS_MATCH"
@@ -148,4 +169,12 @@ class ProductMatchService:
             decision = "TEXT_ONLY"
             reason = "LOW_CONFIDENCE"
         top = matches[0] if matches else (0.0, None, None)
-        return {"decision": decision, "reason_code": reason, "product": top[1], "candidate": top[2], "confidence": top[0], "confidence_bucket": cls.classify_confidence(top[0]), "intent": intent}
+        product = top[1]
+        safe_product = None
+        if product:
+            safe_product = {k: str(product.get(k) or "") for k in ("product_key", "product_name", "variant")}
+            safe_product["reference_assets"] = [
+                {k: str(asset.get(k) or "") for k in ("title", "caption_template", "reference_role")}
+                for asset in (product.get("reference_assets") or []) if isinstance(asset, dict)
+            ][:4]
+        return {"decision": decision, "reason_code": reason, "product": safe_product, "variant": str((top[2] or {}).get("variant") or "") if top[2] else "", "confidence": top[0], "confidence_bucket": cls.classify_confidence(top[0]), "intent": intent}

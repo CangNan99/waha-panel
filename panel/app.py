@@ -1711,6 +1711,16 @@ class PanelState:
             "context_message_count": 0,
         }
 
+    def classify_product_image(self, profile, image_bytes, mime_type, catalog, customer_text="", conversation_context="", reference_images=None):
+        """Stable Task 4 entry point for structured recognition and policy evaluation."""
+        prompt = self.product_match.build_prompt(catalog or {}, customer_text, conversation_context)
+        parsed = self.glm.classify_product_image(profile, prompt, image_bytes, mime_type, reference_images=reference_images)
+        items = catalog if isinstance(catalog, list) else (catalog or {}).get("items", [])
+        return self.product_match.evaluate(
+            parsed["candidates"], items, parsed["intent"],
+            match_status=parsed["match_status"], needs_clarification=parsed["needs_clarification"],
+        )
+
     def require_chat_service_for_ai(self):
         if self.chat is None:
             raise AIProfileUnavailableError("聊天服务暂不可用，请检查面板数据加密密钥")

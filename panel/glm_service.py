@@ -358,6 +358,13 @@ class GLMService:
             if data_url:
                 if not ProductMatchService.valid_data_url(data_url):
                     raise GLMError("参考图片格式无效", "INVALID_REFERENCE_IMAGE")
+                try:
+                    header, encoded_ref = data_url.split(",", 1)
+                    ref_bytes = base64.b64decode(encoded_ref, validate=True)
+                    declared_ref = header[5:].split(";", 1)[0]
+                    ChatService._validated_image("reference" + IMAGE_EXTENSIONS[declared_ref], declared_ref, ref_bytes)
+                except (ValueError, KeyError, TypeError, ImageValidationError) as error:
+                    raise GLMError("参考图片内容无效", "INVALID_REFERENCE_IMAGE") from error
                 references.append({"type": "image_url", "image_url": {"url": data_url}})
                 continue
             data = bytes(item.get("data") or b"")
