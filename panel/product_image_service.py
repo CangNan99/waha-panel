@@ -519,7 +519,7 @@ class ProductImageService:
             ).fetchone()
             if existing:
                 asset = self._load_asset(connection, existing["id"], include_inactive=True)
-                if product_id or variant or reference_role -ne "primary":
+                if product_id or variant or reference_role != "primary":
                     connection.execute("UPDATE product_image_assets SET product_id=?,variant=?,reference_role=?,allow_visual_match=?,allow_auto_send=?,updated_at=? WHERE id=?", (str(product_id or "") or None, variant, reference_role, int(allow_visual_match), int(allow_auto_send), now, existing["id"]))
                     asset = self._load_asset(connection, existing["id"], include_inactive=True)
                 asset["reused"] = True
@@ -641,12 +641,18 @@ class ProductImageService:
                 payload.get("aliases", current.get("aliases", [])),
             )
             active = current["active"] if "active" not in payload else _truthy(payload["active"])
+            product_id = str(payload.get("product_id", current.get("product_id", "")) or "") or None
+            variant = str(payload.get("variant", current.get("variant", "")) or "").strip()
+            reference_role = str(payload.get("reference_role", current.get("reference_role", "primary")) or "primary").strip().casefold()
+            allow_visual_match = _truthy(payload.get("allow_visual_match", current.get("allow_visual_match", True)), True)
+            allow_auto_send = _truthy(payload.get("allow_auto_send", current.get("allow_auto_send", True)), True)
+            if reference_role not in {"primary", "reference", "marketing"}: raise ProductImageValidationError("图片角色无效", "INVALID_REFERENCE_ROLE")
             try:
                 sort_order = int(payload.get("sort_order", current["sort_order"]))
             except (TypeError, ValueError) as error:
                 raise ProductImageValidationError("排序值无效", "INVALID_SORT_ORDER") from error
             connection.execute(
-                "UPDATE product_image_assets SET title=?,caption_template=?,active=?,sort_order=?,product_name=?,sku=?,aliases_json=?,updated_at=? WHERE id=?",
+                "UPDATE product_image_assets SET title=?,caption_template=?,active=?,sort_order=?,product_name=?,sku=?,aliases_json=?,product_id=?,variant=?,reference_role=?,allow_visual_match=?,allow_auto_send=?,updated_at=? WHERE id=?",
                 (
                     title,
                     caption,
@@ -655,6 +661,7 @@ class ProductImageService:
                     product_name,
                     sku,
                     json.dumps(aliases, ensure_ascii=False, separators=(",", ":")),
+                    product_id, variant, reference_role, int(allow_visual_match), int(allow_auto_send),
                     now,
                     str(asset_id),
                 ),
@@ -975,6 +982,8 @@ __all__ = [
     "ProductImageValidationError",
     "normalize_tag",
 ]
+
+
 
 
 
