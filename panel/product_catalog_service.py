@@ -145,7 +145,11 @@ class ProductCatalogService:
                 # mark subsequent rows for manual review.
                 if members and members[0]['id'] != r['id']:
                     c.execute("UPDATE product_image_assets SET legacy_import_status='review' WHERE id=?",(r['id'],)); review+=1; continue
-                key=next(iter(keys)); product_key=re.sub(r'[^a-z0-9_-]+','-',key.casefold()).strip('-_')[:56]
+                # Keep key derivation stable when multiple legacy fields exist.
+                key = normalize_tag(r['product_name']) or normalize_tag(r['sku'])
+                if not key:
+                    key = sorted(keys)[0]
+                product_key=re.sub(r'[^a-z0-9_-]+','-',key.casefold()).strip('-_')[:56]
                 if not product_key: product_key='legacy-'+hashlib.sha256(key.encode('utf-8')).hexdigest()[:24]
                 if not self.KEY_RE.fullmatch(product_key):
                     c.execute("UPDATE product_image_assets SET legacy_import_status='review' WHERE id=?",(r['id'],)); review+=1; continue

@@ -100,27 +100,42 @@ class ProductImageIntegrationTests(unittest.TestCase):
     def test_catalog_migration_preserves_legacy_asset_metadata_and_send_ledger(self):
         # Re-running init_db must be additive and leave the legacy image row
         # and its idempotency ledger readable.
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.execute(
+                "UPDATE product_image_assets SET product_name=?,sku=?,aliases_json=?,caption_template=? WHERE id=?",
+                ("Legacy IPTV", "L-IPTV", json.dumps(["legacy alias"]), "Legacy {product_tag}", self.asset["asset_id"]),
+            )
+            connection.execute(
+                "INSERT INTO product_image_tags(tag_key,display_name,created_at,updated_at) VALUES (?,?,?,?)",
+                ("legacy-tag", "Legacy Tag", 1, 1),
+            )
+            tag_id = connection.execute("SELECT id FROM product_image_tags WHERE tag_key='legacy-tag'").fetchone()[0]
+            connection.execute(
+                "INSERT INTO product_image_asset_tags(asset_id,tag_id,priority,is_primary,created_at) VALUES (?,?,?,?,?)",
+                (self.asset["asset_id"], tag_id, 1, 1, 1),
+            )
+            connection.execute(
+                "INSERT INTO product_image_send_requests(request_id,session_name,chat_key_hmac,message_key,asset_id,tag_key,caption_hash,payload_hash,state,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                ("legacy-ledger", "default", "hmac", "legacy-message", self.asset["asset_id"], "legacy-tag", "caption", "payload", "SENT", 1, 1),
+            )
+            connection.commit()
         init_db(self.database, seed_business=False)
         with closing(sqlite3.connect(self.database)) as connection:
             asset = connection.execute(
                 "SELECT product_name,sku,aliases_json,caption_template FROM product_image_assets WHERE id=?",
                 (self.asset["asset_id"],),
             ).fetchone()
+            tags = connection.execute(
+                "SELECT t.tag_key,t.display_name FROM product_image_asset_tags at JOIN product_image_tags t ON t.id=at.tag_id WHERE at.asset_id=?",
+                (self.asset["asset_id"],),
+            ).fetchall()
             ledger = connection.execute(
                 "SELECT state FROM product_image_send_requests WHERE asset_id=?",
                 (self.asset["asset_id"],),
             ).fetchone()
-        self.assertEqual(asset, ("", "", "[]", "了解 {product_tag}"))
-        self.assertIsNone(ledger)
-        self.execute({"product_tag": "iptv"}, "compatibility-ledger")
-        with closing(sqlite3.connect(self.database)) as connection:
-            self.assertEqual(
-                connection.execute(
-                    "SELECT state FROM product_image_send_requests WHERE message_key=?",
-                    ("compatibility-ledger",),
-                ).fetchone()[0],
-                "SENT",
-            )
+        self.assertEqual(asset, ("Legacy IPTV", "L-IPTV", '["legacy alias"]', "Legacy {product_tag}"))
+        self.assertEqual(tags, [("IPTV", "IPTV"), ("legacy-tag", "Legacy Tag")])
+        self.assertEqual(ledger, ("SENT",))
 
     def test_no_match_ambiguous_and_disabled_assets_send_nothing(self):
         self.assertEqual(self.execute({"product_tag": "missing"})["action"], "ignored")

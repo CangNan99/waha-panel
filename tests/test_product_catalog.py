@@ -33,6 +33,8 @@ class ProductCatalogTests(unittest.TestCase):
         result=self.s.import_legacy_assets(); self.assertEqual(result['imported'],1); self.assertEqual(result['review'],1)
         with sqlite3.connect(self.db) as c:
             rows=c.execute('SELECT product_id,legacy_import_status FROM product_image_assets ORDER BY id').fetchall()
+            key=c.execute('SELECT product_key FROM product_catalog WHERE product_id=?',(rows[0][0],)).fetchone()[0]
         self.assertIsNotNone(rows[0][0]); self.assertEqual(rows[1][1],'review')
+        self.assertEqual(key,'one')
 
 if __name__=='__main__': unittest.main()

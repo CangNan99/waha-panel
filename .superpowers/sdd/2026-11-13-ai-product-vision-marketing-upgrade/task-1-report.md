@@ -28,3 +28,11 @@
 - `git diff --check` passed.
 - Attempted `python -m unittest tests.test_product_catalog tests.test_product_image_integration -v`; this host still exposes only the Microsoft Store Python alias, so no Python test runner output was available.
 - Docker-based verification was unavailable because the Docker daemon is not running.
+
+## Fix round 2
+- Expanded compatibility coverage in `test_catalog_migration_preserves_legacy_asset_metadata_and_send_ledger` with non-empty product name, SKU, aliases, caption, explicit tag rows, and a pre-existing SENT ledger row; rerun migration assertions query each value directly.
+- Made legacy product key derivation deterministic with explicit product-name, SKU, then sorted-alias precedence; added assertion that mixed metadata resolves to `one`.
+
+### Verification
+- `git diff --check` passed.
+- Focused command attempted: `python -m unittest tests.test_product_catalog tests.test_product_image_integration -v`; Python runtime remains unavailable on this host (Microsoft Store alias only), so no test output was produced.
