@@ -1,5 +1,6 @@
 import base64
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
@@ -133,6 +134,25 @@ class ProductImageToolTests(unittest.TestCase):
             {"product_key": "G5 Plus", "caption": "产品图片"}, "请发 G5 Plus 图片", ""
         )
         self.assertEqual(result["product"]["product_key"], "g5-plus")
+
+    def test_daily_limit_serializes_concurrent_reservations(self):
+        results = []
+        barrier = threading.Barrier(2)
+
+        def reserve(message_id):
+            barrier.wait()
+            results.append(self.state.product_images.reserve_send(
+                "default", "customer@c.us", message_id,
+                self.asset["asset_id"], "g5-plus", "图片", daily_limit=1,
+            ))
+
+        workers = [threading.Thread(target=reserve, args=(f"concurrent-{index}",)) for index in range(2)]
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join()
+        self.assertEqual(sum(1 for item in results if item.get("reserved")), 1)
+        self.assertEqual(sum(1 for item in results if item.get("state") == "DAILY_LIMIT"), 1)
 
 
 if __name__ == "__main__":

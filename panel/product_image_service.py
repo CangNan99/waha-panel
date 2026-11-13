@@ -838,6 +838,9 @@ class ProductImageService:
         ).hexdigest()
         now = self._now()
         with self._db() as connection:
+            # Serialize duplicate lookup, quota accounting, and reservation
+            # insertion so concurrent workers cannot both pass the cap.
+            connection.execute("BEGIN IMMEDIATE")
             existing = connection.execute(
                 "SELECT request_id,state,waha_message_id,error_code,asset_id,tag_key,caption_hash,payload_hash "
                 "FROM product_image_send_requests WHERE session_name=? AND chat_key_hmac=? AND message_key=?",
