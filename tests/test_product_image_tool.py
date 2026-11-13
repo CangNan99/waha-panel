@@ -105,6 +105,28 @@ class ProductImageToolTests(unittest.TestCase):
             )
         )
 
+    def test_policy_switches_round_trip_and_global_kill_blocks_tool(self):
+        self.state.save_settings({
+            "customer_image_recognition_enabled": False,
+            "chat_product_image_enabled": False,
+            "marketing_product_image_enabled": False,
+            "product_image_global_kill_switch": True,
+        }, "default")
+        payload = self.state.settings_payload("default")
+        self.assertFalse(payload["customer_image_recognition_enabled"])
+        self.assertFalse(payload["chat_product_image_enabled"])
+        self.assertFalse(payload["marketing_product_image_enabled"])
+        self.assertTrue(payload["product_image_global_kill_switch"])
+        self.assertEqual(self.state.product_image_tool_schema("default", payload), [])
+
+    def test_execute_path_revalidates_interest_and_server_policy(self):
+        self.state.chat.is_human_takeover = lambda *_args: False
+        result = self.state.execute_product_image_tool(
+            "default", "customer@c.us", "message-1",
+            {"product_key": "g5-plus", "caption": "产品图片", "reason": "效果", "incoming_text": "你好"},
+        )
+        self.assertEqual(result["action"], "ignored")
+
 
 if __name__ == "__main__":
     unittest.main()

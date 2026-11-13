@@ -820,7 +820,7 @@ class ProductImageService:
     def _caption_hash(caption):
         return hashlib.sha256(str(caption or "").encode("utf-8")).hexdigest()
 
-    def reserve_send(self, session_name, chat_id, message_key, asset_id, tag_key, caption):
+    def reserve_send(self, session_name, chat_id, message_key, asset_id, tag_key, caption, daily_limit=None):
         session = str(session_name or "").strip()
         customer = str(chat_id or "").strip()
         message = str(message_key or "").strip()
@@ -857,6 +857,19 @@ class ProductImageService:
                     "recovery_required": str(existing["state"]) in {"PENDING", "UNKNOWN"},
                     "reason_code": "RECOVERY_REQUIRED" if str(existing["state"]) in {"PENDING", "UNKNOWN"} else "ALREADY_PROCESSED",
                 }
+            if daily_limit is not None:
+                try:
+                    limit = int(daily_limit)
+                except (TypeError, ValueError):
+                    limit = 0
+                if limit > 0:
+                    day_start = now - (now % 86400)
+                    sent = connection.execute(
+                        "SELECT COUNT(*) FROM product_image_send_requests WHERE state='SENT' AND updated_at>=?",
+                        (day_start,),
+                    ).fetchone()[0]
+                    if int(sent) >= limit:
+                        return {"reserved": False, "state": "DAILY_LIMIT", "reason_code": "DAILY_LIMIT"}
             request_id = str(uuid.uuid4())
             connection.execute(
                 "INSERT OR IGNORE INTO product_image_send_requests(request_id,session_name,chat_key_hmac,message_key,asset_id,tag_key,caption_hash,payload_hash,state,waha_message_id,error_code,created_at,updated_at) "

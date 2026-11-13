@@ -1730,6 +1730,10 @@ class PanelState:
         """Return the server-side gates for a customer-image product send."""
         settings = settings if isinstance(settings, dict) else {}
         name = normalize_session_name(session_name)
+        if as_bool(settings.get("product_image_global_kill_switch", False)):
+            return {"allowed": False, "reason_code": "GLOBAL_KILL_SWITCH"}
+        if not as_bool(settings.get("chat_product_image_enabled", True)):
+            return {"allowed": False, "reason_code": "CHAT_SWITCH_OFF"}
         if not as_bool(settings.get("product_image_auto_send_enabled", True)):
             return {"allowed": False, "reason_code": "SESSION_SWITCH_OFF"}
         global_settings = self.product_images.settings_payload()
@@ -1790,7 +1794,8 @@ class PanelState:
         """Recognize one customer image and optionally send one product image."""
         name = normalize_session_name(session_name)
         settings = self._settings(name)
-        if not as_bool(settings.get("customer_image_recognition_enabled", "1")):
+        if (not as_bool(settings.get("customer_image_recognition_enabled", "1")) or
+                as_bool(settings.get("product_image_global_kill_switch", "0"))):
             return {"action": "continue", "decision": "TEXT_ONLY", "reason_code": "RECOGNITION_SWITCH_OFF"}
         if not as_bool(settings.get("product_image_auto_send_enabled", True)):
             return {"action": "continue", "decision": "TEXT_ONLY", "reason_code": "SESSION_SWITCH_OFF"}
@@ -3333,6 +3338,13 @@ class PanelState:
             or len(caption) > 4096
         ):
             return {"action": "ignored", "reason": "产品图片工具参数无效", "session": session}
+        # Resolve and authorize the model request through the catalog validator.
+        validated = self.validate_product_image_tool_call(
+            {"product_key": product_tag, "variant": variant, "caption": caption}, incoming, context
+        )
+        if not validated:
+            return {"action": "ignored", "reason": "产品图片发送条件不满足", "session": session}
+        product_tag = validated["product_key"]
         # Tool authorization is based on the current customer message only.
         # Conversation history is context for the model, never permission to
         # send a product image.
@@ -3357,8 +3369,6 @@ class PanelState:
             if self.product_images.daily_sent_count() >= int(settings.get("daily_limit", 20)):
                 self.log("INFO", "product_image.limit", "已达到产品图片每日发送上限", session)
                 return {"action": "ignored", "reason": "已达到产品图片每日上限", "session": session}
-            if self.chat.is_human_takeover(session, chat_id):
-                return {"action": "ignored", "reason": "人工接管中", "session": session}
             if self._reply_ticket(session, original_timestamp, chat_id) != ticket:
                 return {"action": "ignored", "reason": "发送前回复条件已变化", "session": session}
             if not self._sync_reply_connections():
@@ -3371,11 +3381,19 @@ class PanelState:
                 code = str(resolved.get("code") or resolved.get("status") or "NOT_FOUND")
                 self.log("INFO", "product_image." + code.lower(), "产品图片未找到唯一匹配", session)
                 return {"action": "ignored", "reason": "没有唯一可发送的产品图片", "session": session}
+            policy = self.product_image_policy(
+                {**session_settings, "chat_product_image_enabled": True}, session, chat_id,
+                validated["product"]["product_id"], resolved["asset_id"],
+                history=[{"from_me": False, "body": str(incoming or "")}, {"from_me": False, "body": str(context or "")}],
+            )
+            if not policy.get("allowed"):
+                return {"action": "ignored", "reason": policy.get("reason_code", "POLICY_BLOCKED"), "session": session}
             if not caption.strip():
                 template = str(resolved.get("caption_template") or "")
                 caption = template.replace("{product_tag}", product_tag).strip()
             reservation = self.product_images.reserve_send(
-                session, chat_id, message_id, resolved["asset_id"], resolved["tag_key"], caption
+                session, chat_id, message_id, resolved["asset_id"], resolved["tag_key"], caption,
+                daily_limit=settings.get("daily_limit"),
             )
             if not reservation:
                 return {"action": "ignored", "reason": "产品图片发送请求未能预留", "session": session}
@@ -4214,7 +4232,9 @@ class PanelState:
         settings = self.settings_payload(session)
         if as_bool(settings.get("product_image_global_kill_switch")) or not as_bool(settings.get("chat_product_image_enabled")):
             return {"action": "ignored", "reason": "聊天产品图片功能已关闭", "session": session}
-        checked = self.validate_product_image_tool_call(arguments, arguments.get("incoming_text", "图片"), "")
+        incoming_text = str(arguments.get("incoming_text") or "图片")
+        tool_arguments = {key: value for key, value in arguments.items() if key != "incoming_text"}
+        checked = self.validate_product_image_tool_call(tool_arguments, incoming_text, "")
         if not checked:
             return {"action": "ignored", "reason": "产品图片发送条件不满足", "session": session}
         return self._execute_product_image(session, chat_id, message_id, message_id, None, json.dumps({"product_tag": checked["product_key"], "variant": checked.get("variant", ""), "caption": checked.get("caption", "")}, ensure_ascii=False), arguments.get("incoming_text", ""), "", True)
@@ -6233,7 +6253,15 @@ class PanelHandler(BaseHTTPRequestHandler):
         self.require_csrf()
         service = self.state.product_images
         if route == "/api/product-image-settings":
-            self.send_json(service.save_settings(self.read_api_json()))
+            payload = self.read_api_json()
+            result = service.save_settings(payload)
+            policy_keys = ("customer_image_recognition_enabled", "chat_product_image_enabled", "marketing_product_image_enabled", "product_image_global_kill_switch")
+            if any(key in payload for key in policy_keys):
+                query = parse_qs(urlparse(self.path).query, keep_blank_values=True)
+                session = query.get("session", [DEFAULT_SESSION_NAME])[0]
+                self.state.save_settings({key: payload[key] for key in policy_keys if key in payload}, session)
+                result.update({key: self.state.settings_payload(session)[key] for key in policy_keys})
+            self.send_json(result)
             return
         if route == "/api/product-tags" or route.startswith("/api/product-tags/"):
             if route == "/api/product-tags" or route.endswith("/"):

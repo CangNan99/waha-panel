@@ -225,6 +225,7 @@ class MarketingAutomationService:
     def _process_candidate(self, session, candidate, settings, campaign_key, now):
         if not isinstance(candidate, dict):
             return False
+        marketing_images_enabled = str(self._settings_value(settings, "marketing_product_image_enabled", True)).strip().casefold() in {"1", "true", "yes", "on", "enabled"}
         chat_id = self._candidate_id(candidate)
         chat_key = str(candidate.get("chat_key_hmac") or "").strip()
         if not chat_id or not chat_key or chat_id.endswith("@g.us"):
@@ -254,6 +255,8 @@ class MarketingAutomationService:
         if last_sent_at and now - last_sent_at < cooldown_days * DAY_SECONDS:
             return False
         prompt = str(self._settings_value(settings, "ai_marketing_prompt", DEFAULT_MARKETING_PROMPT) or "").strip()
+        if not marketing_images_enabled:
+            prompt += "\n营销策略：不要主动发送产品图片，只发送文字。"
         prompt = prompt[:4000] or DEFAULT_MARKETING_PROMPT
         try:
             generated = self.message_generator(session, chat_id, history, prompt)
