@@ -511,6 +511,13 @@ class ProductImageService:
         cleaned_name, cleaned_sku, cleaned_aliases = self._clean_match_metadata(
             product_name, sku, aliases
         )
+        product_id = str(product_id or "").strip()
+        variant = str(variant or "").strip()
+        reference_role = str(reference_role or "primary").strip().casefold()
+        if reference_role not in {"primary", "reference", "marketing"}:
+            raise ProductImageValidationError("图片角色无效", "INVALID_REFERENCE_ROLE")
+        allow_visual_match = _truthy(allow_visual_match, True)
+        allow_auto_send = _truthy(allow_auto_send, True)
         sha256 = hashlib.sha256(raw).hexdigest()
         now = self._now()
         with self._db() as connection:
@@ -519,9 +526,82 @@ class ProductImageService:
             ).fetchone()
             if existing:
                 asset = self._load_asset(connection, existing["id"], include_inactive=True)
-                if product_id or variant or reference_role != "primary":
-                    connection.execute("UPDATE product_image_assets SET product_id=?,variant=?,reference_role=?,allow_visual_match=?,allow_auto_send=?,updated_at=? WHERE id=?", (str(product_id or "") or None, variant, reference_role, int(allow_visual_match), int(allow_auto_send), now, existing["id"]))
-                    asset = self._load_asset(connection, existing["id"], include_inactive=True)
+                incoming_id = str(product_id or "").strip()
+                current_id = str(asset.get("product_id") or "").strip()
+                if current_id and incoming_id and current_id != incoming_id:
+                    raise ProductImageValidationError(
+                        "相同图片已绑定其他产品，无法安全关联", "DUPLICATE_IMAGE_CONFLICT"
+                    )
+                for field, incoming, current in (
+                    ("product_name", cleaned_name, asset.get("product_name", "")),
+                    ("sku", cleaned_sku, asset.get("sku", "")),
+                ):
+                    if incoming and current and normalize_tag(incoming) != normalize_tag(current):
+                        raise ProductImageValidationError(
+                            f"相同图片的{field}元数据不一致，无法安全关联", "DUPLICATE_IMAGE_CONFLICT"
+                        )
+                if cleaned_title and str(asset.get("title") or "").strip() and cleaned_title != str(asset.get("title") or "").strip():
+                    raise ProductImageValidationError(
+                        "相同图片标题不一致，无法安全关联", "DUPLICATE_IMAGE_CONFLICT"
+                    )
+                if cleaned_caption and str(asset.get("caption_template") or "").strip() and cleaned_caption != str(asset.get("caption_template") or "").strip():
+                    raise ProductImageValidationError(
+                        "相同图片说明不一致，无法安全关联", "DUPLICATE_IMAGE_CONFLICT"
+                    )
+                incoming_variant = str(variant or "").strip()
+                current_variant = str(asset.get("variant") or "").strip()
+                if current_variant and incoming_variant and current_variant != incoming_variant:
+                    raise ProductImageValidationError(
+                        "相同图片已绑定其他变体，无法安全关联", "DUPLICATE_IMAGE_CONFLICT"
+                    )
+                incoming_role = str(reference_role or "primary").strip().casefold()
+                current_role = str(asset.get("reference_role") or "primary").strip().casefold()
+                if current_role != "primary" and incoming_role != "primary" and current_role != incoming_role:
+                    raise ProductImageValidationError(
+                        "相同图片已绑定其他图片角色，无法安全关联", "DUPLICATE_IMAGE_CONFLICT"
+                    )
+                merged_name = str(asset.get("product_name") or cleaned_name)
+                merged_sku = str(asset.get("sku") or cleaned_sku)
+                merged_aliases = list(asset.get("aliases") or [])
+                seen_aliases = {normalize_tag(value) for value in merged_aliases}
+                for alias in cleaned_aliases:
+                    key = normalize_tag(alias)
+                    if key and key not in seen_aliases:
+                        merged_aliases.append(alias)
+                        seen_aliases.add(key)
+                merged_id = current_id or incoming_id or None
+                merged_variant = current_variant or incoming_variant
+                merged_role = current_role if current_role != "primary" else incoming_role
+                merged_visual = bool(asset.get("allow_visual_match", True)) and bool(allow_visual_match)
+                merged_auto = bool(asset.get("allow_auto_send", True)) and bool(allow_auto_send)
+                merged_title = str(asset.get("title") or cleaned_title)
+                merged_caption = str(asset.get("caption_template") or cleaned_caption)
+                connection.execute(
+                    "UPDATE product_image_assets SET title=?,caption_template=?,product_name=?,sku=?,aliases_json=?,product_id=?,variant=?,reference_role=?,allow_visual_match=?,allow_auto_send=?,updated_at=? WHERE id=?",
+                    (
+                        merged_title,
+                        merged_caption,
+                        merged_name,
+                        merged_sku,
+                        json.dumps(merged_aliases, ensure_ascii=False, separators=(",", ":")),
+                        merged_id,
+                        merged_variant,
+                        merged_role,
+                        int(merged_visual),
+                        int(merged_auto),
+                        now,
+                        existing["id"],
+                    ),
+                )
+                existing_tag_keys = {str(tag["tag_key"]) for tag in asset.get("tags", [])}
+                for index, (key, label) in enumerate(cleaned_tags):
+                    tag_id = self._ensure_tag(connection, key, label, now)
+                    if key not in existing_tag_keys:
+                        connection.execute(
+                            "INSERT INTO product_image_asset_tags(asset_id,tag_id,priority,is_primary,created_at) VALUES (?,?,?,?,?)",
+                            (existing["id"], tag_id, (len(existing_tag_keys) + index) * 10 + 100, 0, now),
+                        )
+                asset = self._load_asset(connection, existing["id"], include_inactive=True)
                 asset["reused"] = True
                 return asset
             asset_id = str(uuid.uuid4())
