@@ -521,6 +521,7 @@ class ProductImageService:
         sha256 = hashlib.sha256(raw).hexdigest()
         now = self._now()
         with self._db() as connection:
+            connection.execute("BEGIN IMMEDIATE")
             existing = connection.execute(
                 "SELECT * FROM product_image_assets WHERE sha256=?", (sha256,)
             ).fetchone()
@@ -853,6 +854,8 @@ class ProductImageService:
                     "caption_hash": str(existing["caption_hash"]),
                     "payload_hash": str(existing["payload_hash"]),
                     "reserved": False,
+                    "recovery_required": str(existing["state"]) in {"PENDING", "UNKNOWN"},
+                    "reason_code": "RECOVERY_REQUIRED" if str(existing["state"]) in {"PENDING", "UNKNOWN"} else "ALREADY_PROCESSED",
                 }
             request_id = str(uuid.uuid4())
             connection.execute(
@@ -890,6 +893,8 @@ class ProductImageService:
                     "caption_hash": str(existing["caption_hash"]),
                     "payload_hash": str(existing["payload_hash"]),
                     "reserved": False,
+                    "recovery_required": str(existing["state"]) in {"PENDING", "UNKNOWN"},
+                    "reason_code": "RECOVERY_REQUIRED" if str(existing["state"]) in {"PENDING", "UNKNOWN"} else "ALREADY_PROCESSED",
                 }
         return {
             "request_id": request_id,
@@ -943,7 +948,40 @@ class ProductImageService:
         if linked_product and linked_product != product_key:
             raise ProductImageValidationError("产品图片与产品不匹配", "PRODUCT_ASSET_MISMATCH")
         tag_key = linked_product or str(asset.get("product_name") or asset.get("sku") or asset_key)
-        result = self.reserve_send(session_name, chat_id, message_key, asset_key, tag_key, caption)
+        # Reserve under an IMMEDIATE transaction and count every non-terminal
+        # request. This prevents concurrent customer-image workers from
+        # crossing the global daily limit while one request is still in flight.
+        settings = self.settings_payload()
+        daily_limit = int(settings.get("daily_limit", 20))
+        session = str(session_name or "").strip()
+        customer = str(chat_id or "").strip()
+        message = str(message_key or "").strip()
+        safe_caption = self._clean_caption(caption)
+        if not session or not customer or not message or len(message) > 512:
+            raise ProductImageValidationError("图片发送请求参数无效", "INVALID_SEND_REQUEST")
+        chat_key = self._chat_key_hmac(session, customer)
+        caption_hash = self._caption_hash(safe_caption)
+        payload_hash = hashlib.sha256(f"{asset_key}\x00{tag_key}\x00{caption_hash}".encode("utf-8")).hexdigest()
+        now = self._now()
+        with self._db() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            existing = connection.execute(
+                "SELECT request_id,state,waha_message_id,error_code,asset_id,tag_key,caption_hash,payload_hash FROM product_image_send_requests WHERE session_name=? AND chat_key_hmac=? AND message_key=?",
+                (session, chat_key, message),
+            ).fetchone()
+            if existing:
+                result = {"request_id": str(existing["request_id"]), "state": str(existing["state"]), "waha_message_id": existing["waha_message_id"], "error_code": existing["error_code"], "asset_id": str(existing["asset_id"]), "tag_key": str(existing["tag_key"]), "caption_hash": str(existing["caption_hash"]), "payload_hash": str(existing["payload_hash"]), "reserved": False, "recovery_required": str(existing["state"]) in {"PENDING", "UNKNOWN"}, "reason_code": "RECOVERY_REQUIRED" if str(existing["state"]) in {"PENDING", "UNKNOWN"} else "ALREADY_PROCESSED"}
+            else:
+                used = connection.execute("SELECT COUNT(*) FROM product_image_send_requests WHERE state IN ('SENT','PENDING','UNKNOWN') AND updated_at>=?", (now - (now % 86400),)).fetchone()[0]
+                if int(used) >= daily_limit:
+                    result = {"request_id": None, "state": "LIMIT", "asset_id": asset_key, "tag_key": tag_key, "reserved": False, "reason_code": "DAILY_LIMIT"}
+                else:
+                    request_id = str(uuid.uuid4())
+                    connection.execute(
+                        "INSERT INTO product_image_send_requests(request_id,session_name,chat_key_hmac,message_key,asset_id,tag_key,caption_hash,payload_hash,state,waha_message_id,error_code,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        (request_id, session, chat_key, message, asset_key, tag_key, caption_hash, payload_hash, "PENDING", None, None, now, now),
+                    )
+                    result = {"request_id": request_id, "state": "PENDING", "waha_message_id": None, "error_code": None, "asset_id": asset_key, "tag_key": tag_key, "caption_hash": caption_hash, "payload_hash": payload_hash, "reserved": True}
         result["product_id"] = product_key
         result["source"] = str(source or "customer_image").strip()[:64] or "customer_image"
         return result

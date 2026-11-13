@@ -1722,7 +1722,7 @@ class PanelState:
             match_status=parsed["match_status"], needs_clarification=parsed["needs_clarification"],
         )
 
-    def product_image_policy(self, settings, session_name, chat_id, product_id, asset_id):
+    def product_image_policy(self, settings, session_name, chat_id, product_id, asset_id, history=None):
         """Return the server-side gates for a customer-image product send."""
         settings = settings if isinstance(settings, dict) else {}
         name = normalize_session_name(session_name)
@@ -1739,10 +1739,10 @@ class PanelState:
             opted_out = getattr(self.chat, "is_marketing_opted_out", None)
             if callable(opted_out):
                 try:
-                    if opted_out(name, chat_id):
+                    if opted_out(name, chat_id, history=history):
                         return {"allowed": False, "reason_code": "OPT_OUT"}
                 except Exception:
-                    pass
+                    return {"allowed": False, "reason_code": "OPT_OUT_CHECK_FAILED"}
         if settings.get("schedule_allowed") is False:
             return {"allowed": False, "reason_code": "OUTSIDE_SCHEDULE"}
         cooldown = settings.get("product_image_cooldown_seconds")
@@ -1782,7 +1782,7 @@ class PanelState:
             return {"allowed": False, "reason_code": "ASSET_NOT_FOUND"}
         return {"allowed": True, "reason_code": "ALLOWED"}
 
-    def handle_customer_product_image(self, session_name, chat_id, message_id, message, incoming_text, context):
+    def handle_customer_product_image(self, session_name, chat_id, message_id, message, incoming_text, context, dispatch=True, original_timestamp=None, ticket=None):
         """Recognize one customer image and optionally send one product image."""
         name = normalize_session_name(session_name)
         settings = self._settings(name)
@@ -1824,13 +1824,14 @@ class PanelState:
                     break
             decision = self.classify_product_image(profile, image_bytes, mime_type, catalog, incoming_text, context, reference_images=reference_images)
             digest = hashlib.sha256(image_bytes).hexdigest()
-            self.product_images.record_match_audit({
-                "candidate_product_id": ((decision.get("product") or {}).get("product_id") if isinstance(decision, dict) else ""),
-                "variant": decision.get("variant", "") if isinstance(decision, dict) else "",
-                "mime_type": mime_type,
-                "image_sha256": digest,
-                "result": {k: decision.get(k) for k in ("decision", "reason_code", "confidence", "confidence_bucket", "intent") if isinstance(decision, dict) and k in decision},
-            })
+            if dispatch:
+                self.product_images.record_match_audit({
+                    "candidate_product_id": ((decision.get("product") or {}).get("product_id") if isinstance(decision, dict) else ""),
+                    "variant": decision.get("variant", "") if isinstance(decision, dict) else "",
+                    "mime_type": mime_type,
+                    "image_sha256": digest,
+                    "result": {k: decision.get(k) for k in ("decision", "reason_code", "confidence", "confidence_bucket", "intent") if isinstance(decision, dict) and k in decision},
+                })
         except Exception as error:
             self.log("WARN", "product_image.match_failed", "客户图片识别失败，继续文字回复", name)
             return {"action": "continue", "decision": "TEXT_ONLY", "reason_code": "MATCH_FAILED"}
@@ -1839,37 +1840,60 @@ class PanelState:
         outcome = str(decision.get("decision") or "TEXT_ONLY")
         product = decision.get("product") if isinstance(decision.get("product"), dict) else {}
         if outcome == "ASK_CLARIFICATION":
-            return {"action": "replied", "mode": "product_match_clarification", "text": "我看到了产品图片。请告诉我具体的型号或套餐，我再为您发送对应图片。", "decision": decision}
+            return {"action": "clarification", "mode": "product_match_clarification", "text": "我看到了产品图片。请告诉我具体的型号或套餐，我再为您发送对应图片。", "decision": decision, "dispatch": bool(dispatch)}
         if outcome != "AUTO_SEND" or not product.get("product_id"):
             return {"action": "continue", "decision": outcome, "reason_code": decision.get("reason_code", "TEXT_ONLY")}
         asset = self.product_images.resolve_product_asset(product["product_id"], decision.get("variant", ""), "primary")
         if asset.get("status") != "FOUND":
             return {"action": "continue", "decision": "TEXT_ONLY", "reason_code": "ASSET_NOT_UNIQUE"}
-        policy = self.product_image_policy(settings, name, chat_id, product["product_id"], asset["asset_id"])
+        history = [{"from_me": False, "body": str(incoming_text or "")}]
+        try:
+            connection = sqlite3.connect(self.database_path)
+            try:
+                rows = connection.execute("SELECT direction,content FROM conversation_messages WHERE session_name=? AND chat_id=? ORDER BY created_at DESC LIMIT 20", (name, str(chat_id))).fetchall()
+            finally:
+                connection.close()
+            history.extend({"from_me": row[0] == "outbound", "body": row[1]} for row in reversed(rows))
+        except Exception:
+            return {"action": "continue", "decision": "TEXT_ONLY", "reason_code": "HISTORY_UNAVAILABLE"}
+        policy = self.product_image_policy(settings, name, chat_id, product["product_id"], asset["asset_id"], history=history)
         if not policy.get("allowed"):
             return {"action": "continue", "decision": "TEXT_ONLY", "reason_code": policy.get("reason_code", "POLICY_BLOCKED")}
+        if not dispatch:
+            return {"action": "dry_run", "decision": "AUTO_SEND", "reason_code": "READY_TO_SEND", "asset_id": asset["asset_id"], "product_id": product["product_id"]}
         caption = str(asset.get("caption_template") or "").replace("{product_tag}", str(product.get("product_name") or product.get("product_key") or "")).strip()
-        reservation = self.product_images.reserve_auto_send(name, chat_id, message_id, product["product_id"], asset["asset_id"], "customer_image", caption)
-        if not reservation.get("reserved"):
-            return {"action": "ignored", "reason": "产品图片请求已处理", "decision": outcome}
-        try:
-            content_type, body = self.product_images.preview(asset["asset_id"])
-            result = self.chat.send_automated_image(name, chat_id, asset["original_filename"], content_type, body, caption, reservation["request_id"], origin="product_image")
-            sent_id = None
-            if isinstance(result, dict) and result.get("message_ref"):
-                try:
-                    _, sent_id = self.chat._decode_message(name, result["message_ref"])
-                except Exception:
-                    sent_id = None
-            self.product_images.finish_auto_send(reservation["request_id"], "SENT", message_id=sent_id)
-            return {"action": "replied", "mode": "product_image", "text": caption or "产品图片已发送", "decision": decision}
-        except ChatSendError as error:
-            state = str(getattr(error, "state", "FAILED") or "FAILED").upper()
-            self.product_images.finish_auto_send(reservation["request_id"], "UNKNOWN" if state == "UNKNOWN" else "FAILED", error_code=getattr(error, "code", "WAHA_SEND_FAILED"))
-            return {"action": "ignored", "reason": "产品图片发送结果未确认" if state == "UNKNOWN" else "产品图片发送失败", "decision": decision}
-        except Exception:
-            self.product_images.finish_auto_send(reservation["request_id"], "FAILED", error_code="PRODUCT_IMAGE_ERROR")
-            return {"action": "ignored", "reason": "产品图片发送失败", "decision": decision}
+        with self.reply_policy.lock:
+            if ticket is not None and self._reply_ticket(name, original_timestamp, chat_id) != ticket:
+                return {"action": "ignored", "reason": "发送前回复条件已变化", "decision": decision}
+            if not self._sync_reply_connections():
+                return {"action": "ignored", "reason": "WhatsApp 会话状态暂不可用", "decision": decision}
+            if self.chat is not None and self.chat.is_human_takeover(name, chat_id):
+                return {"action": "ignored", "reason": "人工接管中", "decision": decision}
+            policy = self.product_image_policy(settings, name, chat_id, product["product_id"], asset["asset_id"], history=history)
+            if not policy.get("allowed"):
+                return {"action": "ignored", "reason": policy.get("reason_code", "POLICY_BLOCKED"), "decision": decision}
+            caption = str(asset.get("caption_template") or "").replace("{product_tag}", str(product.get("product_name") or product.get("product_key") or "")).strip()
+            reservation = self.product_images.reserve_auto_send(name, chat_id, message_id, product["product_id"], asset["asset_id"], "customer_image", caption)
+            if not reservation.get("reserved"):
+                return {"action": "ignored", "reason": "产品图片请求需恢复核实" if reservation.get("recovery_required") else "产品图片请求已处理", "decision": outcome}
+            try:
+                content_type, body = self.product_images.preview(asset["asset_id"])
+                result = self.chat.send_automated_image(name, chat_id, asset["original_filename"], content_type, body, caption, reservation["request_id"], origin="product_image")
+                sent_id = None
+                if isinstance(result, dict) and result.get("message_ref"):
+                    try:
+                        _, sent_id = self.chat._decode_message(name, result["message_ref"])
+                    except Exception:
+                        sent_id = None
+                self.product_images.finish_auto_send(reservation["request_id"], "SENT", message_id=sent_id)
+                return {"action": "replied", "mode": "product_image", "text": caption or "产品图片已发送", "decision": decision}
+            except ChatSendError as error:
+                state = str(getattr(error, "state", "FAILED") or "FAILED").upper()
+                self.product_images.finish_auto_send(reservation["request_id"], "UNKNOWN" if state == "UNKNOWN" else "FAILED", error_code=getattr(error, "code", "WAHA_SEND_FAILED"))
+                return {"action": "ignored", "reason": "产品图片发送结果未确认" if state == "UNKNOWN" else "产品图片发送失败", "decision": decision}
+            except Exception:
+                self.product_images.finish_auto_send(reservation["request_id"], "FAILED", error_code="PRODUCT_IMAGE_ERROR")
+                return {"action": "ignored", "reason": "产品图片发送失败", "decision": decision}
 
     def require_chat_service_for_ai(self):
         if self.chat is None:
@@ -3761,8 +3785,24 @@ class PanelState:
                 message,
                 customer_text,
                 context,
+                dispatch=dispatch,
+                original_timestamp=original_timestamp,
+                ticket=ticket,
             )
-            if isinstance(product_result, dict) and product_result.get("action") in {"replied", "ignored"}:
+            if isinstance(product_result, dict) and product_result.get("action") == "clarification":
+                if not dispatch:
+                    product_result["action"] = "dry_run"
+                    product_result.setdefault("session", session_name)
+                    return product_result
+                clarification = str(product_result.get("text") or "").strip()
+                if clarification:
+                    self._wait_before_reply(clarification, is_hot, session_name)
+                    with self.reply_policy.lock:
+                        if self._reply_ticket(session_name, original_timestamp, chat_id) != ticket:
+                            return {"action": "ignored", "reason": "发送前回复条件已变化", "session": session_name}
+                        self._send_text(session_name, chat_id, clarification, origin="auto_ai")
+                    return {"action": "replied", "mode": "product_match_clarification", "text": clarification, "session": session_name}
+            if isinstance(product_result, dict) and product_result.get("action") in {"replied", "ignored", "dry_run"}:
                 product_result.setdefault("session", session_name)
                 return product_result
         ai_kwargs = {
