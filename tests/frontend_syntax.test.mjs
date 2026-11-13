@@ -5,9 +5,16 @@ import vm from 'node:vm';
 import { checkInlineScripts } from '../scripts/check_frontend_syntax.mjs';
 
 const appSource = await readFile(new URL('../panel/app.py', import.meta.url), 'utf8');
+const productImageSource = await readFile(new URL('../panel/product_image_page.py', import.meta.url), 'utf8');
 const chatSource = await readFile(new URL('../panel/chat_page.py', import.meta.url), 'utf8');
 const overviewSource = await readFile(new URL('../panel/static/views/overview.js', import.meta.url), 'utf8');
 const scripts = [...appSource.matchAll(/<script>\s*([\s\S]*?)\s*<\/script>/g)];
+
+
+test('product image library exposes roles, variants, flags, search, and non-sending diagnostics', () => {
+  for (const token of ['productId','variant','allowVisual','allowAuto','reference_role','matchForm','product-image-match-test']) assert.match(productImageSource, new RegExp(token));
+  assert.match(productImageSource, /不会发送 WhatsApp/);
+});
 
 test('IPTV shared playback server is labeled, restored, and included in settings saves', () => {
   assert.ok(/<label for="iptvPlaybackServer">播放服务器地址<\/label><input id="iptvPlaybackServer" type="url"/.test(appSource), 'expected a labeled playback server URL input');
@@ -461,3 +468,4 @@ test('overview metrics use session data and navigation follows the selected sess
   assert.equal(getNode('chatLink').href, '#');
   assert.equal(getNode('chatLink').attributes['aria-disabled'], 'true');
 });
+
