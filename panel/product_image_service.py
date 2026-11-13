@@ -519,6 +519,9 @@ class ProductImageService:
             ).fetchone()
             if existing:
                 asset = self._load_asset(connection, existing["id"], include_inactive=True)
+                if product_id or variant or reference_role -ne "primary":
+                    connection.execute("UPDATE product_image_assets SET product_id=?,variant=?,reference_role=?,allow_visual_match=?,allow_auto_send=?,updated_at=? WHERE id=?", (str(product_id or "") or None, variant, reference_role, int(allow_visual_match), int(allow_auto_send), now, existing["id"]))
+                    asset = self._load_asset(connection, existing["id"], include_inactive=True)
                 asset["reused"] = True
                 return asset
             asset_id = str(uuid.uuid4())
@@ -945,7 +948,7 @@ class ProductImageService:
             if variant: q += " AND variant=?"; args.append(str(variant))
             rows=c.execute(q+" ORDER BY sort_order,created_at,id",args).fetchall()
             if not rows:return {"status":"NOT_FOUND","code":"NOT_FOUND","candidates":[]}
-            if len(rows)>1 and int(rows[0]["sort_order"])==int(rows[1]["sort_order"]): return {"status":"AMBIGUOUS","code":"AMBIGUOUS","candidates":[str(r["id"]) for r in rows]}
+            if len(rows)>1: return {"status":"AMBIGUOUS","code":"AMBIGUOUS","candidates":[str(r["id"]) for r in rows]}
             item=self._load_asset(c,rows[0]["id"]); item.update(status="FOUND",code="FOUND",role=role); return item
 
     def record_match_audit(self, payload: dict) -> dict:
@@ -972,3 +975,11 @@ __all__ = [
     "ProductImageValidationError",
     "normalize_tag",
 ]
+
+
+
+
+
+
+
+
