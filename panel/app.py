@@ -110,6 +110,7 @@ try:
     from .glm_service import GLMError, GLMService, GeneratedImageStore
     from .product_image_service import ProductImageService
     from .product_catalog_service import ProductCatalogService
+    from .product_match_service import ProductMatchService
     from .product_image_page import product_image_page
     from .product_image_service import ProductImageError
     from .customer_memory_service import CustomerMemoryService
@@ -162,6 +163,7 @@ except ImportError:  # Supports the existing `python app.py` container entrypoin
     from glm_service import GLMError, GLMService, GeneratedImageStore
     from product_image_service import ProductImageService
     from product_catalog_service import ProductCatalogService
+    from product_match_service import ProductMatchService
     from product_image_page import product_image_page
     from product_image_service import ProductImageError
     from customer_memory_service import CustomerMemoryService
@@ -1159,6 +1161,7 @@ class PanelState:
             ),
         )
         self.product_catalog = ProductCatalogService(self.database_path, clock=time.time)
+        self.product_match = ProductMatchService()
         self._admin_db_auth = as_bool(os.environ.get("PANEL_ADMIN_DB_AUTH", "0"))
         self._update_service = UpdateService(
             current_panel=os.environ.get("PANEL_VERSION", "1.0.26"),
