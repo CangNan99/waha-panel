@@ -558,6 +558,7 @@ class ProductImageService:
                         json.dumps(cleaned_aliases, ensure_ascii=False, separators=(",", ":")),
                     ),
                 )
+                connection.execute("UPDATE product_image_assets SET product_id=?,variant=?,reference_role=?,allow_visual_match=?,allow_auto_send=? WHERE id=?", (str(product_id or "") or None, variant, reference_role, int(_truthy(allow_visual_match, True)), int(_truthy(allow_auto_send, True)), asset_id))
                 for index, (key, label) in enumerate(cleaned_tags):
                     tag_id = self._ensure_tag(connection, key, label, now)
                     connection.execute(
@@ -658,6 +659,7 @@ class ProductImageService:
             if "tags" in payload:
                 cleaned_tags = self._clean_tags(payload.get("tags"))
                 connection.execute("DELETE FROM product_image_asset_tags WHERE asset_id=?", (str(asset_id),))
+                connection.execute("UPDATE product_image_assets SET product_id=?,variant=?,reference_role=?,allow_visual_match=?,allow_auto_send=? WHERE id=?", (str(product_id or "") or None, variant, reference_role, int(_truthy(allow_visual_match, True)), int(_truthy(allow_auto_send, True)), asset_id))
                 for index, (key, label) in enumerate(cleaned_tags):
                     tag_id = self._ensure_tag(connection, key, label, now)
                     connection.execute(
