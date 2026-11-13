@@ -865,7 +865,7 @@ class ProductImageService:
                 if limit > 0:
                     day_start = now - (now % 86400)
                     sent = connection.execute(
-                        "SELECT COUNT(*) FROM product_image_send_requests WHERE state='SENT' AND updated_at>=?",
+                        "SELECT COUNT(*) FROM product_image_send_requests WHERE state IN ('SENT','PENDING','UNKNOWN') AND updated_at>=?",
                         (day_start,),
                     ).fetchone()[0]
                     if int(sent) >= limit:

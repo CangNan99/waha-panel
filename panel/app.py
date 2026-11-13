@@ -3206,21 +3206,7 @@ class PanelState:
                     "required": ["language"]},
             }})
         if product_image_enabled:
-            tools.append({"type": "function", "function": {
-                "name": "send_product_image",
-                "description": "客户当前明确询问对应产品时发送一张已配置的产品图片",
-                "parameters": {
-                    "type": "object",
-                    "additionalProperties": False,
-                    "properties": {
-                        "product_key": {"type": "string"},
-                        "variant": {"type": "string"},
-                        "caption": {"type": "string"},
-                        "reason": {"type": "string"},
-                    },
-                    "required": ["product_key"],
-                },
-            }})
+            tools.extend(self.product_image_tool_schema(name, session_product_settings))
         if tools:
             request_payload["tools"] = tools
         if self.iptv is not None:
@@ -3376,7 +3362,11 @@ class PanelState:
             remote = extract_sessions(self.client.get_sessions())
             if not classify_session_state(session_state_for(remote, session)):
                 return {"action": "ignored", "reason": "WhatsApp 会话未连接", "session": session}
-            resolved = self.product_images.resolve_for_send(product_tag, variant)
+            resolved = dict(validated["asset"])
+            resolved.setdefault("status", "FOUND")
+            resolved.setdefault("code", "FOUND")
+            resolved.setdefault("tag_key", validated["product"]["product_key"])
+            resolved.setdefault("variant", variant)
             if resolved.get("status") != "FOUND":
                 code = str(resolved.get("code") or resolved.get("status") or "NOT_FOUND")
                 self.log("INFO", "product_image." + code.lower(), "产品图片未找到唯一匹配", session)
@@ -6177,7 +6167,14 @@ class PanelHandler(BaseHTTPRequestHandler):
             self.send_json(service.list_tags())
             return
         if route == "/api/product-image-settings":
-            self.send_json(service.settings_payload())
+            query = parse_qs(urlparse(self.path).query, keep_blank_values=True)
+            session = query.get("session", [DEFAULT_SESSION_NAME])[0]
+            payload = service.settings_payload()
+            payload.update({key: self.state.settings_payload(session)[key] for key in (
+                "customer_image_recognition_enabled", "chat_product_image_enabled",
+                "marketing_product_image_enabled", "product_image_global_kill_switch",
+            )})
+            self.send_json(payload)
             return
         raise ValueError("产品图片查询路径不正确")
 
