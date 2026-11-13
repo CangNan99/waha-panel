@@ -123,9 +123,16 @@ class ProductImageToolTests(unittest.TestCase):
         self.state.chat.is_human_takeover = lambda *_args: False
         result = self.state.execute_product_image_tool(
             "default", "customer@c.us", "message-1",
-            {"product_key": "g5-plus", "caption": "产品图片", "reason": "效果", "incoming_text": "你好"},
+            {"product_key": "g5-plus", "caption": "产品图片", "reason": "效果"},
+            "你好",
         )
         self.assertEqual(result["action"], "ignored")
+
+    def test_validation_accepts_product_name_alias_identity(self):
+        result = self.state.validate_product_image_tool_call(
+            {"product_key": "G5 Plus", "caption": "产品图片"}, "请发 G5 Plus 图片", ""
+        )
+        self.assertEqual(result["product"]["product_key"], "g5-plus")
 
 
 if __name__ == "__main__":

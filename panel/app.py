@@ -3331,20 +3331,10 @@ class PanelState:
         if not validated:
             return {"action": "ignored", "reason": "产品图片发送条件不满足", "session": session}
         product_tag = validated["product_key"]
-        # Tool authorization is based on the current customer message only.
-        # Conversation history is context for the model, never permission to
-        # send a product image.
-        current = str(incoming or "")
-        normalized_current = re.sub(r"\s+", " ", current).casefold()
-        normalized_tag = re.sub(r"\s+", " ", product_tag).strip().casefold()
-        if normalized_tag.isascii() and re.fullmatch(r"[a-z0-9][a-z0-9 _+.-]*", normalized_tag):
-            tag_pattern = r"(?<![a-z0-9])" + re.escape(normalized_tag) + r"(?![a-z0-9])"
-            tag_is_present = re.search(tag_pattern, normalized_current) is not None
-        else:
-            tag_is_present = normalized_tag in normalized_current
-        if not normalized_tag or not tag_is_present:
-            self.log("INFO", "product_image.not_found", "当前消息未明确包含产品标签", session)
-            return {"action": "ignored", "reason": "当前消息未明确询问该产品", "session": session}
+        # `validate_product_image_tool_call` already matched the original
+        # customer text against the product key, name, SKU, and aliases.
+        # Do not re-check the canonical key as a literal token here: a valid
+        # request such as “请发 G5 Plus 图片” resolves to `g5-plus`.
         try:
             settings = self.product_images.settings_payload()
             session_settings = self.settings_payload(session)
@@ -4215,19 +4205,18 @@ class PanelState:
             return None
         return {"product": product, "asset": asset, "product_key": product["product_key"], "variant": asset.get("variant", ""), "caption": caption.strip(), "reason": str(arguments.get("reason") or "").strip()}
 
-    def execute_product_image_tool(self, session_name, chat_id, message_id, arguments):
+    def execute_product_image_tool(self, session_name, chat_id, message_id, arguments, incoming_text=None, context=""):
         session = normalize_session_name(session_name)
         if not isinstance(arguments, dict):
             return {"action": "ignored", "reason": "产品图片工具参数无效", "session": session}
         settings = self.settings_payload(session)
         if as_bool(settings.get("product_image_global_kill_switch")) or not as_bool(settings.get("chat_product_image_enabled")):
             return {"action": "ignored", "reason": "聊天产品图片功能已关闭", "session": session}
-        incoming_text = str(arguments.get("incoming_text") or "图片")
-        tool_arguments = {key: value for key, value in arguments.items() if key != "incoming_text"}
-        checked = self.validate_product_image_tool_call(tool_arguments, incoming_text, "")
+        incoming_text = str(incoming_text or "")
+        checked = self.validate_product_image_tool_call(arguments, incoming_text, context)
         if not checked:
             return {"action": "ignored", "reason": "产品图片发送条件不满足", "session": session}
-        return self._execute_product_image(session, chat_id, message_id, message_id, None, json.dumps({"product_tag": checked["product_key"], "variant": checked.get("variant", ""), "caption": checked.get("caption", "")}, ensure_ascii=False), arguments.get("incoming_text", ""), "", True)
+        return self._execute_product_image(session, chat_id, message_id, message_id, None, json.dumps({"product_key": checked["product_key"], "variant": checked.get("variant", ""), "caption": checked.get("caption", "")}, ensure_ascii=False), incoming_text, context, True)
     def session_avatar(self, session_name=DEFAULT_SESSION_NAME):
         name = normalize_session_name(session_name)
         now = int(self.clock())
