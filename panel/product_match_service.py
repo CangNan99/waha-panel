@@ -22,6 +22,7 @@ class ProductMatchService:
     _DATA_URL = re.compile(r"^data:(image/(?:jpeg|png|webp));base64,([A-Za-z0-9+/]+={0,2})$")
     _ALLOWED_TOP = {"match_status", "candidates", "intent", "needs_clarification"}
     _ALLOWED_CANDIDATE = {"product_name", "product_key", "sku", "variant", "confidence", "evidence"}
+    _DISCARD_CANDIDATE = {"asset_id", "asset_url", "url", "path", "file_path", "filename"}
     _INTENTS = {"identify", "question", "compare", "trial", "purchase", "info", "unknown", "none"}
 
     @classmethod
@@ -71,7 +72,8 @@ class ProductMatchService:
         for candidate in candidates:
             if not isinstance(candidate, dict):
                 raise GLMError("产品识别候选无效", "PRODUCT_MATCH_INVALID")
-            if set(candidate) - cls._ALLOWED_CANDIDATE or not any(candidate.get(k) for k in ("product_key", "product_name", "sku")):
+            unknown = set(candidate) - cls._ALLOWED_CANDIDATE - cls._DISCARD_CANDIDATE
+            if unknown or not any(candidate.get(k) for k in ("product_key", "product_name", "sku")):
                 raise GLMError("产品识别候选字段无效", "PRODUCT_MATCH_INVALID")
             item = {k: candidate.get(k) for k in cls._ALLOWED_CANDIDATE if k in candidate}
             if "confidence" not in item or isinstance(item["confidence"], bool):

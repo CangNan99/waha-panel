@@ -8,7 +8,7 @@ class ProductMatchServiceTests(unittest.TestCase):
     def test_parse_sanitizes_model_asset_fields(self):
         result = ProductMatchService.parse_result({
             "match_status": "matched",
-            "candidates": [{"product_name": "A", "confidence": 0.95}],
+            "candidates": [{"product_name": "A", "confidence": 0.95, "asset_id": "secret", "url": "https://x"}],
             "intent": "identify",
         })
         self.assertEqual(result["candidates"][0], {"product_name": "A", "confidence": 0.95})
