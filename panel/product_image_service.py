@@ -918,6 +918,39 @@ class ProductImageService:
                     str(request_id),
                 ),
             )
+        return {
+            "request_id": str(request_id),
+            "state": final_state,
+            "waha_message_id": str(message_id or "") or None,
+            "error_code": str(error_code or "") or None,
+        }
+
+    def reserve_auto_send(self, session_name, chat_id, message_key, product_id, asset_id, source, caption):
+        """Reserve a product-level automatic image action.
+
+        The legacy ledger is asset keyed and intentionally remains the source
+        of idempotency.  This adapter validates the product/asset relationship
+        and records the action through that ledger without exposing raw chat
+        identifiers or image bytes.
+        """
+        product_key = str(product_id or "").strip()
+        asset_key = str(asset_id or "").strip()
+        if not product_key or not asset_key:
+            raise ProductImageValidationError("产品图片发送目标无效", "INVALID_SEND_REQUEST")
+        with self._db() as connection:
+            asset = self._load_asset(connection, asset_key, include_inactive=False)
+        linked_product = str(asset.get("product_id") or "").strip()
+        if linked_product and linked_product != product_key:
+            raise ProductImageValidationError("产品图片与产品不匹配", "PRODUCT_ASSET_MISMATCH")
+        tag_key = linked_product or str(asset.get("product_name") or asset.get("sku") or asset_key)
+        result = self.reserve_send(session_name, chat_id, message_key, asset_key, tag_key, caption)
+        result["product_id"] = product_key
+        result["source"] = str(source or "customer_image").strip()[:64] or "customer_image"
+        return result
+
+    def finish_auto_send(self, request_id, state, message_id=None, error_code=None):
+        """Finalize an automatic product-image reservation."""
+        return self.finish_send(request_id, state, message_id=message_id, error_code=error_code)
 
     def daily_sent_count(self):
         start = self._now() - (self._now() % 86400)

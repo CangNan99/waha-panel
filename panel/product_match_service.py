@@ -176,7 +176,7 @@ class ProductMatchService:
         product = top[1]
         safe_product = None
         if product:
-            safe_product = {k: str(product.get(k) or "") for k in ("product_key", "product_name", "variant")}
+            safe_product = {k: str(product.get(k) or "") for k in ("product_id", "product_key", "product_name", "variant")}
             safe_product["reference_assets"] = [
                 {"reference_role": str(asset.get("reference_role") or "")[:32]}
                 for asset in (product.get("reference_assets") or [])
