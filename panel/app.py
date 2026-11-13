@@ -109,6 +109,7 @@ try:
     from .chat_page import chat_management_page
     from .glm_service import GLMError, GLMService, GeneratedImageStore
     from .product_image_service import ProductImageService
+    from .product_catalog_service import ProductCatalogService
     from .product_image_page import product_image_page
     from .product_image_service import ProductImageError
     from .customer_memory_service import CustomerMemoryService
@@ -160,6 +161,7 @@ except ImportError:  # Supports the existing `python app.py` container entrypoin
     from chat_page import chat_management_page
     from glm_service import GLMError, GLMService, GeneratedImageStore
     from product_image_service import ProductImageService
+    from product_catalog_service import ProductCatalogService
     from product_image_page import product_image_page
     from product_image_service import ProductImageError
     from customer_memory_service import CustomerMemoryService
@@ -794,6 +796,17 @@ def init_db(path, seed_business=True):
             "product_image_assets",
             "aliases_json TEXT NOT NULL DEFAULT '[]'",
         )
+        product_catalog_migration = Path(__file__).with_name("migrations") / "021_product_catalog.sql"
+        connection.executescript(product_catalog_migration.read_text(encoding="utf-8"))
+        for definition in (
+            "product_id TEXT REFERENCES product_catalog(product_id) ON DELETE SET NULL",
+            "variant TEXT NOT NULL DEFAULT ''",
+            "reference_role TEXT NOT NULL DEFAULT 'primary'",
+            "allow_visual_match INTEGER NOT NULL DEFAULT 1",
+            "allow_auto_send INTEGER NOT NULL DEFAULT 1",
+            "legacy_import_status TEXT NOT NULL DEFAULT 'pending'",
+        ):
+            _add_column_if_missing(connection, "product_image_assets", definition)
         customer_first_seen_migration = (
             Path(__file__).with_name("migrations") / "018_customer_first_seen.sql"
         )
@@ -1145,6 +1158,7 @@ class PanelState:
                 str(level or "INFO").upper(), "product.image", message, DEFAULT_SESSION_NAME
             ),
         )
+        self.product_catalog = ProductCatalogService(self.database_path, clock=time.time)
         self._admin_db_auth = as_bool(os.environ.get("PANEL_ADMIN_DB_AUTH", "0"))
         self._update_service = UpdateService(
             current_panel=os.environ.get("PANEL_VERSION", "1.0.26"),

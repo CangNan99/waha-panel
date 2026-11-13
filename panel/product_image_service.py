@@ -126,6 +126,9 @@ class ProductImageService:
             connection.executescript(
                 (migration_root / "019_product_image_matching.sql").read_text(encoding="utf-8")
             )
+            connection.executescript(
+                (migration_root / "021_product_catalog.sql").read_text(encoding="utf-8")
+            )
             columns = {
                 str(row[1])
                 for row in connection.execute("PRAGMA table_info(product_image_assets)")
@@ -134,6 +137,12 @@ class ProductImageService:
                 "product_name TEXT NOT NULL DEFAULT ''",
                 "sku TEXT NOT NULL DEFAULT ''",
                 "aliases_json TEXT NOT NULL DEFAULT '[]'",
+                "product_id TEXT REFERENCES product_catalog(product_id) ON DELETE SET NULL",
+                "variant TEXT NOT NULL DEFAULT ''",
+                "reference_role TEXT NOT NULL DEFAULT 'primary'",
+                "allow_visual_match INTEGER NOT NULL DEFAULT 1",
+                "allow_auto_send INTEGER NOT NULL DEFAULT 1",
+                "legacy_import_status TEXT NOT NULL DEFAULT 'pending'",
             ):
                 name = definition.split(" ", 1)[0]
                 if name not in columns:
@@ -305,6 +314,11 @@ class ProductImageService:
             "product_name": str(row["product_name"] or ""),
             "sku": str(row["sku"] or ""),
             "aliases": ProductImageService._decode_aliases(row["aliases_json"]),
+            "product_id": str(row["product_id"] or "") if "product_id" in row.keys() else "",
+            "variant": str(row["variant"] or "") if "variant" in row.keys() else "",
+            "reference_role": str(row["reference_role"] or "primary") if "reference_role" in row.keys() else "primary",
+            "allow_visual_match": bool(row["allow_visual_match"]) if "allow_visual_match" in row.keys() else True,
+            "allow_auto_send": bool(row["allow_auto_send"]) if "allow_auto_send" in row.keys() else True,
         }
         if reused:
             item["reused"] = True
