@@ -29,6 +29,14 @@ class ProductMatchServiceTests(unittest.TestCase):
         self.assertTrue(ProductMatchService.valid_data_url("data:image/png;base64,YQ=="))
         self.assertFalse(ProductMatchService.valid_data_url("https://example.com/a.png"))
 
+    def test_identity_fields_must_be_strings(self):
+        with self.assertRaises(GLMError):
+            ProductMatchService.parse_result({"match_status":"matched", "candidates":[{"product_name": [], "confidence": .9}]})
+
+    def test_decision_reference_metadata_is_bounded(self):
+        result = ProductMatchService.evaluate([{"product_key":"a", "confidence": .95}], [{"product_id":"p", "product_key":"a", "product_name":"A", "reference_assets":[{"title":"https://bad/path", "reference_role":"primary", "relative_path":"/secret"}]}], "identify")
+        self.assertEqual(result["product"]["reference_assets"], [{"reference_role":"primary"}])
+
 
 if __name__ == "__main__":
     unittest.main()

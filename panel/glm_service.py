@@ -367,7 +367,10 @@ class GLMService:
                     raise GLMError("参考图片内容无效", "INVALID_REFERENCE_IMAGE") from error
                 references.append({"type": "image_url", "image_url": {"url": data_url}})
                 continue
-            data = bytes(item.get("data") or b"")
+            raw_data = item.get("data")
+            if raw_data is not None and not isinstance(raw_data, (bytes, bytearray, memoryview)):
+                raise GLMError("参考图片内容类型无效", "INVALID_REFERENCE_IMAGE")
+            data = bytes(raw_data or b"")
             declared = str(item.get("mime_type") or "").lower().strip()
             if not data or declared not in IMAGE_EXTENSIONS:
                 continue

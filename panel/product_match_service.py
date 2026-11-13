@@ -87,6 +87,8 @@ class ProductMatchService:
             item["confidence"] = confidence
             for field in ("product_name", "product_key", "sku", "variant", "evidence"):
                 if field in item:
+                    if not isinstance(item[field], str):
+                        raise GLMError("产品识别字段类型无效", "PRODUCT_MATCH_INVALID")
                     item[field] = str(item[field] or "").strip()[:500]
             cleaned.append(item)
         intent = payload.get("intent", "unknown")
@@ -176,7 +178,8 @@ class ProductMatchService:
         if product:
             safe_product = {k: str(product.get(k) or "") for k in ("product_key", "product_name", "variant")}
             safe_product["reference_assets"] = [
-                {k: str(asset.get(k) or "") for k in ("title", "caption_template", "reference_role")}
-                for asset in (product.get("reference_assets") or []) if isinstance(asset, dict)
+                {"reference_role": str(asset.get("reference_role") or "")[:32]}
+                for asset in (product.get("reference_assets") or [])
+                if isinstance(asset, dict) and str(asset.get("reference_role") or "")[:32]
             ][:4]
         return {"decision": decision, "reason_code": reason, "product": safe_product, "variant": str((top[2] or {}).get("variant") or "") if top[2] else "", "confidence": top[0], "confidence_bucket": cls.classify_confidence(top[0]), "intent": intent}
