@@ -129,6 +129,7 @@ class ProductImageService:
             connection.executescript(
                 (migration_root / "021_product_catalog.sql").read_text(encoding="utf-8")
             )
+            connection.executescript((migration_root / "022_product_image_matching.sql").read_text(encoding="utf-8"))
             columns = {
                 str(row[1])
                 for row in connection.execute("PRAGMA table_info(product_image_assets)")
@@ -499,6 +500,7 @@ class ProductImageService:
         product_name="",
         sku="",
         aliases=(),
+        product_id="", variant="", reference_role="primary", allow_visual_match=True, allow_auto_send=True,
     ):
         raw, safe_name, mime_type, extension, width, height = self._validate_bytes(
             filename, declared_type, data
@@ -926,6 +928,39 @@ class ProductImageService:
             return asset
 
 
+    def list_reference_images(self, product_id: str, variant: str = "") -> list[dict]:
+        with self._db() as c:
+            q="SELECT * FROM product_image_assets WHERE product_id=? AND active=1 AND allow_visual_match=1"; args=[str(product_id)]
+            if variant: q += " AND variant=?"; args.append(str(variant))
+            rows=c.execute(q+" ORDER BY sort_order,created_at,id",args).fetchall()
+            return [self._load_asset(c,r["id"],include_inactive=True) for r in rows]
+
+    def resolve_product_asset(self, product_id: str, variant: str = "", role: str = "primary") -> dict:
+        role=str(role or "primary").strip().casefold()
+        if role not in {"primary","reference","marketing"}: return {"status":"INVALID","code":"INVALID_REFERENCE_ROLE","candidates":[]}
+        with self._db() as c:
+            q="SELECT * FROM product_image_assets WHERE product_id=? AND active=1 AND allow_auto_send=1 AND reference_role=?"; args=[str(product_id),role]
+            if variant: q += " AND variant=?"; args.append(str(variant))
+            rows=c.execute(q+" ORDER BY sort_order,created_at,id",args).fetchall()
+            if not rows:return {"status":"NOT_FOUND","code":"NOT_FOUND","candidates":[]}
+            if len(rows)>1 and int(rows[0]["sort_order"])==int(rows[1]["sort_order"]): return {"status":"AMBIGUOUS","code":"AMBIGUOUS","candidates":[str(r["id"]) for r in rows]}
+            item=self._load_asset(c,rows[0]["id"]); item.update(status="FOUND",code="FOUND",role=role); return item
+
+    def record_match_audit(self, payload: dict) -> dict:
+        digest=str(payload.get("image_sha256") or "").strip().lower()
+        if len(digest)!=64: raise ProductImageValidationError("图片校验值无效","INVALID_AUDIT")
+        aid=str(uuid.uuid4()); now=self._now(); result=payload.get("result",{})
+        with self._db() as c: c.execute("INSERT INTO product_image_match_audits(audit_id,candidate_product_id,variant,role,mime_type,image_sha256,result_json,created_at) VALUES (?,?,?,?,?,?,?,?)",(aid,str(payload.get("candidate_product_id") or "") or None,str(payload.get("variant") or ""),str(payload.get("role") or "primary"),str(payload.get("mime_type") or ""),digest,json.dumps(result,ensure_ascii=False),now))
+        return {"audit_id":aid,"result":result,"image_sha256":digest,"created_at":now}
+
+    def match_test(self, image_bytes: bytes, mime_type: str, candidate_product_id: str | None = None) -> dict:
+        raw,_,actual,_,_,_=self._validate_bytes("match-test",mime_type,image_bytes); digest=hashlib.sha256(raw).hexdigest()
+        with self._db() as c:
+            q="SELECT * FROM product_image_assets WHERE active=1 AND allow_visual_match=1 AND sha256=?"; args=[digest]
+            if candidate_product_id:q += " AND product_id=?"; args.append(str(candidate_product_id))
+            rows=c.execute(q,args).fetchall()
+        candidates=[{"asset_id":str(r["id"]),"product_id":str(r["product_id"] or ""),"variant":str(r["variant"] or ""),"reference_role":str(r["reference_role"] or "primary")} for r in rows]
+        result={"status":"MATCHED" if candidates else "NO_MATCH","candidates":candidates,"mime_type":actual}; self.record_match_audit({"candidate_product_id":candidate_product_id,"mime_type":actual,"image_sha256":digest,"result":result}); return result
 __all__ = [
     "MAX_IMAGE_BYTES",
     "MAX_IMAGE_PIXELS",

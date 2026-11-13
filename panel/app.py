@@ -5735,7 +5735,7 @@ class PanelHandler(BaseHTTPRequestHandler):
             "asset_id", "title", "caption_template", "original_filename", "mime_type",
             "byte_size", "width", "height", "active", "is_active", "sort_order",
             "created_at", "updated_at", "tags", "product_name", "sku", "aliases",
-            "reused", "status", "code", "tag_key", "variant",
+            "reused", "status", "code", "tag_key", "variant", "product_id", "reference_role", "allow_visual_match", "allow_auto_send",
         }
         return {key: value for key, value in asset.items() if key in allowed}
 
@@ -5761,7 +5761,7 @@ class PanelHandler(BaseHTTPRequestHandler):
         if not envelope.is_multipart():
             raise ValueError("图片上传表单格式不正确")
         allowed = {
-            "title", "tags", "caption_template", "product_name", "sku", "aliases", "image"
+            "title", "tags", "caption_template", "product_name", "sku", "aliases", "product_id", "variant", "reference_role", "allow_visual_match", "allow_auto_send", "image"
         }
         values = {}
         for part in envelope.iter_parts():
@@ -5794,6 +5794,11 @@ class PanelHandler(BaseHTTPRequestHandler):
         values.setdefault("product_name", "")
         values.setdefault("sku", "")
         values.setdefault("aliases", "[]")
+        values.setdefault("product_id", "")
+        values.setdefault("variant", "")
+        values.setdefault("reference_role", "primary")
+        values.setdefault("allow_visual_match", "1")
+        values.setdefault("allow_auto_send", "1")
         try:
             tags = json.loads(values["tags"])
         except (TypeError, json.JSONDecodeError):
@@ -5845,7 +5850,7 @@ class PanelHandler(BaseHTTPRequestHandler):
             result = service.upload(
                 image["filename"], image["content_type"], image["data"],
                 form["title"], form["tags"], form.get("caption_template", ""),
-                form.get("product_name", ""), form.get("sku", ""), form.get("aliases", []),
+                form.get("product_name", ""), form.get("sku", ""), form.get("aliases", []), form.get("product_id", ""), form.get("variant", ""), form.get("reference_role", "primary"), form.get("allow_visual_match", True), form.get("allow_auto_send", True),
             )
             self.send_json(self._product_image_public(result), HTTPStatus.CREATED)
             return
@@ -5898,7 +5903,7 @@ class PanelHandler(BaseHTTPRequestHandler):
                 self.send_ui_bytes(product_image_page().encode("utf-8"), "text/html; charset=utf-8")
                 return
             if route == "/api/product-images" or route.startswith("/api/product-images/") or route in {
-                "/api/product-tags", "/api/product-image-settings",
+                "/api/product-tags", "/api/product-image-settings", "/api/product-image-match-test",
             }:
                 self.send_product_image_get(route)
                 return
