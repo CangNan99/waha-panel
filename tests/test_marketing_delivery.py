@@ -205,6 +205,92 @@ class MarketingDeliveryTests(unittest.TestCase):
         self.assertEqual(result["image_state"], "SENT")
         self.assertEqual(len(self.chat.image_calls), 1)
 
+    def test_restart_reconciles_confirmed_generic_image_transport(self):
+        reserved = self.delivery.reserve(self._base(delivery_id="delivery-image-transport"))
+        connection = sqlite3.connect(self.database)
+        try:
+            connection.execute(
+                "UPDATE marketing_deliveries SET text_state='SENT',image_state='IMAGE_PENDING',"
+                "image_request_id=?,state='IMAGE_PENDING' WHERE delivery_id=?",
+                ("image-transport-request", reserved["delivery_id"]),
+            )
+            connection.execute(
+                "INSERT INTO automated_send_requests "
+                "(client_request_id,session_name,chat_id,payload_hash,state,waha_message_id,error_code,updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                (
+                    "image-transport-request",
+                    "default",
+                    "customer@c.us",
+                    "hash",
+                    "SENT",
+                    "wamid.image-recovered",
+                    None,
+                    self.clock[0],
+                ),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        recovered = MarketingDeliveryService(
+            self.database,
+            self.chat,
+            self.images,
+            clock=lambda: self.clock[0],
+        )
+        result = recovered.reconcile("delivery-image-transport")
+        self.assertEqual(result["state"], "SENT")
+        self.assertEqual(result["image_state"], "SENT")
+        self.assertEqual(self.chat.image_calls, [])
+
+    def test_image_pending_reservation_counts_toward_daily_limit(self):
+        first = self.delivery.reserve(self._base(delivery_id="delivery-pending-limit", daily_limit=1))
+        self.assertTrue(first["reserved"])
+        connection = sqlite3.connect(self.database)
+        try:
+            connection.execute(
+                "UPDATE marketing_deliveries SET state='IMAGE_PENDING' WHERE delivery_id=?",
+                (first["delivery_id"],),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        second = self.delivery.reserve(
+            self._base(
+                delivery_id="delivery-pending-limit-2",
+                chat_key_hmac="chat-key-2",
+                daily_limit=1,
+            )
+        )
+        self.assertEqual(second["state"], "SKIPPED")
+        self.assertEqual(second["error_code"], "DAILY_LIMIT")
+
+    def test_image_switch_is_reread_after_text_confirmation(self):
+        state = {"enabled": True}
+        service = MarketingDeliveryService(
+            self.database,
+            self.chat,
+            self.images,
+            settings_loader=lambda _session: {
+                "marketing_product_image_enabled": "1" if state["enabled"] else "0",
+                "product_image_global_kill_switch": "0",
+            },
+            clock=lambda: self.clock[0],
+        )
+        original = self.chat.send_automated_text
+
+        def send_text(*args, **kwargs):
+            result = original(*args, **kwargs)
+            state["enabled"] = False
+            return result
+
+        self.chat.send_automated_text = send_text
+        result = service.send_text_and_optional_image(self._base(delivery_id="delivery-switch-race"))
+        self.assertEqual(result["text_state"], "SENT")
+        self.assertEqual(result["image_state"], "SKIPPED")
+        self.assertEqual(result["error_code"], "MARKETING_IMAGE_DISABLED")
+        self.assertEqual(self.chat.image_calls, [])
+
     def test_marketing_automation_derives_distinct_delivery_ids_per_customer(self):
         captured = []
 

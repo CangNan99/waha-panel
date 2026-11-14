@@ -1138,6 +1138,14 @@ class MarketingAutomationService:
                     "product_image_global_kill_switch": self._settings_value(settings, "product_image_global_kill_switch", False),
                     "history": history,
                 }
+                # A campaign can be paused while the action payload is being
+                # assembled.  Check immediately before entering the delivery
+                # coordinator so a pause never races into a new transport.
+                if not self._campaign_is_active(campaign["campaign_id"]):
+                    return False
+                latest_before_delivery = self._prepare_campaign_contact(session, campaign, candidate, now)
+                if not latest_before_delivery or str(latest_before_delivery.get("stage") or "").upper() not in {"ELIGIBLE", "FOLLOW_UP_DUE"}:
+                    return False
                 result = self.delivery_service.send_text_and_optional_image(delivery)
                 delivery_state = str(result.get("state") or "").upper() if isinstance(result, dict) else ""
                 if delivery_state == "SENT":

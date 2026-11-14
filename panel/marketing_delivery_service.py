@@ -433,7 +433,7 @@ class MarketingDeliveryService:
                 day_start = now - now % 86400
                 used = connection.execute(
                     "SELECT COUNT(*) FROM marketing_deliveries WHERE session_name=? AND updated_at>=? "
-                    "AND state IN ('PENDING','SENT','UNKNOWN')",
+                    "AND state IN ('PENDING','IMAGE_PENDING','SENT','UNKNOWN')",
                     (normalized["session_name"], day_start),
                 ).fetchone()[0]
                 if int(used) >= daily_limit:
@@ -543,6 +543,32 @@ class MarketingDeliveryService:
         asset["id"] = asset_id
         return asset
 
+    def _image_policy_allowed(self, delivery):
+        """Re-read image switches immediately before reserving an image."""
+        if _as_bool(delivery.get("product_image_global_kill_switch"), False):
+            return False, "GLOBAL_KILL_SWITCH"
+        if not _as_bool(delivery.get("marketing_product_image_enabled"), True):
+            return False, "MARKETING_IMAGE_DISABLED"
+        if callable(self.settings_loader):
+            try:
+                settings = self.settings_loader(str(delivery.get("session_name") or "")) or {}
+            except Exception:
+                return False, "MARKETING_SETTINGS_UNAVAILABLE"
+            if not _as_bool(settings.get("marketing_product_image_enabled"), True):
+                return False, "MARKETING_IMAGE_DISABLED"
+            if _as_bool(settings.get("product_image_global_kill_switch"), False):
+                return False, "GLOBAL_KILL_SWITCH"
+        service = self.product_image_service
+        getter = getattr(service, "settings_payload", None) if service is not None else None
+        if callable(getter):
+            try:
+                image_settings = getter() or {}
+            except Exception:
+                return False, "IMAGE_SETTINGS_UNAVAILABLE"
+            if not _as_bool(image_settings.get("auto_send_enabled"), True):
+                return False, "PRODUCT_IMAGE_DISABLED"
+        return True, ""
+
     def _send_image(self, row, delivery, explicit_reconcile=False):
         delivery_id = str(row["delivery_id"])
         if str(row["text_state"]).upper() != "SENT":
@@ -556,6 +582,15 @@ class MarketingDeliveryService:
         reason = self._stop_reason(delivery)
         if reason:
             updated = self._set(delivery_id, image_state="SKIPPED", state="SENT", error_code=reason)
+            return self._row_public(updated)
+        allowed, policy_reason = self._image_policy_allowed(delivery)
+        if not allowed:
+            updated = self._set(
+                delivery_id,
+                image_state="SKIPPED",
+                state="SENT",
+                error_code=policy_reason,
+            )
             return self._row_public(updated)
         product_id = str(row["product_id"] or "").strip()
         scope = self._scope(row["product_scope_json"])
@@ -818,6 +853,36 @@ class MarketingDeliveryService:
         image_state = str(row["image_state"]).upper()
         if image_state in {"NOT_REQUESTED", "SKIPPED", "SENT"}:
             return self._row_public(row)
+        # ProductImageService and ChatService intentionally keep separate
+        # ledgers.  If the process stopped after WAHA confirmed the image but
+        # before the product-image row was finalized, the generic automated
+        # ledger is authoritative for the transport result.
+        image_transport = self._automated_row(row["image_request_id"])
+        if image_transport:
+            transport_state = str(image_transport["state"] or "").upper()
+            if transport_state == "SENT":
+                row = self._set(
+                    delivery_id,
+                    image_state="SENT",
+                    image_message_ref=image_transport["waha_message_id"],
+                    state="SENT",
+                    error_code=None,
+                )
+                self._finish_image_ledger(
+                    row["image_request_id"],
+                    "SENT",
+                    message_ref=image_transport["waha_message_id"],
+                    session_name=delivery.get("session_name"),
+                )
+                return self._row_public(row)
+            if transport_state in {"PENDING", "UNKNOWN"} and image_state != "FAILED":
+                row = self._set(
+                    delivery_id,
+                    image_state=transport_state,
+                    state="UNKNOWN" if transport_state == "UNKNOWN" else "PENDING",
+                    error_code="IMAGE_RECOVERY_REQUIRED",
+                )
+                return self._row_public(row)
         image_ledger = self._image_ledger_row(row["image_request_id"])
         if image_ledger:
             ledger_state = str(image_ledger["state"] or "").upper()
