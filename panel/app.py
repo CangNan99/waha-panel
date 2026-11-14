@@ -830,6 +830,8 @@ def init_db(path, seed_business=True):
             Path(__file__).with_name("migrations") / "023_marketing_campaigns.sql"
         )
         connection.executescript(campaigns_migration.read_text(encoding="utf-8"))
+        _add_column_if_missing(connection, "marketing_events", "message_ref TEXT")
+        _add_column_if_missing(connection, "marketing_events", "reason_code TEXT")
         _add_column_if_missing(
             connection,
             "customer_memories",

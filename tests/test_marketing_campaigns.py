@@ -1,6 +1,7 @@
 import json
 import sqlite3
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
@@ -124,6 +125,10 @@ class MarketingCampaignTests(unittest.TestCase):
             self.service.create_campaign({"name": "x", "objective": "x", "quiet_hours": {"start": "bad"}})
         with self.assertRaises(MarketingAutomationError):
             self.service.create_campaign({"name": "x", "objective": "x", "target_rules": {"chat_ids": ["raw"]}})
+        with self.assertRaises(MarketingAutomationError):
+            self.service.create_campaign({"name": "x", "objective": "x", "target_rules": {"min_idle_days": 0}})
+        with self.assertRaises(MarketingAutomationError):
+            self.service.create_campaign({"name": "x", "objective": "x", "target_rules": {"min_idle_days": 8, "max_idle_days": 7}})
 
     def test_contact_state_transitions_are_persisted_and_terminal_guards_apply(self):
         campaign = self.service.create_campaign({"name": "跟进", "objective": "跟进", "max_touches": 2})
@@ -232,6 +237,118 @@ class MarketingCampaignTests(unittest.TestCase):
             connection.close()
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0][1], "SENT")
+
+    def test_confirmed_send_is_not_downgraded_when_contact_state_update_fails(self):
+        campaign = self.service.create_campaign({"name": "发送后状态异常", "objective": "跟进"})
+        original = self.service.transition_contact
+
+        def fail_after_send(state, event, now):
+            if event == "contacted":
+                raise RuntimeError("state write failed")
+            return original(state, event, now)
+
+        self.service.transition_contact = fail_after_send
+        self.service._last_scan.clear()
+        self.assertEqual(self.service.run_once(self.clock[0]), 1)
+        connection = sqlite3.connect(self.database)
+        try:
+            row = connection.execute(
+                "SELECT state FROM ai_marketing_send_requests WHERE session_name=? AND chat_key_hmac=?",
+                ("default", "customer-key-1"),
+            ).fetchone()
+        finally:
+            connection.close()
+        self.assertEqual(row[0], "SENT")
+
+    def test_campaign_quota_is_atomic_across_two_service_instances(self):
+        campaign = self.service.create_campaign({"name": "并发上限", "objective": "跟进"})
+        now = self.clock[0]
+        candidates = [
+            {
+                "chat_id": "customer-a@c.us",
+                "chat_key_hmac": "key-a",
+                "last_inbound_at": now - 8 * DAY,
+                "last_outbound_at": now - 9 * DAY,
+                "history": [{"timestamp": now - 8 * DAY, "from_me": False, "body": "A"}],
+            },
+            {
+                "chat_id": "customer-b@c.us",
+                "chat_key_hmac": "key-b",
+                "last_inbound_at": now - 8 * DAY,
+                "last_outbound_at": now - 9 * DAY,
+                "history": [{"timestamp": now - 8 * DAY, "from_me": False, "body": "B"}],
+            },
+        ]
+        settings = dict(self.settings)
+        settings["ai_marketing_daily_limit"] = "1"
+        chat_a = _FakeChat()
+        chat_a.candidates = [candidates[0]]
+        chat_b = _FakeChat()
+        chat_b.candidates = [candidates[1]]
+        service_a = MarketingAutomationService(
+            self.database, chat_a, settings_loader=lambda _session: dict(settings),
+            sessions_loader=lambda: ["default"],
+            message_generator=lambda *_args: ("跟进 A", "ai"), clock=lambda: self.clock[0],
+        )
+        service_b = MarketingAutomationService(
+            self.database, chat_b, settings_loader=lambda _session: dict(settings),
+            sessions_loader=lambda: ["default"],
+            message_generator=lambda *_args: ("跟进 B", "ai"), clock=lambda: self.clock[0],
+        )
+        barrier = threading.Barrier(2)
+        for service in (service_a, service_b):
+            original_count = service._daily_sent_count
+
+            def synchronized_count(session, timestamp, _original=original_count):
+                barrier.wait(timeout=5)
+                return _original(session, timestamp)
+
+            service._daily_sent_count = synchronized_count
+        results = []
+
+        def run(service):
+            results.append(service.run_once(now))
+
+        threads = [threading.Thread(target=run, args=(service_a,)), threading.Thread(target=run, args=(service_b,))]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=10)
+        self.assertEqual(sorted(results), [0, 1])
+        connection = sqlite3.connect(self.database)
+        try:
+            rows = connection.execute(
+                "SELECT chat_key_hmac,state FROM ai_marketing_send_requests WHERE session_name=?",
+                ("default",),
+            ).fetchall()
+        finally:
+            connection.close()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0][1], "SENT")
+
+    def test_campaign_pause_during_generation_prevents_send(self):
+        campaign = self.service.create_campaign({"name": "暂停竞态", "objective": "跟进"})
+
+        def generate_and_pause(*_args):
+            self.service.pause_campaign(campaign["campaign_id"], "人工暂停")
+            return "不应发送", "ai"
+
+        self.service.message_generator = generate_and_pause
+        self.service._last_scan.clear()
+        self.assertEqual(self.service.run_once(self.clock[0]), 0)
+        self.assertEqual(self.chat.sent, [])
+
+    def test_suppressed_contact_cannot_be_reset_to_eligible_by_transition(self):
+        campaign = self.service.create_campaign({"name": "状态保护", "objective": "跟进"})
+        state = self.service.transition_contact({
+            "campaign_id": campaign["campaign_id"], "session_name": "default", "chat_key_hmac": "state-protect",
+        }, "contacted", self.clock[0])
+        state = self.service.transition_contact(state, "customer_reply", self.clock[0] + 1)
+        self.assertEqual(self.service.transition_contact(state, "eligible", self.clock[0] + 2)["stage"], "REPLIED")
+        state = self.service.transition_contact(state, "human_takeover", self.clock[0] + 3)
+        self.assertEqual(self.service.transition_contact(state, "contacted", self.clock[0] + 4)["stage"], "HUMAN_HANDOFF")
+        state = self.service.transition_contact(state, "opt_out", self.clock[0] + 5)
+        self.assertEqual(self.service.transition_contact(state, "eligible", self.clock[0] + 6)["stage"], "OPTED_OUT")
 
     def test_quiet_hours_and_daily_limit_skip_campaign_contacts(self):
         campaign = self.service.create_campaign({

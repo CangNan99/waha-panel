@@ -55,6 +55,8 @@ CREATE TABLE IF NOT EXISTS marketing_events (
     event_type TEXT NOT NULL,
     product_id TEXT,
     asset_id TEXT,
+    message_ref TEXT,
+    reason_code TEXT,
     metadata_json TEXT NOT NULL DEFAULT '{}',
     created_at INTEGER NOT NULL
 );

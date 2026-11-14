@@ -111,6 +111,11 @@ class MarketingAutomationService:
         try:
             migration = Path(__file__).with_name("migrations") / "023_marketing_campaigns.sql"
             connection.executescript(migration.read_text(encoding="utf-8"))
+            existing = {str(row[1]) for row in connection.execute("PRAGMA table_info(marketing_events)")}
+            for definition in ("message_ref TEXT", "reason_code TEXT"):
+                column = definition.split(" ", 1)[0]
+                if column not in existing:
+                    connection.execute("ALTER TABLE marketing_events ADD COLUMN " + definition)
             connection.commit()
         finally:
             connection.close()
@@ -184,6 +189,18 @@ class MarketingAutomationService:
             raise MarketingAutomationError(f"{field}必须是 HH:MM", "INVALID_QUIET_HOURS")
         return text
 
+    @staticmethod
+    def _strict_int(value, field, minimum, maximum):
+        try:
+            parsed = int(str(value).strip())
+        except (TypeError, ValueError) as error:
+            raise MarketingAutomationError(f"{field}必须是整数", "INVALID_CAMPAIGN_RULE") from error
+        if not minimum <= parsed <= maximum:
+            raise MarketingAutomationError(
+                f"{field}必须在 {minimum}-{maximum} 之间", "INVALID_CAMPAIGN_RULE"
+            )
+        return parsed
+
     @classmethod
     def _validate_target_rules(cls, value):
         rules = cls._json_object(value, "目标规则", {})
@@ -197,11 +214,11 @@ class MarketingAutomationService:
             if key in rules:
                 rules[key] = cls._json_list(rules.get(key), key)
         if "idle_days" in rules:
-            rules["idle_days"] = _bounded_int(rules.get("idle_days"), 7, 1, 365)
+            rules["idle_days"] = cls._strict_int(rules.get("idle_days"), "空闲天数", 1, 365)
         if "min_idle_days" in rules:
-            rules["min_idle_days"] = _bounded_int(rules.get("min_idle_days"), 1, 1, 365)
+            rules["min_idle_days"] = cls._strict_int(rules.get("min_idle_days"), "最小空闲天数", 1, 365)
         if "max_idle_days" in rules:
-            rules["max_idle_days"] = _bounded_int(rules.get("max_idle_days"), 365, 1, 3650)
+            rules["max_idle_days"] = cls._strict_int(rules.get("max_idle_days"), "最大空闲天数", 1, 3650)
         if "min_idle_days" in rules and "max_idle_days" in rules and rules["min_idle_days"] > rules["max_idle_days"]:
             raise MarketingAutomationError("目标空闲天数范围无效", "INVALID_CAMPAIGN_RULE")
         return rules
@@ -308,6 +325,10 @@ class MarketingAutomationService:
         finally:
             if own:
                 connection.close()
+
+    def _campaign_is_active(self, campaign_id):
+        campaign = self._campaign(campaign_id)
+        return bool(campaign and campaign.get("active"))
 
     def create_campaign(self, payload):
         prepared = self._campaign_payload(payload)
@@ -444,19 +465,21 @@ class MarketingAutomationService:
         ).fetchone()
         return self._state_row(row)
 
-    def _record_event(self, state, event_type, now, connection, product_id=None, metadata=None):
+    def _record_event(self, state, event_type, now, connection, product_id=None,
+                      metadata=None, message_ref=None, reason_code=None):
         payload = metadata if isinstance(metadata, dict) else {}
         try:
             encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True)
         except (TypeError, ValueError):
             encoded = "{}"
         connection.execute(
-            "INSERT INTO marketing_events(event_id,campaign_id,session_name,chat_key_hmac,event_type,product_id,asset_id,metadata_json,created_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO marketing_events(event_id,campaign_id,session_name,chat_key_hmac,event_type,product_id,asset_id,"
+            "message_ref,reason_code,metadata_json,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
             (
                 uuid.uuid4().hex, state["campaign_id"], state["session_name"], state["chat_key_hmac"],
                 str(event_type)[:80], str(product_id or state.get("interest_product_id") or "")[:200] or None,
-                None, encoded, int(now),
+                None, str(message_ref or "")[:256] or None,
+                str(reason_code or "")[:80] or None, encoded, int(now),
             ),
         )
 
@@ -490,6 +513,15 @@ class MarketingAutomationService:
             # Opt-out, customer replies and human handoff are suppression events;
             # only a matching resume can move a paused contact back to ELIGIBLE.
             if opt_out and canonical != "opt_out":
+                connection.commit()
+                return current
+            guarded_events = {
+                "REPLIED": {"customer_reply", "qualified", "human_takeover", "pause", "opt_out", "complete"},
+                "QUALIFIED": {"qualified", "human_takeover", "pause", "opt_out", "complete"},
+                "HUMAN_HANDOFF": {"resume", "pause", "opt_out", "complete"},
+                "PAUSED": {"resume", "pause", "opt_out", "complete"},
+            }
+            if stage in guarded_events and canonical not in guarded_events[stage]:
                 connection.commit()
                 return current
             if stage in {"OPTED_OUT", "COMPLETED"} and canonical not in {"opt_out", "complete"}:
@@ -663,7 +695,24 @@ class MarketingAutomationService:
         finally:
             connection.close()
 
-    def _reserve(self, session, chat_key, campaign_key, message, now):
+    @classmethod
+    def _quota_reached(cls, connection, session, now, daily_limit):
+        if daily_limit is None:
+            return False
+        try:
+            limit = int(daily_limit)
+        except (TypeError, ValueError):
+            return False
+        if limit <= 0:
+            return True
+        row = connection.execute(
+            "SELECT COUNT(*) FROM ai_marketing_send_requests "
+            "WHERE session_name=? AND updated_at>=? AND state IN ('SENT','PENDING','UNKNOWN')",
+            (str(session), cls._day_start(now)),
+        ).fetchone()
+        return int(row[0] if row else 0) >= limit
+
+    def _reserve(self, session, chat_key, campaign_key, message, now, daily_limit=None):
         message_hash = hashlib.sha256(str(message).encode("utf-8")).hexdigest()
         base_request_id = self._request_id(session, chat_key, campaign_key)
         connection = self._connect()
@@ -706,6 +755,9 @@ class MarketingAutomationService:
                 if self._now(now) - int(row["updated_at"] or 0) < MARKETING_RETRY_SECONDS:
                     connection.commit()
                     return {"state": state, "request_id": row["client_request_id"]}
+                if self._quota_reached(connection, session, now, daily_limit):
+                    connection.commit()
+                    return {"state": "QUOTA_EXCEEDED", "request_id": row["client_request_id"]}
                 request_id = self._request_id(session, chat_key, campaign_key, now)
                 connection.execute(
                     "UPDATE ai_marketing_send_requests SET client_request_id=?,message_hash=?,"
@@ -714,6 +766,9 @@ class MarketingAutomationService:
                 )
                 connection.commit()
                 return {"state": "PENDING", "request_id": request_id, "row_id": int(row["id"])}
+            if self._quota_reached(connection, session, now, daily_limit):
+                connection.commit()
+                return {"state": "QUOTA_EXCEEDED", "request_id": None}
             cursor = connection.execute(
                 "INSERT INTO ai_marketing_send_requests "
                 "(session_name,chat_key_hmac,campaign_key,client_request_id,message_hash,state,"
@@ -778,13 +833,26 @@ class MarketingAutomationService:
         return minute >= start or minute < end
 
     @staticmethod
-    def _candidate_target_matches(candidate, campaign, session):
+    def _candidate_target_matches(candidate, campaign, session, now=None):
         rules = campaign.get("target_rules") if isinstance(campaign, dict) else {}
         if not isinstance(rules, dict):
             return True
         sessions = rules.get("sessions") or []
         if sessions and str(session) not in {str(item) for item in sessions}:
             return False
+        if now is not None and (rules.get("min_idle_days") is not None or rules.get("max_idle_days") is not None):
+            try:
+                latest_activity = max(
+                    int(candidate.get("last_inbound_at") or 0),
+                    int(candidate.get("last_outbound_at") or 0),
+                )
+                idle_days = max(0.0, (int(now) - latest_activity) / float(DAY_SECONDS))
+            except (TypeError, ValueError):
+                return False
+            if rules.get("min_idle_days") is not None and idle_days < int(rules["min_idle_days"]):
+                return False
+            if rules.get("max_idle_days") is not None and idle_days > int(rules["max_idle_days"]):
+                return False
         if rules.get("include_labels") or rules.get("labels"):
             expected = {str(item).casefold() for item in (rules.get("include_labels") or rules.get("labels") or [])}
             labels = {str(item).casefold() for item in (candidate.get("labels") or [])}
@@ -876,8 +944,8 @@ class MarketingAutomationService:
             return None
         return state
 
-    def _process_campaign_candidate(self, session, candidate, settings, campaign, now):
-        if not isinstance(candidate, dict) or not self._candidate_target_matches(candidate, campaign, session):
+    def _process_campaign_candidate(self, session, candidate, settings, campaign, now, daily_limit=None):
+        if not isinstance(candidate, dict) or not self._candidate_target_matches(candidate, campaign, session, now):
             return False
         if self._quiet_hours_active(campaign, now):
             return False
@@ -905,8 +973,11 @@ class MarketingAutomationService:
         if mode not in {"ai", "glm_vision"} or not message or len(message) > MARKETING_MAX_MESSAGE_CHARS:
             return False
         request_id = None
+        send_confirmed = False
         try:
             # Re-check reply, opt-out and takeover before reserving this touch.
+            if not self._campaign_is_active(campaign["campaign_id"]):
+                return False
             refreshed = self._prepare_campaign_contact(session, campaign, candidate, now)
             if not refreshed or str(refreshed.get("stage") or "").upper() not in {"ELIGIBLE", "FOLLOW_UP_DUE"}:
                 return False
@@ -915,12 +986,17 @@ class MarketingAutomationService:
             # month component would create a second ledger row when a pending
             # or failed touch is retried after midnight on the first day.
             campaign_key = f"campaign:{campaign['campaign_id']}:touch:{touch_number}"
-            reservation = self._reserve(session, chat_key, campaign_key, message, now)
+            reservation = self._reserve(
+                session, chat_key, campaign_key, message, now, daily_limit=daily_limit
+            )
             if reservation["state"] != "PENDING":
                 return False
             request_id = reservation["request_id"]
             # A second check closes the reservation-to-send race.  A concurrent
             # worker may have moved this contact to a terminal/suppressed stage.
+            if not self._campaign_is_active(campaign["campaign_id"]):
+                self._finish(request_id, "FAILED", now, "MARKETING_STOPPED")
+                return False
             latest = self._prepare_campaign_contact(session, campaign, candidate, now)
             if not latest or str(latest.get("stage") or "").upper() not in {"ELIGIBLE", "FOLLOW_UP_DUE"}:
                 self._finish(request_id, "FAILED", now, "MARKETING_STOPPED")
@@ -931,6 +1007,10 @@ class MarketingAutomationService:
                 code = "WAHA_SEND_UNKNOWN" if state_name == "UNKNOWN" else "WAHA_SEND_FAILED"
                 self._finish(request_id, "UNKNOWN" if state_name == "UNKNOWN" else "FAILED", now, code)
                 return False
+            # Once the transport confirms SENT, never downgrade the delivery
+            # to FAILED because a later contact-state write failed.  Leaving
+            # the ledger SENT lets the next scan reconcile the contact safely.
+            send_confirmed = True
             self._finish(request_id, "SENT", now, message_ref=(result.get("message_ref") if isinstance(result, dict) else None))
             self.transition_contact(latest, "contacted", now)
             self._safe_log("INFO", "marketing.sent", "已发送一条活动营销消息", session)
@@ -941,8 +1021,11 @@ class MarketingAutomationService:
             code = str(getattr(error, "code", "") or "")
             if not re.fullmatch(r"[A-Za-z0-9_.-]{1,80}", code):
                 code = "WAHA_SEND_UNKNOWN" if state_name == "UNKNOWN" else "WAHA_SEND_FAILED"
-            if request_id:
+            if request_id and not send_confirmed:
                 self._finish(request_id, state_name, now, code)
+            if send_confirmed:
+                self._safe_log("WARN", "marketing.contact_state_failed", "营销消息已发送，但客户状态更新未完成，保留已发送账本", session)
+                return True
             self._safe_log("WARN", "marketing.send_failed", "活动营销消息发送未完成", session)
             return False
 
@@ -958,11 +1041,12 @@ class MarketingAutomationService:
         for candidate in candidates if isinstance(candidates, list) else []:
             if sent >= remaining:
                 break
-            if self._process_campaign_candidate(session, candidate, settings, campaign, now):
+            if self._process_campaign_candidate(
+                    session, candidate, settings, campaign, now, daily_limit=remaining):
                 sent += 1
         return sent
 
-    def _process_candidate(self, session, candidate, settings, campaign_key, now):
+    def _process_candidate(self, session, candidate, settings, campaign_key, now, daily_limit=None):
         if not isinstance(candidate, dict):
             return False
         marketing_images_enabled = str(self._settings_value(settings, "marketing_product_image_enabled", True)).strip().casefold() in {"1", "true", "yes", "on", "enabled"}
@@ -1006,7 +1090,9 @@ class MarketingAutomationService:
             return False
         if mode not in {"ai", "glm_vision"} or not message or len(message) > MARKETING_MAX_MESSAGE_CHARS:
             return False
-        reservation = self._reserve(session, chat_key, campaign_key, message, now)
+        reservation = self._reserve(
+            session, chat_key, campaign_key, message, now, daily_limit=daily_limit
+        )
         if reservation["state"] != "PENDING":
             return False
         request_id = reservation["request_id"]
@@ -1082,7 +1168,8 @@ class MarketingAutomationService:
         for candidate in candidates if isinstance(candidates, list) else []:
             if used + sent >= daily_limit:
                 break
-            if self._process_candidate(name, candidate, settings, campaign_key, now):
+            if self._process_candidate(
+                    name, candidate, settings, campaign_key, now, daily_limit=daily_limit):
                 sent += 1
         return sent
 
