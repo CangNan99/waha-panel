@@ -4,7 +4,7 @@
 
 ## 界面预览
 
-1.0.27 adds account-scoped AI marketing automation on top of the 1.0.26 GLM multimodal, customer statistics, product-image matching, and customer-image preview work. The screenshots below use demonstration data.
+1.0.28 adds product-catalog image recognition, policy-controlled image delivery, and account-scoped AI marketing automation on top of the 1.0.27 release. The screenshots below use demonstration data.
 
 ![状态概览](docs/assets/overview-1.0.15.png)
 
@@ -91,6 +91,7 @@ pwsh -File .\update.ps1 -Component waha
 
 | 版本 | 更新内容 | 详细说明 |
 | --- | --- | --- |
+| 1.0.28 | Added product catalog image recognition, customer-image matching, policy-controlled chat and marketing image delivery, and the AI profile test-route fix. | [docs/releases/1.0.28.md](docs/releases/1.0.28.md) |
 | 1.0.27 | Added account-scoped AI marketing scans with pause controls, daily caps, cooldowns, opt-out checks, and idempotent delivery on top of the 1.0.26 multimodal and chat-management release. | [docs/releases/1.0.27.md](docs/releases/1.0.27.md) |
 | 1.0.26 | Added encrypted GLM capability profiles, customer-image auto-reply, vision reasoning, image generation preview/send, and bounded image delivery. | [docs/releases/1.0.26.md](docs/releases/1.0.26.md) |
 | 1.0.25 | Added the administrator product image library, strict tag matching, direct AI image sending, daily limits, UNKNOWN no-retry handling, and coupled backups. | [docs/releases/1.0.25.md](docs/releases/1.0.25.md) |
@@ -138,6 +139,6 @@ pwsh -File .\backup.ps1
 当前镜像版本：
 
 - `devlikeapro/waha:latest-2026.9.1`
-- `docker.io/cangnan88/waha-panel:1.0.27`
+- `docker.io/cangnan88/waha-panel:1.0.28`
 
 如需域名访问，只反代到面板端口 `127.0.0.1:3003`。WAHA API 端口 `3002` 默认不应公开。请在反向代理层启用 HTTPS，并确保代理不会记录 `Authorization`、APIKey 或密码字段。

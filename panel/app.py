@@ -1186,7 +1186,7 @@ class PanelState:
         self.product_match = ProductMatchService()
         self._admin_db_auth = as_bool(os.environ.get("PANEL_ADMIN_DB_AUTH", "0"))
         self._update_service = UpdateService(
-            current_panel=os.environ.get("PANEL_VERSION", "1.0.26"),
+            current_panel=os.environ.get("PANEL_VERSION", "1.0.28"),
             current_waha=os.environ.get("WAHA_IMAGE_TAG", "latest-2026.9.1"),
         )
         self.sleep_fn = sleep_fn or time.sleep
