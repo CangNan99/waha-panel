@@ -1374,6 +1374,7 @@ class PanelState:
             clock=self.clock,
             delivery_service=self.marketing_delivery,
         )
+        self.marketing_delivery.marketing_service = self.marketing
         self.automation = ChatAutomationService(
             self.database_path,
             self.chat,

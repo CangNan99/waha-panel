@@ -243,6 +243,44 @@ class MarketingDeliveryTests(unittest.TestCase):
         self.assertEqual(result["image_state"], "SENT")
         self.assertEqual(self.chat.image_calls, [])
 
+    def test_reconcile_syncs_confirmed_product_image_failure_and_retries(self):
+        reserved = self.delivery.reserve(self._base(delivery_id="delivery-image-failed"))
+        connection = sqlite3.connect(self.database)
+        try:
+            connection.execute(
+                "UPDATE marketing_deliveries SET text_state='SENT',image_state='IMAGE_PENDING',"
+                "image_request_id=?,state='IMAGE_PENDING' WHERE delivery_id=?",
+                ("image-failed-request", reserved["delivery_id"]),
+            )
+            connection.execute(
+                "INSERT INTO product_image_send_requests "
+                "(request_id,session_name,chat_key_hmac,message_key,asset_id,tag_key,caption_hash,payload_hash,state,waha_message_id,error_code,created_at,updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    "image-failed-request",
+                    "default",
+                    "chat-key",
+                    "delivery-image-failed:image",
+                    "asset-1",
+                    "product-1",
+                    "caption-hash",
+                    "payload-hash",
+                    "FAILED",
+                    None,
+                    "WAHA_SEND_FAILED",
+                    self.clock[0],
+                    self.clock[0],
+                ),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        self.chat.image_state = "SENT"
+        result = self.delivery.reconcile("delivery-image-failed")
+        self.assertEqual(result["state"], "SENT")
+        self.assertEqual(result["image_state"], "SENT")
+        self.assertEqual(len(self.chat.image_calls), 1)
+
     def test_image_pending_reservation_counts_toward_daily_limit(self):
         first = self.delivery.reserve(self._base(delivery_id="delivery-pending-limit", daily_limit=1))
         self.assertTrue(first["reserved"])
@@ -290,6 +328,44 @@ class MarketingDeliveryTests(unittest.TestCase):
         self.assertEqual(result["image_state"], "SKIPPED")
         self.assertEqual(result["error_code"], "MARKETING_IMAGE_DISABLED")
         self.assertEqual(self.chat.image_calls, [])
+
+    def test_campaign_pause_is_checked_at_delivery_boundary(self):
+        result = self.delivery.send_text_and_optional_image(
+            self._base(
+                delivery_id="delivery-paused",
+                campaign_active_checker=lambda _campaign_id: False,
+            )
+        )
+        self.assertEqual(result["state"], "STOPPED")
+        self.assertEqual(result["error_code"], "MARKETING_PAUSED")
+        self.assertEqual(self.chat.text_calls, [])
+
+    def test_image_policy_is_checked_again_after_preview(self):
+        state = {"enabled": True}
+        service = MarketingDeliveryService(
+            self.database,
+            self.chat,
+            self.images,
+            settings_loader=lambda _session: {
+                "marketing_product_image_enabled": "1" if state["enabled"] else "0",
+                "product_image_global_kill_switch": "0",
+            },
+            clock=lambda: self.clock[0],
+        )
+        original_preview = self.images.preview
+
+        def preview(asset_id):
+            mime, data = original_preview(asset_id)
+            state["enabled"] = False
+            return mime, data
+
+        self.images.preview = preview
+        result = service.send_text_and_optional_image(self._base(delivery_id="delivery-preview-race"))
+        self.assertEqual(result["state"], "SENT")
+        self.assertEqual(result["image_state"], "SKIPPED")
+        self.assertEqual(result["error_code"], "MARKETING_IMAGE_DISABLED")
+        self.assertEqual(self.chat.image_calls, [])
+        self.assertEqual(self.images.finishes[-1][1], "FAILED")
 
     def test_marketing_automation_derives_distinct_delivery_ids_per_customer(self):
         captured = []

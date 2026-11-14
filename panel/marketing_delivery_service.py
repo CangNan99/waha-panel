@@ -296,6 +296,24 @@ class MarketingDeliveryService:
             return "STOP_CHECK_FAILED"
         return ""
 
+    def _campaign_active(self, delivery):
+        """Re-check campaign activity at the transport boundary."""
+        campaign_id = str(delivery.get("campaign_id") or "").strip()
+        checker = delivery.get("campaign_active_checker")
+        if callable(checker):
+            try:
+                return bool(checker(campaign_id))
+            except Exception:
+                return False
+        service = self.marketing_service
+        method = getattr(service, "_campaign_is_active", None) if service is not None else None
+        if callable(method) and campaign_id and campaign_id != "legacy":
+            try:
+                return bool(method(campaign_id))
+            except Exception:
+                return False
+        return True
+
     def _skip_payload(self, delivery, state, reason):
         delivery_id = self._safe_id(delivery["delivery_id"], "delivery_id")
         now = self._now()
@@ -678,6 +696,19 @@ class MarketingDeliveryService:
             return self._row_public(updated)
         try:
             mime, data = preview(asset.get("id"))
+            # Re-read all image switches after the asset is loaded and right
+            # before invoking WAHA.  A kill switch change during file I/O must
+            # prevent the transport call as well as mark the reservation safe.
+            allowed, policy_reason = self._image_policy_allowed(delivery)
+            if not allowed:
+                self._finish_image_ledger(request_id, "FAILED", error_code=policy_reason)
+                updated = self._set(
+                    delivery_id,
+                    image_state="SKIPPED",
+                    state="SENT",
+                    error_code=policy_reason,
+                )
+                return self._row_public(updated)
             sender = getattr(self.chat_service, "send_automated_image")
             try:
                 result = sender(
@@ -765,6 +796,15 @@ class MarketingDeliveryService:
         reason = self._stop_reason(runtime)
         if reason:
             updated = self._set(delivery_id, text_state="SKIPPED", image_state="SKIPPED", state="STOPPED", error_code=reason)
+            return self._row_public(updated)
+        if not self._campaign_active(runtime):
+            updated = self._set(
+                delivery_id,
+                text_state="SKIPPED",
+                image_state="SKIPPED",
+                state="STOPPED",
+                error_code="MARKETING_PAUSED",
+            )
             return self._row_public(updated)
         sender = getattr(self.chat_service, "send_automated_text", None)
         if not callable(sender):
@@ -883,6 +923,14 @@ class MarketingDeliveryService:
                     error_code="IMAGE_RECOVERY_REQUIRED",
                 )
                 return self._row_public(row)
+            if transport_state == "FAILED":
+                row = self._set(
+                    delivery_id,
+                    image_state="FAILED",
+                    state="FAILED",
+                    error_code=image_transport["error_code"] or "WAHA_SEND_FAILED",
+                )
+                image_state = "FAILED"
         image_ledger = self._image_ledger_row(row["image_request_id"])
         if image_ledger:
             ledger_state = str(image_ledger["state"] or "").upper()
@@ -898,6 +946,14 @@ class MarketingDeliveryService:
             if ledger_state in {"PENDING", "UNKNOWN"}:
                 row = self._set(delivery_id, image_state=ledger_state, state="UNKNOWN" if ledger_state == "UNKNOWN" else "PENDING", error_code="IMAGE_RECOVERY_REQUIRED")
                 return self._row_public(row)
+            if ledger_state == "FAILED":
+                row = self._set(
+                    delivery_id,
+                    image_state="FAILED",
+                    state="FAILED",
+                    error_code=image_ledger["error_code"] or "IMAGE_SEND_FAILED",
+                )
+                image_state = "FAILED"
         if image_state == "FAILED":
             if not delivery.get("chat_id") and text_ledger:
                 delivery["session_name"] = text_ledger["session_name"]

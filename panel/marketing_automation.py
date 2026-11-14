@@ -1137,6 +1137,7 @@ class MarketingAutomationService:
                     "marketing_product_image_enabled": self._settings_value(settings, "marketing_product_image_enabled", True),
                     "product_image_global_kill_switch": self._settings_value(settings, "product_image_global_kill_switch", False),
                     "history": history,
+                    "campaign_active_checker": self._campaign_is_active,
                 }
                 # A campaign can be paused while the action payload is being
                 # assembled.  Check immediately before entering the delivery
