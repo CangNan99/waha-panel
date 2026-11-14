@@ -6,14 +6,20 @@ import { checkInlineScripts } from '../scripts/check_frontend_syntax.mjs';
 
 const appSource = await readFile(new URL('../panel/app.py', import.meta.url), 'utf8');
 const productImageSource = await readFile(new URL('../panel/product_image_page.py', import.meta.url), 'utf8');
+const marketingSource = await readFile(new URL('../panel/marketing_page.py', import.meta.url), 'utf8');
 const chatSource = await readFile(new URL('../panel/chat_page.py', import.meta.url), 'utf8');
 const overviewSource = await readFile(new URL('../panel/static/views/overview.js', import.meta.url), 'utf8');
 const scripts = [...appSource.matchAll(/<script>\s*([\s\S]*?)\s*<\/script>/g)];
 
 
-test('product image library exposes roles, variants, flags, search, and non-sending diagnostics', () => {
-  for (const token of ['productId','variant','allowVisual','allowAuto','reference_role','matchForm','product-image-match-test']) assert.match(productImageSource, new RegExp(token));
+test('product image library exposes roles, variants, catalog CRUD, flags, search, and non-sending diagnostics', () => {
+  for (const token of ['productId','variant','allowVisual','allowAuto','reference_role','matchForm','product-image-match-test','productForm','catalogKey','confidenceThreshold','cooldownSeconds','shadowMode']) assert.match(productImageSource, new RegExp(token));
   assert.match(productImageSource, /不会发送 WhatsApp/);
+});
+
+test('marketing administration page exposes campaign controls and valid inline JavaScript', () => {
+  for (const token of ['campaignForm','allowImageSend','marketing/campaigns','pause','resume','contacts','product_image_global_kill_switch']) assert.match(marketingSource, new RegExp(token));
+  assert.doesNotThrow(() => checkInlineScripts(marketingSource, 'panel/marketing_page.py'));
 });
 
 test('product image search and match diagnostics wire real browser behavior', async () => {
@@ -33,7 +39,7 @@ test('product image search and match diagnostics wire real browser behavior', as
     nodes.set(id, node);
     return node;
   };
-  for (const id of ['tagFilter', 'productSearch', 'assets', 'tagList', 'autoSend', 'dailyLimit', 'matchForm', 'matchImage', 'matchProduct', 'matchNotice', 'uploadNotice', 'settingsNotice', 'newTag']) makeNode(id);
+  for (const id of ['tagFilter', 'productSearch', 'assets', 'tagList', 'autoSend', 'dailyLimit', 'confidenceThreshold', 'cooldownSeconds', 'shadowMode', 'matchForm', 'matchImage', 'matchProduct', 'matchNotice', 'uploadNotice', 'settingsNotice', 'newTag', 'catalogItems', 'productForm', 'catalogKey', 'catalogName', 'catalogSku', 'catalogAliases', 'catalogDescription', 'catalogAiImage', 'catalogMarketingImage', 'catalogReset', 'catalogNotice']) makeNode(id);
   const response = (payload) => ({
     ok: true,
     headers: { get: () => 'application/json' },
@@ -49,7 +55,8 @@ test('product image search and match diagnostics wire real browser behavior', as
     if (url === '/api/security/csrf') return response({ csrf_token: 'fixture-csrf' });
     if (url.startsWith('/api/product-images?')) return response({ items: [], total: 0 });
     if (url === '/api/product-tags') return response({ items: [] });
-    if (url === '/api/product-image-settings') return response({ auto_send_enabled: true, daily_limit: 20 });
+    if (url.startsWith('/api/product-image-settings')) return response({ auto_send_enabled: true, daily_limit: 20, product_image_confidence_threshold: 0.85, product_image_cooldown_seconds: 0 });
+    if (url.startsWith('/api/product-catalog')) return response({ items: [], total: 0 });
     if (url === '/api/product-image-match-test') return response({ status: 'MATCHED', candidates: [{ asset_id: 'asset-1' }] });
     throw new Error(`unexpected fetch ${url}`);
   };

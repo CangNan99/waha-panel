@@ -105,14 +105,15 @@ try:
         sanitize_context_content,
     )
     from .chat_automation import ChatAutomationService
-    from .marketing_automation import DEFAULT_MARKETING_PROMPT, MarketingAutomationService
+    from .marketing_automation import DEFAULT_MARKETING_PROMPT, MarketingAutomationError, MarketingAutomationService
     from .marketing_delivery_service import MarketingDeliveryService
     from .chat_page import chat_management_page
     from .glm_service import GLMError, GLMService, GeneratedImageStore
     from .product_image_service import ProductImageService
-    from .product_catalog_service import ProductCatalogService
+    from .product_catalog_service import ProductCatalogError, ProductCatalogService
     from .product_match_service import ProductMatchService
     from .product_image_page import product_image_page
+    from .marketing_page import marketing_page
     from .product_image_service import ProductImageError, normalize_tag
     from .customer_memory_service import CustomerMemoryService
     from .aliyun_translation_service import AliyunTranslationError, AliyunTranslationService
@@ -159,14 +160,15 @@ except ImportError:  # Supports the existing `python app.py` container entrypoin
         sanitize_context_content,
     )
     from chat_automation import ChatAutomationService
-    from marketing_automation import DEFAULT_MARKETING_PROMPT, MarketingAutomationService
+    from marketing_automation import DEFAULT_MARKETING_PROMPT, MarketingAutomationError, MarketingAutomationService
     from marketing_delivery_service import MarketingDeliveryService
     from chat_page import chat_management_page
     from glm_service import GLMError, GLMService, GeneratedImageStore
     from product_image_service import ProductImageService
-    from product_catalog_service import ProductCatalogService
+    from product_catalog_service import ProductCatalogError, ProductCatalogService
     from product_match_service import ProductMatchService
     from product_image_page import product_image_page
+    from marketing_page import marketing_page
     from product_image_service import ProductImageError, normalize_tag
     from customer_memory_service import CustomerMemoryService
     from aliyun_translation_service import AliyunTranslationError, AliyunTranslationService
@@ -212,6 +214,9 @@ DEFAULT_SETTINGS = {
     "customer_image_recognition_enabled": "1",
     "chat_product_image_enabled": "1",
     "marketing_product_image_enabled": "1",
+    "product_image_shadow_mode": "0",
+    "product_image_confidence_threshold": "0.85",
+    "product_image_cooldown_seconds": "0",
     "product_image_global_kill_switch": "0",
     "auto_reply_media_types": json.dumps(
         {"image": False, "video": False, "audio": False, "file": False},
@@ -244,6 +249,10 @@ MARKETING_IDLE_DAYS_MIN = 1
 MARKETING_IDLE_DAYS_MAX = 365
 MARKETING_DAILY_LIMIT_MIN = 1
 MARKETING_DAILY_LIMIT_MAX = 1000
+PRODUCT_IMAGE_CONFIDENCE_MIN = 0.0
+PRODUCT_IMAGE_CONFIDENCE_MAX = 1.0
+PRODUCT_IMAGE_COOLDOWN_MIN = 0
+PRODUCT_IMAGE_COOLDOWN_MAX = 30 * 24 * 60 * 60
 MARKETING_SCAN_INTERVAL_MIN = 5
 MARKETING_SCAN_INTERVAL_MAX = 1440
 MARKETING_COOLDOWN_DAYS_MIN = 1
@@ -1989,6 +1998,22 @@ class PanelState:
         )
         return result
 
+    @staticmethod
+    def _normalize_product_image_confidence(value, default=0.85):
+        try:
+            parsed = float(str(value).strip())
+        except (TypeError, ValueError):
+            parsed = float(default)
+        return round(max(PRODUCT_IMAGE_CONFIDENCE_MIN, min(PRODUCT_IMAGE_CONFIDENCE_MAX, parsed)), 4)
+
+    @staticmethod
+    def _normalize_product_image_cooldown(value, default=0):
+        try:
+            parsed = int(str(value).strip())
+        except (TypeError, ValueError):
+            parsed = int(default)
+        return max(PRODUCT_IMAGE_COOLDOWN_MIN, min(PRODUCT_IMAGE_COOLDOWN_MAX, parsed))
+
     def settings_payload(self, session_name=DEFAULT_SESSION_NAME):
         name = normalize_session_name(session_name)
         values = self._settings(name)
@@ -2028,6 +2053,13 @@ class PanelState:
             "customer_image_recognition_enabled": as_bool(values.get("customer_image_recognition_enabled", "1")),
             "chat_product_image_enabled": as_bool(values.get("chat_product_image_enabled", "1")),
             "marketing_product_image_enabled": as_bool(values.get("marketing_product_image_enabled", "1")),
+            "product_image_shadow_mode": as_bool(values.get("product_image_shadow_mode", "0")),
+            "product_image_confidence_threshold": self._normalize_product_image_confidence(
+                values.get("product_image_confidence_threshold", "0.85")
+            ),
+            "product_image_cooldown_seconds": self._normalize_product_image_cooldown(
+                values.get("product_image_cooldown_seconds", "0")
+            ),
             "product_image_global_kill_switch": as_bool(values.get("product_image_global_kill_switch", "0")),
             "auto_reply_media_types": normalize_media_types(
                 values.get("auto_reply_media_types", DEFAULT_AUTO_REPLY_MEDIA_TYPES)
@@ -2126,9 +2158,26 @@ class PanelState:
             updates["product_image_auto_send_enabled"] = (
                 "1" if as_bool(payload["product_image_auto_send_enabled"]) else "0"
             )
-        for key in ("customer_image_recognition_enabled", "chat_product_image_enabled", "marketing_product_image_enabled", "product_image_global_kill_switch"):
+        for key in ("customer_image_recognition_enabled", "chat_product_image_enabled", "marketing_product_image_enabled", "product_image_shadow_mode", "product_image_global_kill_switch"):
             if key in payload:
                 updates[key] = "1" if as_bool(payload[key]) else "0"
+        if "product_image_confidence_threshold" in payload:
+            raw_confidence = payload["product_image_confidence_threshold"]
+            try:
+                confidence = float(str(raw_confidence).strip())
+            except (TypeError, ValueError) as error:
+                raise ValueError("图片匹配置信度必须是 0 至 1 的数字") from error
+            if not PRODUCT_IMAGE_CONFIDENCE_MIN <= confidence <= PRODUCT_IMAGE_CONFIDENCE_MAX:
+                raise ValueError("图片匹配置信度必须是 0 至 1 的数字")
+            updates["product_image_confidence_threshold"] = str(round(confidence, 4))
+        if "product_image_cooldown_seconds" in payload:
+            try:
+                cooldown = int(str(payload["product_image_cooldown_seconds"]).strip())
+            except (TypeError, ValueError) as error:
+                raise ValueError("图片发送冷却时间必须是整数秒") from error
+            if not PRODUCT_IMAGE_COOLDOWN_MIN <= cooldown <= PRODUCT_IMAGE_COOLDOWN_MAX:
+                raise ValueError("图片发送冷却时间超出范围")
+            updates["product_image_cooldown_seconds"] = str(cooldown)
         if "ai_marketing_enabled" in payload:
             updates["ai_marketing_enabled"] = (
                 "1" if as_bool(payload["ai_marketing_enabled"]) else "0"
@@ -6199,10 +6248,15 @@ class PanelHandler(BaseHTTPRequestHandler):
             query = parse_qs(urlparse(self.path).query, keep_blank_values=True)
             session = query.get("session", [DEFAULT_SESSION_NAME])[0]
             payload = service.settings_payload()
-            payload.update({key: self.state.settings_payload(session)[key] for key in (
-                "customer_image_recognition_enabled", "chat_product_image_enabled",
-                "marketing_product_image_enabled", "product_image_global_kill_switch",
-            )})
+            # Preserve the legacy no-query response for older integrations;
+            # session-scoped reads receive the complete policy payload.
+            if "session" in query:
+                payload.update({key: self.state.settings_payload(session)[key] for key in (
+                    "customer_image_recognition_enabled", "chat_product_image_enabled",
+                    "marketing_product_image_enabled", "product_image_shadow_mode",
+                    "product_image_confidence_threshold", "product_image_cooldown_seconds",
+                    "product_image_global_kill_switch",
+                )})
             self.send_json(payload)
             return
         raise ValueError("产品图片查询路径不正确")
@@ -6281,7 +6335,12 @@ class PanelHandler(BaseHTTPRequestHandler):
         if route == "/api/product-image-settings":
             payload = self.read_api_json()
             result = service.save_settings(payload)
-            policy_keys = ("customer_image_recognition_enabled", "chat_product_image_enabled", "marketing_product_image_enabled", "product_image_global_kill_switch")
+            policy_keys = (
+                "customer_image_recognition_enabled", "chat_product_image_enabled",
+                "marketing_product_image_enabled", "product_image_shadow_mode",
+                "product_image_confidence_threshold", "product_image_cooldown_seconds",
+                "product_image_global_kill_switch",
+            )
             if any(key in payload for key in policy_keys):
                 query = parse_qs(urlparse(self.path).query, keep_blank_values=True)
                 session = query.get("session", [DEFAULT_SESSION_NAME])[0]
@@ -6319,12 +6378,239 @@ class PanelHandler(BaseHTTPRequestHandler):
             return
         raise ValueError("产品图片删除路径不正确")
 
+    @staticmethod
+    def _product_catalog_public(product):
+        if not isinstance(product, dict):
+            return {}
+        allowed = {
+            "product_id", "product_key", "product_name", "sku", "aliases", "category",
+            "description", "selling_points", "usage_scenarios", "exclusion_scenarios",
+            "language_content", "active", "allow_ai_image_send", "allow_marketing_image_send",
+            "created_at", "updated_at",
+        }
+        return {key: value for key, value in product.items() if key in allowed}
+
+    @staticmethod
+    def _campaign_public(campaign, stats=None):
+        if not isinstance(campaign, dict):
+            return {}
+        allowed = {
+            "campaign_id", "name", "objective", "target_rules", "product_scope",
+            "allow_image_send", "cadence", "max_touches", "quiet_hours", "language_policy",
+            "active", "paused_reason", "created_at", "updated_at",
+        }
+        result = {key: value for key, value in campaign.items() if key in allowed}
+        if stats is not None:
+            result["stats"] = stats
+        return result
+
+    @staticmethod
+    def _campaign_has_raw_customer_identifier(value):
+        forbidden = {
+            "chat_id", "chat_ids", "customer_id", "customer_ids", "phone", "phones",
+        }
+        if isinstance(value, dict):
+            for key, item in value.items():
+                if str(key).strip().casefold() in forbidden:
+                    return True
+                if PanelHandler._campaign_has_raw_customer_identifier(item):
+                    return True
+        elif isinstance(value, (list, tuple, set)):
+            return any(PanelHandler._campaign_has_raw_customer_identifier(item) for item in value)
+        return False
+
+    def _marketing_stats(self, campaign_id):
+        connection = sqlite3.connect(self.state.database_path)
+        try:
+            contact_rows = connection.execute(
+                "SELECT stage,COUNT(*) FROM marketing_contact_states WHERE campaign_id=? GROUP BY stage",
+                (str(campaign_id),),
+            ).fetchall()
+            event_rows = connection.execute(
+                "SELECT event_type,COUNT(*) FROM marketing_events WHERE campaign_id=? GROUP BY event_type",
+                (str(campaign_id),),
+            ).fetchall()
+        finally:
+            connection.close()
+        contacts_by_stage = {str(row[0] or "UNKNOWN"): int(row[1] or 0) for row in contact_rows}
+        events_by_type = {str(row[0] or "UNKNOWN"): int(row[1] or 0) for row in event_rows}
+        event_count = sum(events_by_type.values())
+        def count(*names):
+            return sum(events_by_type.get(name, 0) for name in names)
+        return {
+            "contacts_total": sum(contacts_by_stage.values()),
+            "contacts_by_stage": contacts_by_stage,
+            "events_total": event_count,
+            "events_by_type": events_by_type,
+            "scanned": count("eligible", "scan", "scanned"),
+            "qualified": count("qualified"),
+            "sent": count("contacted", "send", "sent"),
+            "image_sent": count("image_sent", "product_image_sent"),
+            "customer_replies": count("customer_reply", "replied"),
+            "opt_out": count("opt_out"),
+            "human_takeover": count("human_takeover"),
+            "failed": count("failed", "send_failed"),
+            "unknown": count("unknown", "send_unknown"),
+        }
+
+    @staticmethod
+    def _campaign_id_from_route(route):
+        prefix = "/api/marketing/campaigns/"
+        if not route.startswith(prefix):
+            return "", ""
+        remainder = unquote(route[len(prefix):]).strip("/")
+        if not remainder or "/" not in remainder:
+            return remainder, ""
+        campaign_id, action = remainder.split("/", 1)
+        if not campaign_id or "/" in campaign_id:
+            raise ValueError("活动编号无效")
+        return campaign_id, action
+
+    def send_product_catalog_get(self, route):
+        self.require_admin_auth()
+        base = "/api/product-catalog"
+        collection = {base, base + "/", base + "/products", base + "/products/"}
+        service = self.state.product_catalog
+        if route in collection:
+            query = parse_qs(urlparse(self.path).query, keep_blank_values=True)
+            include_inactive = as_bool(query.get("include_inactive", ["0"])[0])
+            payload = service.list_products(include_inactive=include_inactive)
+            payload["items"] = [self._product_catalog_public(item) for item in payload.get("items", [])]
+            self.send_json(payload)
+            return
+        for prefix in (base + "/products/", base + "/"):
+            if route.startswith(prefix):
+                product_id = unquote(route[len(prefix):]).strip("/")
+                if not product_id or "/" in product_id:
+                    raise ValueError("产品编号无效")
+                self.send_json(self._product_catalog_public(service.get_product(product_id, include_inactive=True)))
+                return
+        raise ValueError("产品目录查询路径不正确")
+
+    def send_product_catalog_write(self, route, method):
+        self.require_csrf()
+        base = "/api/product-catalog"
+        service = self.state.product_catalog
+        collection = {base, base + "/", base + "/products", base + "/products/"}
+        if method == "POST" and route in collection:
+            self.send_json(self._product_catalog_public(service.save_product(self.read_api_json())), HTTPStatus.CREATED)
+            return
+        product_id = ""
+        for prefix in (base + "/products/", base + "/"):
+            if route.startswith(prefix):
+                product_id = unquote(route[len(prefix):]).strip("/")
+                break
+        if not product_id or "/" in product_id:
+            raise ValueError("产品编号无效")
+        if method in {"PUT", "PATCH"}:
+            payload = self.read_api_json()
+            current = service.get_product(product_id, include_inactive=True)
+            merged = dict(current)
+            merged.update(payload)
+            payload = merged
+            payload["product_id"] = product_id
+            self.send_json(self._product_catalog_public(service.save_product(payload)))
+            return
+        if method == "DELETE":
+            self.send_json(self._product_catalog_public(service.disable_product(product_id)))
+            return
+        raise ValueError("产品目录写入方法不支持")
+
+    def send_marketing_get(self, route):
+        self.require_admin_auth()
+        base = "/api/marketing/campaigns"
+        service = self.state.marketing
+        if service is None:
+            self.send_json({"items": [], "total": 0})
+            return
+        if route in {base, base + "/"}:
+            query = parse_qs(urlparse(self.path).query, keep_blank_values=True)
+            include_inactive = as_bool(query.get("include_inactive", ["1"])[0])
+            payload = service.list_campaigns(include_inactive=include_inactive)
+            payload["items"] = [
+                self._campaign_public(item, self._marketing_stats(item.get("campaign_id")))
+                for item in payload.get("items", [])
+            ]
+            self.send_json(payload)
+            return
+        campaign_id, action = self._campaign_id_from_route(route)
+        if not campaign_id:
+            raise ValueError("活动编号无效")
+        campaign = service._campaign(campaign_id)
+        if campaign is None:
+            raise MarketingAutomationError("活动不存在", "CAMPAIGN_NOT_FOUND")
+        if action == "contacts":
+            connection = sqlite3.connect(self.state.database_path)
+            connection.row_factory = sqlite3.Row
+            try:
+                rows = connection.execute(
+                    "SELECT stage,interest_product_id,last_contact_at,last_reply_at,next_action_at,"
+                    "touch_count,paused_reason,opt_out,updated_at FROM marketing_contact_states "
+                    "WHERE campaign_id=? ORDER BY updated_at DESC LIMIT 500",
+                    (str(campaign_id),),
+                ).fetchall()
+            finally:
+                connection.close()
+            items = []
+            for row in rows:
+                item = dict(row)
+                item["opt_out"] = bool(item.get("opt_out"))
+                item["touch_count"] = int(item.get("touch_count") or 0)
+                items.append(item)
+            self.send_json({"campaign": self._campaign_public(campaign), "items": items, "total": len(items), "stats": self._marketing_stats(campaign_id)})
+            return
+        if action:
+            raise ValueError("营销活动查询路径不正确")
+        self.send_json(self._campaign_public(campaign, self._marketing_stats(campaign_id)))
+
+    def send_marketing_write(self, route, method):
+        self.require_csrf()
+        base = "/api/marketing/campaigns"
+        service = self.state.marketing
+        if service is None:
+            raise MarketingAutomationError("营销服务暂不可用", "MARKETING_UNAVAILABLE")
+        if method == "POST" and route in {base, base + "/"}:
+            payload = self.read_api_json()
+            if self._campaign_has_raw_customer_identifier(payload.get("target_rules")):
+                raise MarketingAutomationError("目标规则不能包含客户原始标识", "RAW_CUSTOMER_ID_FORBIDDEN")
+            self.send_json(self._campaign_public(service.create_campaign(payload)), HTTPStatus.CREATED)
+            return
+        campaign_id, action = self._campaign_id_from_route(route)
+        if not campaign_id:
+            raise ValueError("活动编号无效")
+        if action == "pause" and method == "POST":
+            payload = self.read_api_json()
+            self.send_json(self._campaign_public(service.pause_campaign(campaign_id, payload.get("reason"))))
+            return
+        if action == "resume" and method == "POST":
+            self.send_json(self._campaign_public(service.resume_campaign(campaign_id)))
+            return
+        if action:
+            raise ValueError("营销活动写入路径不正确")
+        if method in {"PUT", "PATCH"}:
+            payload = self.read_api_json()
+            if self._campaign_has_raw_customer_identifier(payload.get("target_rules")):
+                raise MarketingAutomationError("目标规则不能包含客户原始标识", "RAW_CUSTOMER_ID_FORBIDDEN")
+            self.send_json(self._campaign_public(service.update_campaign(campaign_id, payload)))
+            return
+        raise ValueError("营销活动写入方法不支持")
+
     def do_GET(self):
         route = urlparse(self.path).path
         try:
             if route == "/product-images":
                 self.require_admin_auth()
                 self.send_ui_bytes(product_image_page().encode("utf-8"), "text/html; charset=utf-8")
+                return
+            if route == "/marketing":
+                self.require_admin_auth()
+                self.send_ui_bytes(marketing_page().encode("utf-8"), "text/html; charset=utf-8")
+                return
+            if route == "/api/product-catalog" or route.startswith("/api/product-catalog/"):
+                self.send_product_catalog_get(route)
+                return
+            if route == "/api/marketing/campaigns" or route.startswith("/api/marketing/campaigns/"):
+                self.send_marketing_get(route)
                 return
             if route == "/api/product-images" or route.startswith("/api/product-images/") or route in {
                 "/api/product-tags", "/api/product-image-settings",
@@ -6471,6 +6757,12 @@ class PanelHandler(BaseHTTPRequestHandler):
         except ProductImageError as error:
             status = HTTPStatus.NOT_FOUND if getattr(error, "code", "") in {"PRODUCT_IMAGE_NOT_FOUND", "TAG_NOT_FOUND"} else HTTPStatus.CONFLICT if getattr(error, "code", "") in {"TAG_EXISTS"} else HTTPStatus.BAD_REQUEST
             self.send_json({"message": str(error), "code": getattr(error, "code", "PRODUCT_IMAGE_ERROR")}, status)
+        except ProductCatalogError as error:
+            status = HTTPStatus.NOT_FOUND if getattr(error, "code", "") == "PRODUCT_NOT_FOUND" else HTTPStatus.BAD_REQUEST
+            self.send_json({"message": str(error), "code": getattr(error, "code", "PRODUCT_CATALOG_ERROR")}, status)
+        except MarketingAutomationError as error:
+            status = HTTPStatus.NOT_FOUND if getattr(error, "code", "") == "CAMPAIGN_NOT_FOUND" else HTTPStatus.BAD_REQUEST
+            self.send_json({"message": str(error), "code": getattr(error, "code", "MARKETING_AUTOMATION_ERROR")}, status)
         except AdminServiceError as error:
             self.send_service_error(error)
         except WahaApiError as error:
@@ -6502,6 +6794,10 @@ class PanelHandler(BaseHTTPRequestHandler):
                 self.send_product_image_match_test()
             elif route == "/api/product-images" or route == "/api/product-tags":
                 self.send_product_image_post(route)
+            elif route == "/api/product-catalog" or route.startswith("/api/product-catalog/"):
+                self.send_product_catalog_write(route, "POST")
+            elif route == "/api/marketing/campaigns" or route.startswith("/api/marketing/campaigns/"):
+                self.send_marketing_write(route, "POST")
             elif route.startswith("/api/chat/sessions/"):
                 self.send_chat_post(route)
             elif route.startswith("/api/translation/"):
@@ -6545,6 +6841,12 @@ class PanelHandler(BaseHTTPRequestHandler):
         except ProductImageError as error:
             status = HTTPStatus.NOT_FOUND if getattr(error, "code", "") in {"PRODUCT_IMAGE_NOT_FOUND", "TAG_NOT_FOUND"} else HTTPStatus.CONFLICT if getattr(error, "code", "") in {"TAG_EXISTS"} else HTTPStatus.BAD_REQUEST
             self.send_json({"message": str(error), "code": getattr(error, "code", "PRODUCT_IMAGE_ERROR")}, status)
+        except ProductCatalogError as error:
+            status = HTTPStatus.NOT_FOUND if getattr(error, "code", "") == "PRODUCT_NOT_FOUND" else HTTPStatus.BAD_REQUEST
+            self.send_json({"message": str(error), "code": getattr(error, "code", "PRODUCT_CATALOG_ERROR")}, status)
+        except MarketingAutomationError as error:
+            status = HTTPStatus.NOT_FOUND if getattr(error, "code", "") == "CAMPAIGN_NOT_FOUND" else HTTPStatus.BAD_REQUEST
+            self.send_json({"message": str(error), "code": getattr(error, "code", "MARKETING_AUTOMATION_ERROR")}, status)
         except AdminServiceError as error:
             self.send_service_error(error)
         except WahaApiError as error:
@@ -6568,6 +6870,10 @@ class PanelHandler(BaseHTTPRequestHandler):
             self.require_mutation_auth()
             if route == "/api/product-image-settings" or route == "/api/product-tags" or route.startswith("/api/product-tags/") or route.startswith("/api/product-images/"):
                 self.send_product_image_put(route)
+            elif route == "/api/product-catalog" or route.startswith("/api/product-catalog/"):
+                self.send_product_catalog_write(route, method)
+            elif route == "/api/marketing/campaigns" or route.startswith("/api/marketing/campaigns/"):
+                self.send_marketing_write(route, method)
             elif route.startswith("/api/chat/sessions/"):
                 self.send_chat_labels_write(route, "PUT")
             elif route.startswith("/api/translation/"):
@@ -6585,6 +6891,12 @@ class PanelHandler(BaseHTTPRequestHandler):
         except ProductImageError as error:
             status = HTTPStatus.NOT_FOUND if getattr(error, "code", "") in {"PRODUCT_IMAGE_NOT_FOUND", "TAG_NOT_FOUND"} else HTTPStatus.CONFLICT if getattr(error, "code", "") in {"TAG_EXISTS"} else HTTPStatus.BAD_REQUEST
             self.send_json({"message": str(error), "code": getattr(error, "code", "PRODUCT_IMAGE_ERROR")}, status)
+        except ProductCatalogError as error:
+            status = HTTPStatus.NOT_FOUND if getattr(error, "code", "") == "PRODUCT_NOT_FOUND" else HTTPStatus.BAD_REQUEST
+            self.send_json({"message": str(error), "code": getattr(error, "code", "PRODUCT_CATALOG_ERROR")}, status)
+        except MarketingAutomationError as error:
+            status = HTTPStatus.NOT_FOUND if getattr(error, "code", "") == "CAMPAIGN_NOT_FOUND" else HTTPStatus.BAD_REQUEST
+            self.send_json({"message": str(error), "code": getattr(error, "code", "MARKETING_AUTOMATION_ERROR")}, status)
         except AdminServiceError as error:
             self.send_service_error(error)
         except AdminAuthError as error:
@@ -6618,6 +6930,13 @@ class PanelHandler(BaseHTTPRequestHandler):
                 self.send_json({"message": str(error), "code": getattr(error, "code", "PRODUCT_IMAGE_ERROR")}, status)
             except (ValueError, KeyError) as error:
                 self.send_json({"message": str(error)}, HTTPStatus.BAD_REQUEST)
+            return
+        if route == "/api/product-catalog" or route.startswith("/api/product-catalog/"):
+            try:
+                self.send_product_catalog_write(route, "DELETE")
+            except (ProductCatalogError, ValueError, KeyError) as error:
+                status = HTTPStatus.NOT_FOUND if getattr(error, "code", "") == "PRODUCT_NOT_FOUND" else HTTPStatus.BAD_REQUEST
+                self.send_json({"message": str(error), "code": getattr(error, "code", "PRODUCT_CATALOG_ERROR")}, status)
             return
         if route.startswith("/api/chat/sessions/"):
             try:
