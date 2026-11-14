@@ -134,6 +134,8 @@ class MarketingCampaignTests(unittest.TestCase):
             self.service.create_campaign({"name": "x", "objective": "x", "target_rules": {"min_idle_days": 0}})
         with self.assertRaises(MarketingAutomationError):
             self.service.create_campaign({"name": "x", "objective": "x", "target_rules": {"min_idle_days": 8, "max_idle_days": 7}})
+        with self.assertRaises(MarketingAutomationError):
+            self.service.create_campaign({"name": "x", "objective": "x", "target_rules": {"idle_days": 8, "max_idle_days": 7}})
 
     def test_contact_state_transitions_are_persisted_and_terminal_guards_apply(self):
         campaign = self.service.create_campaign({"name": "跟进", "objective": "跟进", "max_touches": 2})

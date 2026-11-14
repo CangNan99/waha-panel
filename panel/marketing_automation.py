@@ -221,6 +221,10 @@ class MarketingAutomationService:
             rules["max_idle_days"] = cls._strict_int(rules.get("max_idle_days"), "最大空闲天数", 1, 3650)
         if "min_idle_days" in rules and "max_idle_days" in rules and rules["min_idle_days"] > rules["max_idle_days"]:
             raise MarketingAutomationError("目标空闲天数范围无效", "INVALID_CAMPAIGN_RULE")
+        if "idle_days" in rules and "min_idle_days" in rules and rules["idle_days"] < rules["min_idle_days"]:
+            raise MarketingAutomationError("目标空闲天数与最小范围冲突", "INVALID_CAMPAIGN_RULE")
+        if "idle_days" in rules and "max_idle_days" in rules and rules["idle_days"] > rules["max_idle_days"]:
+            raise MarketingAutomationError("目标空闲天数与最大范围冲突", "INVALID_CAMPAIGN_RULE")
         return rules
 
     @classmethod
