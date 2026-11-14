@@ -106,6 +106,7 @@ try:
     )
     from .chat_automation import ChatAutomationService
     from .marketing_automation import DEFAULT_MARKETING_PROMPT, MarketingAutomationService
+    from .marketing_delivery_service import MarketingDeliveryService
     from .chat_page import chat_management_page
     from .glm_service import GLMError, GLMService, GeneratedImageStore
     from .product_image_service import ProductImageService
@@ -159,6 +160,7 @@ except ImportError:  # Supports the existing `python app.py` container entrypoin
     )
     from chat_automation import ChatAutomationService
     from marketing_automation import DEFAULT_MARKETING_PROMPT, MarketingAutomationService
+    from marketing_delivery_service import MarketingDeliveryService
     from chat_page import chat_management_page
     from glm_service import GLMError, GLMService, GeneratedImageStore
     from product_image_service import ProductImageService
@@ -1186,6 +1188,7 @@ class PanelState:
         self.translation = None
         self.automation = None
         self.marketing = None
+        self.marketing_delivery = None
         self.memory = None
         self.aliyun_translation = None
         self.global_translation = None
@@ -1345,6 +1348,17 @@ class PanelState:
             ),
             clock=self.clock,
         )
+        self.marketing_delivery = MarketingDeliveryService(
+            self.database_path,
+            self.chat,
+            self.product_images,
+            settings_loader=self._settings,
+            clock=self.clock,
+            logger=lambda level, event, message, session_name=DEFAULT_SESSION_NAME: self.log(
+                str(level or "INFO").upper(), str(event or "marketing.delivery"), message,
+                normalize_session_name(session_name or DEFAULT_SESSION_NAME),
+            ),
+        )
         self.marketing = MarketingAutomationService(
             self.database_path,
             self.chat,
@@ -1358,6 +1372,7 @@ class PanelState:
                 normalize_session_name(session_name or DEFAULT_SESSION_NAME),
             ),
             clock=self.clock,
+            delivery_service=self.marketing_delivery,
         )
         self.automation = ChatAutomationService(
             self.database_path,

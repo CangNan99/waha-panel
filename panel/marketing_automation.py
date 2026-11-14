@@ -94,7 +94,7 @@ class MarketingAutomationService:
     """
 
     def __init__(self, database_path, chat_service, settings_loader, sessions_loader,
-                 message_generator, logger=None, clock=time.time):
+                 message_generator, logger=None, clock=time.time, delivery_service=None):
         self.database_path = Path(database_path)
         self.chat_service = chat_service
         self.settings_loader = settings_loader
@@ -102,6 +102,10 @@ class MarketingAutomationService:
         self.message_generator = message_generator
         self.logger = logger
         self.clock = clock
+        # Optional unified text + product-image coordinator.  Keeping this
+        # injectable preserves the legacy text-only path for old deployments
+        # and for callers that have not enabled campaign image delivery yet.
+        self.delivery_service = delivery_service
         self._last_scan = {}
         self._ensure_campaign_schema()
 
@@ -111,6 +115,8 @@ class MarketingAutomationService:
         try:
             migration = Path(__file__).with_name("migrations") / "023_marketing_campaigns.sql"
             connection.executescript(migration.read_text(encoding="utf-8"))
+            delivery_migration = Path(__file__).with_name("migrations") / "024_marketing_delivery.sql"
+            connection.executescript(delivery_migration.read_text(encoding="utf-8"))
             existing = {str(row[1]) for row in connection.execute("PRAGMA table_info(marketing_events)")}
             for definition in ("message_ref TEXT", "reason_code TEXT"):
                 column = definition.split(" ", 1)[0]
@@ -813,7 +819,7 @@ class MarketingAutomationService:
     @staticmethod
     def _generated_message(result):
         if isinstance(result, dict):
-            text = result.get("message") or result.get("content") or ""
+            text = result.get("message") or result.get("content") or result.get("text") or ""
             mode = result.get("mode") or "ai"
         elif isinstance(result, (tuple, list)) and len(result) >= 2:
             text, mode = result[0], result[1]
@@ -821,6 +827,83 @@ class MarketingAutomationService:
             text, mode = result, "ai"
         message = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", str(text or "")).strip()
         return message, str(mode or "").strip().lower()
+
+    def generate_marketing_action(self, session_name, chat_id, history, campaign):
+        """Generate a sanitized campaign action for the delivery coordinator.
+
+        The model may suggest a product key and variant, but it cannot choose
+        an asset id, URL or filesystem path.  The delivery service resolves the
+        final active asset from the campaign product scope after text succeeds.
+        """
+        if not isinstance(campaign, dict):
+            campaign = {}
+        prompt = str(campaign.get("objective") or DEFAULT_MARKETING_PROMPT).strip()
+        prompt += "\n营销活动规则：只发送与活动目标相关、可核实且简短的文字；不要编造价格、库存、优惠或承诺。"
+        language_policy = str(campaign.get("language_policy") or "customer").strip()[:64]
+        if language_policy and language_policy != "customer":
+            prompt += f" 语言策略：按活动配置使用 {language_policy}。"
+        allow_image = self._strict_bool(campaign.get("allow_image_send"), False)
+        scope = campaign.get("product_scope") or campaign.get("product_scope_json") or []
+        if isinstance(scope, str):
+            try:
+                scope = json.loads(scope)
+            except (TypeError, ValueError):
+                scope = [part.strip() for part in scope.split(",") if part.strip()]
+        if not isinstance(scope, (list, tuple, set)):
+            scope = []
+        scope = [str(item).strip() for item in scope if str(item or "").strip()][:200]
+        if not allow_image:
+            prompt += " 不要主动发送产品图片。"
+        elif scope:
+            prompt += " 只有在客户已有明确产品兴趣时，才可建议活动产品范围内的一个产品图片。"
+        prompt = prompt[:4000]
+        generated = self.message_generator(session_name, chat_id, history, prompt)
+        message, mode = self._generated_message(generated)
+        if mode not in {"ai", "glm_vision"} or not message or len(message) > MARKETING_MAX_MESSAGE_CHARS:
+            return {
+                "message": "",
+                "mode": mode,
+                "allow_image_send": False,
+                "product_id": None,
+                "variant": "",
+                "caption": "",
+            }
+        product_id = None
+        variant = ""
+        caption = ""
+        if isinstance(generated, dict):
+            raw_product = generated.get("product_id") or generated.get("product_key")
+            image = generated.get("image") if isinstance(generated.get("image"), dict) else {}
+            raw_product = raw_product or image.get("product_id") or image.get("product_key")
+            candidate = str(raw_product or "").strip()
+            if allow_image and candidate and candidate in set(scope):
+                product_id = candidate
+                variant = re.sub(r"[\x00-\x1f\x7f]", "", str(generated.get("variant") or image.get("variant") or "")).strip()[:120]
+                caption = re.sub(r"[\x00-\x1f\x7f]", "", str(generated.get("caption") or image.get("caption") or "")).strip()[:4096]
+        # Production's legacy marketing generator intentionally returns a
+        # plain ``(text, mode)`` tuple.  When it does not emit structured
+        # product metadata, select a product only if the customer's history
+        # contains exactly one product key from the campaign scope.  This is a
+        # server-side, scope-limited interest check; no model-provided asset,
+        # URL or internal image id is accepted.
+        if allow_image and not product_id and scope:
+            history_text = " ".join(
+                str(item.get("body") or item.get("caption") or "")
+                for item in (history or [])
+                if isinstance(item, dict)
+            ).casefold()
+            matches = [item for item in scope if str(item).casefold() in history_text]
+            if len(matches) == 1:
+                product_id = matches[0]
+        return {
+            "message": message,
+            "mode": mode,
+            "allow_image_send": bool(allow_image and product_id),
+            "product_id": product_id,
+            "variant": variant,
+            "caption": caption,
+            "product_scope": scope,
+        }
 
     @staticmethod
     def _candidate_id(candidate):
@@ -991,17 +1074,10 @@ class MarketingAutomationService:
         history = candidate.get("history")
         if not isinstance(history, list) or not history:
             return False
-        prompt = str(campaign.get("objective") or DEFAULT_MARKETING_PROMPT).strip()
-        prompt += "\n营销活动规则：只发送与活动目标相关、可核实且简短的文字；不要编造价格、库存、优惠或承诺。"
-        language_policy = str(campaign.get("language_policy") or "customer").strip()[:64]
-        if language_policy and language_policy != "customer":
-            prompt += f" 语言策略：按活动配置使用 {language_policy}。"
-        if not campaign.get("allow_image_send"):
-            prompt += " 不要主动发送产品图片。"
-        prompt = prompt[:4000]
         try:
-            generated = self.message_generator(session, chat_id, history, prompt)
-            message, mode = self._generated_message(generated)
+            action = self.generate_marketing_action(session, chat_id, history, campaign)
+            message = action.get("message") or ""
+            mode = action.get("mode") or ""
         except Exception:
             self._safe_log("WARN", "marketing.generate_failed", "AI 营销文案生成失败，已跳过", session)
             return False
@@ -1021,6 +1097,38 @@ class MarketingAutomationService:
             # month component would create a second ledger row when a pending
             # or failed touch is retried after midnight on the first day.
             campaign_key = f"campaign:{campaign['campaign_id']}:touch:{touch_number}"
+            if self.delivery_service is not None:
+                delivery = {
+                    "delivery_id": campaign_key,
+                    "campaign_id": campaign["campaign_id"],
+                    "session_name": session,
+                    "chat_id": chat_id,
+                    "chat_key_hmac": chat_key,
+                    "text": message,
+                    "product_id": action.get("product_id"),
+                    "variant": action.get("variant") or "",
+                    "image_caption": action.get("caption") or "",
+                    "product_scope": action.get("product_scope") or campaign.get("product_scope") or [],
+                    "allow_image_send": bool(action.get("allow_image_send")) and bool(campaign.get("allow_image_send")),
+                    "touch_count": int(refreshed.get("touch_count") or 0),
+                    "max_touches": int(campaign.get("max_touches") or 1),
+                    "customer_last_contact_at": int(refreshed.get("last_contact_at") or candidate.get("last_inbound_at") or 0),
+                    "daily_limit": daily_limit,
+                    "cooldown_days": self._settings_value(settings, "ai_marketing_cooldown_days", 30),
+                    "marketing_product_image_enabled": self._settings_value(settings, "marketing_product_image_enabled", True),
+                    "product_image_global_kill_switch": self._settings_value(settings, "product_image_global_kill_switch", False),
+                    "history": history,
+                }
+                result = self.delivery_service.send_text_and_optional_image(delivery)
+                delivery_state = str(result.get("state") or "").upper() if isinstance(result, dict) else ""
+                if delivery_state == "SENT":
+                    try:
+                        self.transition_contact(refreshed, "contacted", now)
+                    except Exception:
+                        self._safe_log("WARN", "marketing.contact_state_failed", "营销发送已恢复，但客户状态更新未完成", session)
+                    self._safe_log("INFO", "marketing.sent", "已发送一条活动营销消息", session)
+                    return True
+                return False
             reservation = self._reserve(
                 session, chat_key, campaign_key, message, now, daily_limit=daily_limit
             )
