@@ -6999,6 +6999,11 @@ class PanelHandler(BaseHTTPRequestHandler):
             elif route == "/api/settings":
                 query = parse_qs(urlparse(self.path).query)
                 self.send_json(self.state.save_settings(self.read_json(), query.get("session", [DEFAULT_SESSION_NAME])[0]), HTTPStatus.OK)
+            elif route == "/api/settings/test-ai":
+                query = parse_qs(urlparse(self.path).query)
+                session_name = query.get("session", [DEFAULT_SESSION_NAME])[0]
+                capability = query.get("capability", [""])[0]
+                self.send_json(self.state.test_ai_profile(session_name, capability), HTTPStatus.OK)
             elif route == "/api/knowledge":
                 payload = self.read_json()
                 query = parse_qs(urlparse(self.path).query)
