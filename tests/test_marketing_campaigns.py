@@ -431,6 +431,25 @@ class MarketingCampaignTests(unittest.TestCase):
         self.service._last_scan.clear()
         self.assertEqual(self.service.run_once(self.clock[0]), 1)
 
+    def test_max_idle_window_scans_from_one_day_then_filters_upper_bound(self):
+        campaign = self.service.create_campaign({
+            "name": "短窗口",
+            "objective": "跟进",
+            "target_rules": {"max_idle_days": 3},
+        })
+        now = self.clock[0]
+        self.chat.marketing_candidates = lambda _session, _now, _idle_days, limit=200: [{
+            "chat_id": "customer-window@c.us",
+            "chat_key_hmac": "customer-window-key",
+            "last_inbound_at": now - 2 * DAY,
+            "last_outbound_at": now - 3 * DAY,
+            "history": [{"timestamp": now - 2 * DAY, "from_me": False, "body": "窗口"}],
+        }]
+        self.service._last_scan.clear()
+        self.assertEqual(self.service.run_once(now), 1)
+        state = self.service.contact_state("default", "customer-window-key", campaign["campaign_id"])
+        self.assertEqual(state["stage"], "CONTACTED")
+
     def test_customer_message_updates_existing_contact_without_storing_raw_chat_id(self):
         campaign = self.service.create_campaign({"name": "回复停止", "objective": "跟进"})
         state = self.service.transition_contact({

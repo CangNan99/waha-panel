@@ -1083,10 +1083,10 @@ class MarketingAutomationService:
         elif rules.get("min_idle_days") is not None:
             scan_idle_days = rules.get("min_idle_days")
         elif rules.get("max_idle_days") is not None:
-            # The candidate scan is lower-bound based. Use the upper bound so
-            # contacts inside a max-only window are not filtered out before
-            # _candidate_target_matches applies the upper limit.
-            scan_idle_days = rules.get("max_idle_days")
+            # The candidate scan is lower-bound based. A max-only window must
+            # start at the minimum supported idle age; the upper bound is
+            # applied later by _candidate_target_matches.
+            scan_idle_days = 1
         else:
             scan_idle_days = settings.get("ai_marketing_idle_days", 7)
         idle_days = _bounded_int(scan_idle_days, 7, 1, 365)
