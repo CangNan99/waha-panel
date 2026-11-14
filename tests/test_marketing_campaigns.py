@@ -182,6 +182,33 @@ class MarketingCampaignTests(unittest.TestCase):
         self.assertIsNotNone(state)
         self.assertEqual(state["stage"], "COMPLETED")
 
+    def test_campaign_follow_up_uses_a_distinct_delivery_key_per_touch(self):
+        campaign = self.service.create_campaign({
+            "name": "多次跟进",
+            "objective": "跟进",
+            "cadence": {"first_delay_hours": 0, "follow_up_hours": 1},
+            "max_touches": 3,
+        })
+        self.service._last_scan.clear()
+        self.assertEqual(self.service.run_once(self.clock[0]), 1)
+        self.service._last_scan.clear()
+        self.clock[0] += 2 * 60 * 60
+        self.assertEqual(self.service.run_once(self.clock[0]), 1)
+        state = self.service.contact_state("default", "customer-key-1", campaign["campaign_id"])
+        self.assertEqual((state["stage"], state["touch_count"]), ("CONTACTED", 2))
+        connection = sqlite3.connect(self.database)
+        try:
+            rows = connection.execute(
+                "SELECT campaign_key,state FROM ai_marketing_send_requests "
+                "WHERE session_name=? AND chat_key_hmac=? ORDER BY id",
+                ("default", "customer-key-1"),
+            ).fetchall()
+        finally:
+            connection.close()
+        self.assertEqual(len(rows), 2)
+        self.assertTrue(all(row[1] == "SENT" for row in rows))
+        self.assertNotEqual(rows[0][0], rows[1][0])
+
     def test_quiet_hours_and_daily_limit_skip_campaign_contacts(self):
         campaign = self.service.create_campaign({
             "name": "安静时段",

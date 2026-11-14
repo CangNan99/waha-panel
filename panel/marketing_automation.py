@@ -904,16 +904,23 @@ class MarketingAutomationService:
             return False
         if mode not in {"ai", "glm_vision"} or not message or len(message) > MARKETING_MAX_MESSAGE_CHARS:
             return False
-        period = datetime.fromtimestamp(int(now), SHANGHAI_TZ).strftime("%Y-%m")
-        campaign_key = f"campaign:{campaign['campaign_id']}:{period}"
-        reservation = self._reserve(session, chat_key, campaign_key, message, now)
-        if reservation["state"] != "PENDING":
-            return False
-        request_id = reservation["request_id"]
+        request_id = None
         try:
-            # Re-check reply, opt-out and takeover immediately before sending.
+            # Re-check reply, opt-out and takeover before reserving this touch.
             refreshed = self._prepare_campaign_contact(session, campaign, candidate, now)
             if not refreshed or str(refreshed.get("stage") or "").upper() not in {"ELIGIBLE", "FOLLOW_UP_DUE"}:
+                return False
+            period = datetime.fromtimestamp(int(now), SHANGHAI_TZ).strftime("%Y-%m")
+            touch_number = int(refreshed.get("touch_count") or 0) + 1
+            campaign_key = f"campaign:{campaign['campaign_id']}:{period}:touch:{touch_number}"
+            reservation = self._reserve(session, chat_key, campaign_key, message, now)
+            if reservation["state"] != "PENDING":
+                return False
+            request_id = reservation["request_id"]
+            # A second check closes the reservation-to-send race.  A concurrent
+            # worker may have moved this contact to a terminal/suppressed stage.
+            latest = self._prepare_campaign_contact(session, campaign, candidate, now)
+            if not latest or str(latest.get("stage") or "").upper() not in {"ELIGIBLE", "FOLLOW_UP_DUE"}:
                 self._finish(request_id, "FAILED", now, "MARKETING_STOPPED")
                 return False
             result = self.chat_service.send_automated_text(session, chat_id, message, request_id)
@@ -923,7 +930,7 @@ class MarketingAutomationService:
                 self._finish(request_id, "UNKNOWN" if state_name == "UNKNOWN" else "FAILED", now, code)
                 return False
             self._finish(request_id, "SENT", now, message_ref=(result.get("message_ref") if isinstance(result, dict) else None))
-            self.transition_contact(refreshed, "contacted", now)
+            self.transition_contact(latest, "contacted", now)
             self._safe_log("INFO", "marketing.sent", "已发送一条活动营销消息", session)
             return True
         except Exception as error:
@@ -932,7 +939,8 @@ class MarketingAutomationService:
             code = str(getattr(error, "code", "") or "")
             if not re.fullmatch(r"[A-Za-z0-9_.-]{1,80}", code):
                 code = "WAHA_SEND_UNKNOWN" if state_name == "UNKNOWN" else "WAHA_SEND_FAILED"
-            self._finish(request_id, state_name, now, code)
+            if request_id:
+                self._finish(request_id, state_name, now, code)
             self._safe_log("WARN", "marketing.send_failed", "活动营销消息发送未完成", session)
             return False
 
