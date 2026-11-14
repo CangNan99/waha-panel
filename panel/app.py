@@ -6469,7 +6469,10 @@ class PanelHandler(BaseHTTPRequestHandler):
     def send_product_catalog_get(self, route):
         self.require_admin_auth()
         base = "/api/product-catalog"
-        collection = {base, base + "/", base + "/products", base + "/products/"}
+        aliases = (base, "/api/products")
+        collection = {
+            path for root in aliases for path in (root, root + "/", root + "/products", root + "/products/")
+        }
         service = self.state.product_catalog
         if route in collection:
             query = parse_qs(urlparse(self.path).query, keep_blank_values=True)
@@ -6478,7 +6481,8 @@ class PanelHandler(BaseHTTPRequestHandler):
             payload["items"] = [self._product_catalog_public(item) for item in payload.get("items", [])]
             self.send_json(payload)
             return
-        for prefix in (base + "/products/", base + "/"):
+        prefixes = tuple(prefix for root in aliases for prefix in (root + "/products/", root + "/"))
+        for prefix in prefixes:
             if route.startswith(prefix):
                 product_id = unquote(route[len(prefix):]).strip("/")
                 if not product_id or "/" in product_id:
@@ -6490,13 +6494,17 @@ class PanelHandler(BaseHTTPRequestHandler):
     def send_product_catalog_write(self, route, method):
         self.require_csrf()
         base = "/api/product-catalog"
+        aliases = (base, "/api/products")
         service = self.state.product_catalog
-        collection = {base, base + "/", base + "/products", base + "/products/"}
+        collection = {
+            path for root in aliases for path in (root, root + "/", root + "/products", root + "/products/")
+        }
         if method == "POST" and route in collection:
             self.send_json(self._product_catalog_public(service.save_product(self.read_api_json())), HTTPStatus.CREATED)
             return
         product_id = ""
-        for prefix in (base + "/products/", base + "/"):
+        prefixes = tuple(prefix for root in aliases for prefix in (root + "/products/", root + "/"))
+        for prefix in prefixes:
             if route.startswith(prefix):
                 product_id = unquote(route[len(prefix):]).strip("/")
                 break
@@ -6606,7 +6614,7 @@ class PanelHandler(BaseHTTPRequestHandler):
                 self.require_admin_auth()
                 self.send_ui_bytes(marketing_page().encode("utf-8"), "text/html; charset=utf-8")
                 return
-            if route == "/api/product-catalog" or route.startswith("/api/product-catalog/"):
+            if route in {"/api/product-catalog", "/api/products"} or route.startswith("/api/product-catalog/") or route.startswith("/api/products/"):
                 self.send_product_catalog_get(route)
                 return
             if route == "/api/marketing/campaigns" or route.startswith("/api/marketing/campaigns/"):
@@ -6794,7 +6802,7 @@ class PanelHandler(BaseHTTPRequestHandler):
                 self.send_product_image_match_test()
             elif route == "/api/product-images" or route == "/api/product-tags":
                 self.send_product_image_post(route)
-            elif route == "/api/product-catalog" or route.startswith("/api/product-catalog/"):
+            elif route in {"/api/product-catalog", "/api/products"} or route.startswith("/api/product-catalog/") or route.startswith("/api/products/"):
                 self.send_product_catalog_write(route, "POST")
             elif route == "/api/marketing/campaigns" or route.startswith("/api/marketing/campaigns/"):
                 self.send_marketing_write(route, "POST")
@@ -6870,7 +6878,7 @@ class PanelHandler(BaseHTTPRequestHandler):
             self.require_mutation_auth()
             if route == "/api/product-image-settings" or route == "/api/product-tags" or route.startswith("/api/product-tags/") or route.startswith("/api/product-images/"):
                 self.send_product_image_put(route)
-            elif route == "/api/product-catalog" or route.startswith("/api/product-catalog/"):
+            elif route in {"/api/product-catalog", "/api/products"} or route.startswith("/api/product-catalog/") or route.startswith("/api/products/"):
                 self.send_product_catalog_write(route, method)
             elif route == "/api/marketing/campaigns" or route.startswith("/api/marketing/campaigns/"):
                 self.send_marketing_write(route, method)
@@ -6931,7 +6939,7 @@ class PanelHandler(BaseHTTPRequestHandler):
             except (ValueError, KeyError) as error:
                 self.send_json({"message": str(error)}, HTTPStatus.BAD_REQUEST)
             return
-        if route == "/api/product-catalog" or route.startswith("/api/product-catalog/"):
+        if route in {"/api/product-catalog", "/api/products"} or route.startswith("/api/product-catalog/") or route.startswith("/api/products/"):
             try:
                 self.send_product_catalog_write(route, "DELETE")
             except (ProductCatalogError, ValueError, KeyError) as error:
