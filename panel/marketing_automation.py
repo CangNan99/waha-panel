@@ -248,7 +248,12 @@ class MarketingAutomationService:
             raise MarketingAutomationError("安静时段必须同时提供开始和结束时间", "INVALID_QUIET_HOURS")
         quiet["start"] = cls._validate_time(quiet.get("start"), "安静时段开始时间")
         quiet["end"] = cls._validate_time(quiet.get("end"), "安静时段结束时间")
-        quiet["timezone"] = str(quiet.get("timezone") or "Asia/Shanghai").strip()[:64]
+        timezone_name = str(quiet.get("timezone") or "Asia/Shanghai").strip()[:64]
+        try:
+            ZoneInfo(timezone_name)
+        except Exception as error:
+            raise MarketingAutomationError("安静时区无效", "INVALID_QUIET_HOURS") from error
+        quiet["timezone"] = timezone_name
         return quiet
 
     @classmethod
@@ -984,6 +989,9 @@ class MarketingAutomationService:
             return False
         prompt = str(campaign.get("objective") or DEFAULT_MARKETING_PROMPT).strip()
         prompt += "\n营销活动规则：只发送与活动目标相关、可核实且简短的文字；不要编造价格、库存、优惠或承诺。"
+        language_policy = str(campaign.get("language_policy") or "customer").strip()[:64]
+        if language_policy and language_policy != "customer":
+            prompt += f" 语言策略：按活动配置使用 {language_policy}。"
         if not campaign.get("allow_image_send"):
             prompt += " 不要主动发送产品图片。"
         prompt = prompt[:4000]

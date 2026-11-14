@@ -124,6 +124,11 @@ class MarketingCampaignTests(unittest.TestCase):
         with self.assertRaises(MarketingAutomationError):
             self.service.create_campaign({"name": "x", "objective": "x", "quiet_hours": {"start": "bad"}})
         with self.assertRaises(MarketingAutomationError):
+            self.service.create_campaign({
+                "name": "x", "objective": "x",
+                "quiet_hours": {"start": "22:00", "end": "08:00", "timezone": "Not/AZone"},
+            })
+        with self.assertRaises(MarketingAutomationError):
             self.service.create_campaign({"name": "x", "objective": "x", "target_rules": {"chat_ids": ["raw"]}})
         with self.assertRaises(MarketingAutomationError):
             self.service.create_campaign({"name": "x", "objective": "x", "target_rules": {"min_idle_days": 0}})
