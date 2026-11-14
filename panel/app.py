@@ -826,6 +826,10 @@ def init_db(path, seed_business=True):
             Path(__file__).with_name("migrations") / "020_ai_marketing.sql"
         )
         connection.executescript(marketing_migration.read_text(encoding="utf-8"))
+        campaigns_migration = (
+            Path(__file__).with_name("migrations") / "023_marketing_campaigns.sql"
+        )
+        connection.executescript(campaigns_migration.read_text(encoding="utf-8"))
         _add_column_if_missing(
             connection,
             "customer_memories",
@@ -1973,6 +1977,12 @@ class PanelState:
         profiles = {"available": False}
         if self.ai_profiles is not None:
             profiles = {"available": True, **self.ai_profiles.profile_payload(name)}
+        campaigns = {"items": [], "total": 0}
+        if self.marketing is not None:
+            try:
+                campaigns = self.marketing.list_campaigns(include_inactive=True)
+            except Exception:
+                campaigns = {"items": [], "total": 0}
         return {
             "session_name": name,
             "auto_reply_enabled": as_bool(values.get("auto_reply_enabled", "0")),
@@ -2025,6 +2035,7 @@ class PanelState:
                 str(values.get("ai_marketing_prompt") or "").strip()[:4000]
                 or DEFAULT_MARKETING_PROMPT
             ),
+            "marketing_campaigns": campaigns,
             "timezone": "Asia/Shanghai",
             "iptv": self.iptv.settings_payload(name) if self.iptv is not None else None,
         }
@@ -3724,6 +3735,16 @@ class PanelState:
             self._record_customer_first_seen(session_name, chat_id, original_timestamp)
         except Exception:
             self.log("WARN", "customer.stats", "客户统计记录失败", session_name)
+        if self.marketing is not None:
+            try:
+                self.marketing.record_customer_message(
+                    session_name,
+                    chat_id,
+                    body_text,
+                    original_timestamp,
+                )
+            except Exception:
+                self.log("WARN", "marketing.contact_state", "营销客户状态更新失败", session_name)
         settings = self._settings(session_name)
         glm_vision_profile = None
         if media_kind == "image" and self.ai_profiles is not None:
@@ -4122,6 +4143,7 @@ class PanelState:
             for table in (
                 "session_settings", "knowledge_base", "conversation_messages", "system_logs",
                 "chat_takeovers", "manual_send_requests", "chat_notes",
+                "marketing_contact_states", "marketing_events",
             ):
                 connection.execute(f"DELETE FROM {table} WHERE session_name = ?", (name,))
             connection.execute("DELETE FROM managed_sessions WHERE session_name = ?", (name,))

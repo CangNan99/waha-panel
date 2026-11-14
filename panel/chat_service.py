@@ -477,11 +477,30 @@ class ChatService:
                 latest_activity = max(last_inbound, last_outbound)
                 if last_inbound <= 0 or latest_activity <= 0 or latest_activity > cutoff:
                     continue
+                chat_key = self._chat_key(name, chat_id)
+                labels = []
+                label_connection = None
+                try:
+                    label_connection = sqlite3.connect(self.database_path)
+                    labels = [str(item[0]) for item in label_connection.execute(
+                        "SELECT label FROM customer_labels WHERE session_name=? AND chat_key_hmac=? "
+                        "UNION ALL SELECT label FROM customer_system_labels WHERE session_name=? AND chat_key_hmac=?",
+                        (name, chat_key, name, chat_key),
+                    ).fetchall()]
+                except sqlite3.Error:
+                    labels = []
+                finally:
+                    try:
+                        if label_connection is not None:
+                            label_connection.close()
+                    except Exception:
+                        pass
                 candidates.append({
                     "chat_id": chat_id,
-                    "chat_key_hmac": self._chat_key(name, chat_id),
+                    "chat_key_hmac": chat_key,
                     "last_inbound_at": last_inbound,
                     "last_outbound_at": last_outbound,
+                    "labels": labels,
                     "history": history,
                 })
                 if len(candidates) >= maximum:
@@ -547,6 +566,29 @@ class ChatService:
                 break
             offset += len(raw_items)
         return False
+
+    def marketing_stop_reason(self, session, chat_id, since_timestamp=0, history=None):
+        """Return a redacted stop-condition code for campaign scheduling.
+
+        This helper keeps takeover, opt-out and reply checks in the chat service,
+        where raw chat identifiers are already available. Marketing tables only
+        receive the caller's HMAC key.
+        """
+        name = _session_name(session)
+        value = str(chat_id or "").strip()
+        if not value or value.endswith("@g.us"):
+            return "INVALID_CHAT"
+        if self.is_human_takeover(name, value):
+            return "HUMAN_TAKEOVER"
+        if self.is_marketing_opted_out(name, value, history=history):
+            return "OPT_OUT"
+        try:
+            cutoff = int(since_timestamp or 0)
+        except (TypeError, ValueError):
+            cutoff = 0
+        if cutoff > 0 and self.has_inbound_since(name, value, cutoff):
+            return "CUSTOMER_REPLIED"
+        return ""
 
     def _note_for_id(self, session, chat_id):
         name = _session_name(session)

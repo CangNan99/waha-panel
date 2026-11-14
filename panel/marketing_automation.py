@@ -1,7 +1,9 @@
 import hashlib
+import json
 import re
 import sqlite3
 import time
+import uuid
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -20,6 +22,52 @@ DEFAULT_MARKETING_PROMPT = (
 
 class MarketingAutomationError(RuntimeError):
     code = "MARKETING_AUTOMATION_ERROR"
+
+    def __init__(self, message, code=None):
+        self.public_message = str(message)
+        if code:
+            self.code = str(code)
+        super().__init__(self.public_message)
+
+
+CAMPAIGN_STAGES = {
+    "ELIGIBLE",
+    "CONTACTED",
+    "FOLLOW_UP_DUE",
+    "REPLIED",
+    "QUALIFIED",
+    "HUMAN_HANDOFF",
+    "PAUSED",
+    "OPTED_OUT",
+    "COMPLETED",
+}
+_TERMINAL_STAGES = {"REPLIED", "QUALIFIED", "HUMAN_HANDOFF", "OPTED_OUT", "COMPLETED"}
+_CONTACT_EVENT_ALIASES = {
+    "ELIGIBLE": "eligible",
+    "CONTACT": "contacted",
+    "CONTACTED": "contacted",
+    "FIRST_TOUCH": "contacted",
+    "FOLLOW_UP": "follow_up_due",
+    "FOLLOW_UP_DUE": "follow_up_due",
+    "REPLY": "customer_reply",
+    "REPLIED": "customer_reply",
+    "CUSTOMER_REPLY": "customer_reply",
+    "QUALIFY": "qualified",
+    "QUALIFIED": "qualified",
+    "HUMAN": "human_takeover",
+    "HUMAN_TAKEOVER": "human_takeover",
+    "HUMAN_HANDOFF": "human_takeover",
+    "PAUSE": "pause",
+    "PAUSED": "pause",
+    "RESUME": "resume",
+    "OPT_OUT": "opt_out",
+    "OPTOUT": "opt_out",
+    "OPTED_OUT": "opt_out",
+    "MAX_TOUCHES": "max_touches",
+    "COMPLETE": "complete",
+    "COMPLETED": "complete",
+}
+_TIME_RE = re.compile(r"^(?:[01]\d|2[0-3]):[0-5]\d$")
 
 
 def _as_bool(value):
@@ -55,6 +103,17 @@ class MarketingAutomationService:
         self.logger = logger
         self.clock = clock
         self._last_scan = {}
+        self._ensure_campaign_schema()
+
+    def _ensure_campaign_schema(self):
+        """Make the additive campaign schema available for standalone workers."""
+        connection = self._connect()
+        try:
+            migration = Path(__file__).with_name("migrations") / "023_marketing_campaigns.sql"
+            connection.executescript(migration.read_text(encoding="utf-8"))
+            connection.commit()
+        finally:
+            connection.close()
 
     def _connect(self):
         connection = sqlite3.connect(self.database_path, timeout=30)
@@ -63,6 +122,482 @@ class MarketingAutomationService:
 
     def _now(self, value=None):
         return int(self.clock() if value is None else value)
+
+    @staticmethod
+    def _strict_bool(value, default=False):
+        if value is None:
+            return bool(default)
+        if isinstance(value, bool):
+            return value
+        text = str(value).strip().casefold()
+        if text in {"1", "true", "yes", "on", "enabled"}:
+            return True
+        if text in {"0", "false", "no", "off", "disabled"}:
+            return False
+        raise MarketingAutomationError("活动开关参数无效", "INVALID_CAMPAIGN_FLAG")
+
+    @staticmethod
+    def _json_object(value, field, default):
+        if value is None:
+            return dict(default)
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except (TypeError, ValueError) as error:
+                raise MarketingAutomationError(f"{field}格式无效", "INVALID_CAMPAIGN_JSON") from error
+        if not isinstance(value, dict):
+            raise MarketingAutomationError(f"{field}必须是对象", "INVALID_CAMPAIGN_JSON")
+        try:
+            json.dumps(value, ensure_ascii=False)
+        except (TypeError, ValueError) as error:
+            raise MarketingAutomationError(f"{field}格式无效", "INVALID_CAMPAIGN_JSON") from error
+        return dict(value)
+
+    @staticmethod
+    def _json_list(value, field, default=None):
+        if value is None:
+            return list(default or [])
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except (TypeError, ValueError):
+                value = [part.strip() for part in value.split(",") if part.strip()]
+        if not isinstance(value, (list, tuple, set)):
+            raise MarketingAutomationError(f"{field}必须是数组", "INVALID_CAMPAIGN_JSON")
+        result = []
+        seen = set()
+        for item in value:
+            text = str(item or "").strip()
+            if not text or len(text) > 200:
+                raise MarketingAutomationError(f"{field}包含无效值", "INVALID_CAMPAIGN_RULE")
+            if text not in seen:
+                seen.add(text)
+                result.append(text)
+        if len(result) > 200:
+            raise MarketingAutomationError(f"{field}数量过多", "INVALID_CAMPAIGN_RULE")
+        return result
+
+    @staticmethod
+    def _validate_time(value, field):
+        text = str(value or "").strip()
+        if not _TIME_RE.fullmatch(text):
+            raise MarketingAutomationError(f"{field}必须是 HH:MM", "INVALID_QUIET_HOURS")
+        return text
+
+    @classmethod
+    def _validate_target_rules(cls, value):
+        rules = cls._json_object(value, "目标规则", {})
+        if any(str(key).strip().casefold() in {
+            "chat_id", "chat_ids", "customer_id", "customer_ids", "phone", "phones",
+        } for key in rules):
+            raise MarketingAutomationError("目标规则不能包含客户原始标识", "RAW_CUSTOMER_ID_FORBIDDEN")
+        if "sessions" in rules:
+            rules["sessions"] = cls._json_list(rules.get("sessions"), "目标会话")
+        for key in ("include_labels", "exclude_labels", "labels"):
+            if key in rules:
+                rules[key] = cls._json_list(rules.get(key), key)
+        if "idle_days" in rules:
+            rules["idle_days"] = _bounded_int(rules.get("idle_days"), 7, 1, 365)
+        if "min_idle_days" in rules:
+            rules["min_idle_days"] = _bounded_int(rules.get("min_idle_days"), 1, 1, 365)
+        if "max_idle_days" in rules:
+            rules["max_idle_days"] = _bounded_int(rules.get("max_idle_days"), 365, 1, 3650)
+        if "min_idle_days" in rules and "max_idle_days" in rules and rules["min_idle_days"] > rules["max_idle_days"]:
+            raise MarketingAutomationError("目标空闲天数范围无效", "INVALID_CAMPAIGN_RULE")
+        return rules
+
+    @classmethod
+    def _validate_cadence(cls, value):
+        cadence = cls._json_object(value, "活动节奏", {})
+        first_delay = cadence.get("first_delay_hours", cadence.get("initial_delay_hours", 0))
+        follow_up = cadence.get("follow_up_hours", cadence.get("interval_hours", 24))
+        try:
+            first_delay = float(first_delay)
+            follow_up = float(follow_up)
+        except (TypeError, ValueError) as error:
+            raise MarketingAutomationError("活动节奏必须是数字", "INVALID_CADENCE") from error
+        if not 0 <= first_delay <= 30 * 24 or not 1 <= follow_up <= 30 * 24:
+            raise MarketingAutomationError("活动节奏范围无效", "INVALID_CADENCE")
+        cadence["first_delay_hours"] = first_delay if first_delay % 1 else int(first_delay)
+        cadence["follow_up_hours"] = follow_up if follow_up % 1 else int(follow_up)
+        return cadence
+
+    @classmethod
+    def _validate_quiet_hours(cls, value):
+        quiet = cls._json_object(value, "安静时段", {})
+        if not quiet:
+            return {}
+        if not quiet.get("start") or not quiet.get("end"):
+            raise MarketingAutomationError("安静时段必须同时提供开始和结束时间", "INVALID_QUIET_HOURS")
+        quiet["start"] = cls._validate_time(quiet.get("start"), "安静时段开始时间")
+        quiet["end"] = cls._validate_time(quiet.get("end"), "安静时段结束时间")
+        quiet["timezone"] = str(quiet.get("timezone") or "Asia/Shanghai").strip()[:64]
+        return quiet
+
+    @classmethod
+    def _campaign_payload(cls, payload, prior=None):
+        if not isinstance(payload, dict):
+            raise MarketingAutomationError("活动数据格式无效", "INVALID_CAMPAIGN")
+        merged = dict(prior or {})
+        merged.update(payload)
+        name = str(merged.get("name") or "").strip()
+        objective = str(merged.get("objective") or "").strip()
+        if not name:
+            raise MarketingAutomationError("活动名称不能为空", "INVALID_CAMPAIGN")
+        if len(name) > 200:
+            raise MarketingAutomationError("活动名称不能超过 200 个字符", "INVALID_CAMPAIGN")
+        if not objective:
+            raise MarketingAutomationError("活动目标不能为空", "INVALID_CAMPAIGN")
+        if len(objective) > 4000:
+            raise MarketingAutomationError("活动目标不能超过 4000 个字符", "INVALID_CAMPAIGN")
+        target_rules = cls._validate_target_rules(merged.get("target_rules", merged.get("target_rules_json")))
+        product_scope = cls._json_list(merged.get("product_scope", merged.get("product_scope_json")), "产品范围")
+        cadence = cls._validate_cadence(merged.get("cadence", merged.get("cadence_json")))
+        quiet_hours = cls._validate_quiet_hours(merged.get("quiet_hours", merged.get("quiet_hours_json")))
+        try:
+            max_touches = int(str(merged.get("max_touches", 1)).strip())
+        except (TypeError, ValueError) as error:
+            raise MarketingAutomationError("最大触达次数必须是整数", "INVALID_MAX_TOUCHES") from error
+        if not 1 <= max_touches <= 100:
+            raise MarketingAutomationError("最大触达次数必须在 1-100 之间", "INVALID_MAX_TOUCHES")
+        language_policy = str(merged.get("language_policy") or "customer").strip()[:64] or "customer"
+        active = cls._strict_bool(merged.get("active"), True)
+        paused_reason = str(merged.get("paused_reason") or "").strip()[:500] or None
+        return {
+            "campaign_id": str(merged.get("campaign_id") or "").strip(),
+            "name": name,
+            "objective": objective,
+            "target_rules": target_rules,
+            "product_scope": product_scope,
+            "allow_image_send": cls._strict_bool(merged.get("allow_image_send"), False),
+            "cadence": cadence,
+            "max_touches": max_touches,
+            "quiet_hours": quiet_hours,
+            "language_policy": language_policy,
+            "active": active,
+            "paused_reason": paused_reason,
+        }
+
+    @staticmethod
+    def _campaign_row(row):
+        if row is None:
+            return None
+        item = dict(row)
+        for key, fallback in (
+            ("target_rules", "target_rules_json"),
+            ("product_scope", "product_scope_json"),
+            ("cadence", "cadence_json"),
+            ("quiet_hours", "quiet_hours_json"),
+        ):
+            try:
+                item[key] = json.loads(item.pop(fallback) or ("{}" if key != "product_scope" else "[]"))
+            except (TypeError, ValueError):
+                item[key] = {} if key != "product_scope" else []
+        item["active"] = bool(item.get("active"))
+        item["allow_image_send"] = bool(item.get("allow_image_send"))
+        return item
+
+    def _campaign(self, campaign_id, connection=None):
+        own = connection is None
+        connection = connection or self._connect()
+        try:
+            row = connection.execute(
+                "SELECT * FROM marketing_campaigns WHERE campaign_id=?", (str(campaign_id),)
+            ).fetchone()
+            return self._campaign_row(row)
+        finally:
+            if own:
+                connection.close()
+
+    def create_campaign(self, payload):
+        prepared = self._campaign_payload(payload)
+        campaign_id = prepared["campaign_id"] or uuid.uuid4().hex
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,79}", campaign_id):
+            raise MarketingAutomationError("活动编号格式无效", "INVALID_CAMPAIGN_ID")
+        now = self._now()
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                "INSERT INTO marketing_campaigns(campaign_id,name,objective,target_rules_json,product_scope_json,"
+                "allow_image_send,cadence_json,max_touches,quiet_hours_json,language_policy,active,paused_reason,created_at,updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    campaign_id, prepared["name"], prepared["objective"],
+                    json.dumps(prepared["target_rules"], ensure_ascii=False, sort_keys=True),
+                    json.dumps(prepared["product_scope"], ensure_ascii=False),
+                    int(prepared["allow_image_send"]),
+                    json.dumps(prepared["cadence"], ensure_ascii=False, sort_keys=True),
+                    prepared["max_touches"],
+                    json.dumps(prepared["quiet_hours"], ensure_ascii=False, sort_keys=True),
+                    prepared["language_policy"], int(prepared["active"]), prepared["paused_reason"], now, now,
+                ),
+            )
+            connection.commit()
+        except sqlite3.IntegrityError as error:
+            connection.rollback()
+            raise MarketingAutomationError("活动编号已存在", "CAMPAIGN_EXISTS") from error
+        finally:
+            connection.close()
+        return self._campaign(campaign_id)
+
+    def update_campaign(self, campaign_id, payload):
+        campaign = self._campaign(campaign_id)
+        if campaign is None:
+            raise MarketingAutomationError("活动不存在", "CAMPAIGN_NOT_FOUND")
+        prepared = self._campaign_payload(payload, campaign)
+        now = self._now()
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                "UPDATE marketing_campaigns SET name=?,objective=?,target_rules_json=?,product_scope_json=?,"
+                "allow_image_send=?,cadence_json=?,max_touches=?,quiet_hours_json=?,language_policy=?,active=?,"
+                "paused_reason=?,updated_at=? WHERE campaign_id=?",
+                (
+                    prepared["name"], prepared["objective"],
+                    json.dumps(prepared["target_rules"], ensure_ascii=False, sort_keys=True),
+                    json.dumps(prepared["product_scope"], ensure_ascii=False), int(prepared["allow_image_send"]),
+                    json.dumps(prepared["cadence"], ensure_ascii=False, sort_keys=True), prepared["max_touches"],
+                    json.dumps(prepared["quiet_hours"], ensure_ascii=False, sort_keys=True), prepared["language_policy"],
+                    int(prepared["active"]), prepared["paused_reason"], now, str(campaign_id),
+                ),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        return self._campaign(campaign_id)
+
+    def list_campaigns(self, include_inactive=False):
+        connection = self._connect()
+        try:
+            query = "SELECT * FROM marketing_campaigns"
+            if not include_inactive:
+                query += " WHERE active=1"
+            rows = connection.execute(query + " ORDER BY updated_at DESC, campaign_id").fetchall()
+        finally:
+            connection.close()
+        items = [self._campaign_row(row) for row in rows]
+        return {"items": items, "total": len(items)}
+
+    def pause_campaign(self, campaign_id, reason):
+        campaign = self._campaign(campaign_id)
+        if campaign is None:
+            raise MarketingAutomationError("活动不存在", "CAMPAIGN_NOT_FOUND")
+        text = str(reason or "人工暂停").strip()[:500] or "人工暂停"
+        return self.update_campaign(campaign_id, {"active": False, "paused_reason": text})
+
+    def resume_campaign(self, campaign_id):
+        campaign = self._campaign(campaign_id)
+        if campaign is None:
+            raise MarketingAutomationError("活动不存在", "CAMPAIGN_NOT_FOUND")
+        return self.update_campaign(campaign_id, {"active": True, "paused_reason": None})
+
+    @staticmethod
+    def _state_row(row):
+        if row is None:
+            return None
+        item = dict(row)
+        item["opt_out"] = bool(item.get("opt_out"))
+        item["touch_count"] = int(item.get("touch_count") or 0)
+        return item
+
+    def contact_state(self, session_name, chat_key_hmac, campaign_id):
+        connection = self._connect()
+        try:
+            row = connection.execute(
+                "SELECT * FROM marketing_contact_states WHERE campaign_id=? AND session_name=? AND chat_key_hmac=?",
+                (str(campaign_id), str(session_name), str(chat_key_hmac)),
+            ).fetchone()
+        finally:
+            connection.close()
+        return self._state_row(row)
+
+    def _ensure_contact(self, state, now, connection):
+        if not isinstance(state, dict):
+            raise MarketingAutomationError("客户状态格式无效", "INVALID_CONTACT_STATE")
+        campaign_id = str(state.get("campaign_id") or "").strip()
+        session_name = str(state.get("session_name") or "").strip()
+        chat_key = str(state.get("chat_key_hmac") or "").strip()
+        if not campaign_id or not session_name or not chat_key or len(chat_key) > 256:
+            raise MarketingAutomationError("客户状态标识无效", "INVALID_CONTACT_STATE")
+        row = connection.execute(
+            "SELECT * FROM marketing_contact_states WHERE campaign_id=? AND session_name=? AND chat_key_hmac=?",
+            (campaign_id, session_name, chat_key),
+        ).fetchone()
+        if row is not None:
+            return self._state_row(row)
+        connection.execute(
+            "INSERT INTO marketing_contact_states(campaign_id,session_name,chat_key_hmac,stage,interest_product_id,"
+            "last_contact_at,last_reply_at,next_action_at,touch_count,paused_reason,opt_out,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                campaign_id, session_name, chat_key, str(state.get("stage") or "ELIGIBLE").upper(),
+                state.get("interest_product_id"), state.get("last_contact_at"), state.get("last_reply_at"),
+                state.get("next_action_at"), int(state.get("touch_count") or 0), state.get("paused_reason"),
+                int(bool(state.get("opt_out"))), now, now,
+            ),
+        )
+        row = connection.execute(
+            "SELECT * FROM marketing_contact_states WHERE campaign_id=? AND session_name=? AND chat_key_hmac=?",
+            (campaign_id, session_name, chat_key),
+        ).fetchone()
+        return self._state_row(row)
+
+    def _record_event(self, state, event_type, now, connection, product_id=None, metadata=None):
+        payload = metadata if isinstance(metadata, dict) else {}
+        try:
+            encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+        except (TypeError, ValueError):
+            encoded = "{}"
+        connection.execute(
+            "INSERT INTO marketing_events(event_id,campaign_id,session_name,chat_key_hmac,event_type,product_id,asset_id,metadata_json,created_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?)",
+            (
+                uuid.uuid4().hex, state["campaign_id"], state["session_name"], state["chat_key_hmac"],
+                str(event_type)[:80], str(product_id or state.get("interest_product_id") or "")[:200] or None,
+                None, encoded, int(now),
+            ),
+        )
+
+    def transition_contact(self, state, event, now):
+        current = dict(state or {})
+        now = self._now(now)
+        canonical = _CONTACT_EVENT_ALIASES.get(str(event or "").strip().upper(), str(event or "").strip().lower())
+        if canonical not in {
+            "eligible", "contacted", "follow_up_due", "customer_reply", "qualified", "human_takeover",
+            "pause", "resume", "opt_out", "max_touches", "complete",
+        }:
+            raise MarketingAutomationError("客户状态事件无效", "INVALID_CONTACT_EVENT")
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            persisted = self._ensure_contact(current, now, connection)
+            current = dict(persisted or current)
+            campaign = self._campaign(current.get("campaign_id"), connection)
+            if campaign is None:
+                raise MarketingAutomationError("活动不存在", "CAMPAIGN_NOT_FOUND")
+            stage = str(current.get("stage") or "ELIGIBLE").upper()
+            if stage not in CAMPAIGN_STAGES:
+                stage = "ELIGIBLE"
+            touch_count = int(current.get("touch_count") or 0)
+            next_action = current.get("next_action_at")
+            last_contact = current.get("last_contact_at")
+            last_reply = current.get("last_reply_at")
+            paused_reason = current.get("paused_reason")
+            opt_out = bool(current.get("opt_out"))
+            product_id = current.get("interest_product_id")
+            # Opt-out, customer replies and human handoff are suppression events;
+            # only a matching resume can move a paused contact back to ELIGIBLE.
+            if opt_out and canonical != "opt_out":
+                connection.commit()
+                return current
+            if stage in {"OPTED_OUT", "COMPLETED"} and canonical not in {"opt_out", "complete"}:
+                connection.commit()
+                return current
+            if canonical == "eligible":
+                stage = "ELIGIBLE"
+                try:
+                    next_action = int(current["next_action_at"]) if current.get("next_action_at") is not None else None
+                except (TypeError, ValueError):
+                    next_action = None
+            elif canonical == "contacted":
+                if stage not in {"ELIGIBLE", "FOLLOW_UP_DUE", "PAUSED"}:
+                    connection.commit()
+                    return current
+                if touch_count >= campaign["max_touches"]:
+                    canonical = "max_touches"
+                    stage, next_action = "COMPLETED", None
+                else:
+                    stage = "CONTACTED"
+                    touch_count += 1
+                    last_contact = now
+                    follow_hours = float(campaign.get("cadence", {}).get("follow_up_hours", 24) or 24)
+                    next_action = now + int(follow_hours * 3600)
+            if canonical == "follow_up_due":
+                if stage == "CONTACTED" and touch_count < campaign["max_touches"]:
+                    stage = "FOLLOW_UP_DUE"
+                elif touch_count >= campaign["max_touches"]:
+                    stage, next_action = "COMPLETED", None
+            elif canonical == "customer_reply":
+                stage, next_action, last_reply = "REPLIED", None, now
+            elif canonical == "qualified":
+                if stage in {"REPLIED", "CONTACTED", "FOLLOW_UP_DUE"}:
+                    stage, next_action = "QUALIFIED", None
+            elif canonical == "human_takeover":
+                stage, next_action, paused_reason = "HUMAN_HANDOFF", None, "human_takeover"
+            elif canonical == "pause":
+                stage, next_action = "PAUSED", None
+                paused_reason = str(current.get("paused_reason") or "manual_pause")[:500]
+            elif canonical == "resume":
+                if stage in {"PAUSED", "HUMAN_HANDOFF"}:
+                    stage, next_action, paused_reason = "ELIGIBLE", now, None
+            elif canonical == "opt_out":
+                stage, next_action, opt_out, paused_reason = "OPTED_OUT", None, True, "opt_out"
+            elif canonical in {"max_touches", "complete"}:
+                stage, next_action = "COMPLETED", None
+            connection.execute(
+                "UPDATE marketing_contact_states SET stage=?,interest_product_id=?,last_contact_at=?,last_reply_at=?,"
+                "next_action_at=?,touch_count=?,paused_reason=?,opt_out=?,updated_at=? WHERE contact_id=?",
+                (
+                    stage, product_id, last_contact, last_reply, next_action, touch_count, paused_reason,
+                    int(opt_out), now, current["contact_id"],
+                ),
+            )
+            current.update({
+                "stage": stage, "interest_product_id": product_id, "last_contact_at": last_contact,
+                "last_reply_at": last_reply, "next_action_at": next_action, "touch_count": touch_count,
+                "paused_reason": paused_reason, "opt_out": opt_out, "updated_at": now,
+            })
+            self._record_event(current, canonical, now, connection, product_id=product_id)
+            connection.commit()
+            return current
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def record_customer_message(self, session_name, chat_id, text="", now=None):
+        """Stop existing campaign contacts as soon as a customer replies.
+
+        The raw chat id is accepted only at this internal boundary and is
+        immediately converted to the same HMAC used by the ChatService.
+        Contacts that have not been created by a campaign are not materialized.
+        """
+        if self.chat_service is None or not hasattr(self.chat_service, "_chat_key"):
+            return 0
+        session = str(session_name or "").strip()
+        value = str(chat_id or "").strip()
+        if not session or not value:
+            return 0
+        try:
+            chat_key = self.chat_service._chat_key(session, value)
+        except Exception:
+            return 0
+        stamp = self._now(now)
+        changed = 0
+        history = [{"from_me": False, "body": str(text or "")}] if text else None
+        campaigns = self.list_campaigns(include_inactive=True).get("items", [])
+        for campaign in campaigns:
+            state = self.contact_state(session, chat_key, campaign["campaign_id"])
+            if not state:
+                continue
+            try:
+                reason = self.chat_service.marketing_stop_reason(
+                    session,
+                    value,
+                    since_timestamp=0,
+                    history=history,
+                )
+            except Exception:
+                reason = "CUSTOMER_REPLIED"
+            event = "opt_out" if reason == "OPT_OUT" else "customer_reply"
+            prior_stage = state.get("stage")
+            updated = self.transition_contact(state, event, stamp)
+            if updated.get("stage") != prior_stage or event == "opt_out":
+                changed += 1
+        return changed
 
     def _safe_log(self, level, event, message, session):
         if not self.logger:
@@ -222,6 +757,201 @@ class MarketingAutomationService:
     def _candidate_id(candidate):
         return str(candidate.get("chat_id") or "").strip() if isinstance(candidate, dict) else ""
 
+    @staticmethod
+    def _quiet_hours_active(campaign, now):
+        quiet = campaign.get("quiet_hours") if isinstance(campaign, dict) else {}
+        if not isinstance(quiet, dict) or not quiet.get("start") or not quiet.get("end"):
+            return False
+        try:
+            start_hour, start_minute = [int(item) for item in str(quiet["start"]).split(":", 1)]
+            end_hour, end_minute = [int(item) for item in str(quiet["end"]).split(":", 1)]
+            current = datetime.fromtimestamp(int(now), SHANGHAI_TZ)
+            minute = current.hour * 60 + current.minute
+            start = start_hour * 60 + start_minute
+            end = end_hour * 60 + end_minute
+        except (TypeError, ValueError):
+            return False
+        if start == end:
+            return True
+        if start < end:
+            return start <= minute < end
+        return minute >= start or minute < end
+
+    @staticmethod
+    def _candidate_target_matches(candidate, campaign, session):
+        rules = campaign.get("target_rules") if isinstance(campaign, dict) else {}
+        if not isinstance(rules, dict):
+            return True
+        sessions = rules.get("sessions") or []
+        if sessions and str(session) not in {str(item) for item in sessions}:
+            return False
+        if rules.get("include_labels") or rules.get("labels"):
+            expected = {str(item).casefold() for item in (rules.get("include_labels") or rules.get("labels") or [])}
+            labels = {str(item).casefold() for item in (candidate.get("labels") or [])}
+            history_text = " ".join(
+                str(item.get("body") or item.get("caption") or "")
+                for item in (candidate.get("history") or []) if isinstance(item, dict)
+            ).casefold()
+            if not (expected & labels) and not any(item in history_text for item in expected):
+                return False
+        if rules.get("exclude_labels"):
+            excluded = {str(item).casefold() for item in rules.get("exclude_labels")}
+            labels = {str(item).casefold() for item in (candidate.get("labels") or [])}
+            history_text = " ".join(
+                str(item.get("body") or item.get("caption") or "")
+                for item in (candidate.get("history") or []) if isinstance(item, dict)
+            ).casefold()
+            if excluded & labels or any(item in history_text for item in excluded):
+                return False
+        return True
+
+    def _campaign_stop_reason(self, session, candidate, state):
+        chat_id = self._candidate_id(candidate)
+        if not chat_id:
+            return "INVALID_CHAT"
+        helper = getattr(self.chat_service, "marketing_stop_reason", None)
+        if callable(helper):
+            try:
+                return str(helper(
+                    session,
+                    chat_id,
+                    since_timestamp=int(state.get("last_contact_at") or 0),
+                    history=candidate.get("history"),
+                ) or "")
+            except TypeError:
+                try:
+                    return str(helper(session, chat_id, int(state.get("last_contact_at") or 0), candidate.get("history")) or "")
+                except Exception:
+                    return "STOP_CHECK_FAILED"
+            except Exception:
+                return "STOP_CHECK_FAILED"
+        try:
+            if self.chat_service.is_human_takeover(session, chat_id):
+                return "HUMAN_TAKEOVER"
+            if self.chat_service.is_marketing_opted_out(session, chat_id, history=candidate.get("history")):
+                return "OPT_OUT"
+            if state.get("last_contact_at") and self.chat_service.has_inbound_since(
+                    session, chat_id, int(state.get("last_contact_at"))):
+                return "CUSTOMER_REPLIED"
+        except Exception:
+            return "STOP_CHECK_FAILED"
+        return ""
+
+    def _prepare_campaign_contact(self, session, campaign, candidate, now):
+        chat_key = str(candidate.get("chat_key_hmac") or "").strip()
+        if not chat_key:
+            return None
+        state = self.contact_state(session, chat_key, campaign["campaign_id"])
+        if state is None:
+            cadence = campaign.get("cadence") if isinstance(campaign.get("cadence"), dict) else {}
+            try:
+                first_delay = max(0.0, float(cadence.get("first_delay_hours", 0) or 0))
+            except (TypeError, ValueError):
+                first_delay = 0.0
+            next_action = now + int(first_delay * 3600) if first_delay else None
+            state = self.transition_contact({
+                "campaign_id": campaign["campaign_id"],
+                "session_name": session,
+                "chat_key_hmac": chat_key,
+                "next_action_at": next_action,
+            }, "eligible", now)
+        stop_reason = self._campaign_stop_reason(session, candidate, state)
+        if stop_reason == "HUMAN_TAKEOVER":
+            return self.transition_contact(state, "human_takeover", now)
+        if stop_reason == "OPT_OUT":
+            return self.transition_contact(state, "opt_out", now)
+        if stop_reason == "CUSTOMER_REPLIED":
+            return self.transition_contact(state, "customer_reply", now)
+        if stop_reason:
+            return None
+        stage = str(state.get("stage") or "ELIGIBLE").upper()
+        if stage == "CONTACTED" and state.get("next_action_at") and int(state["next_action_at"]) <= int(now):
+            state = self.transition_contact(state, "follow_up_due", now)
+            stage = str(state.get("stage") or "").upper()
+        if stage in {"REPLIED", "QUALIFIED", "HUMAN_HANDOFF", "PAUSED", "OPTED_OUT", "COMPLETED"}:
+            return None
+        if int(state.get("touch_count") or 0) >= int(campaign.get("max_touches") or 1):
+            return self.transition_contact(state, "max_touches", now)
+        if state.get("next_action_at") and int(state["next_action_at"]) > int(now):
+            return None
+        return state
+
+    def _process_campaign_candidate(self, session, candidate, settings, campaign, now):
+        if not isinstance(candidate, dict) or not self._candidate_target_matches(candidate, campaign, session):
+            return False
+        if self._quiet_hours_active(campaign, now):
+            return False
+        chat_id = self._candidate_id(candidate)
+        chat_key = str(candidate.get("chat_key_hmac") or "").strip()
+        if not chat_id or not chat_key or chat_id.endswith("@g.us"):
+            return False
+        state = self._prepare_campaign_contact(session, campaign, candidate, now)
+        if not state or str(state.get("stage") or "").upper() in {"PAUSED", "OPTED_OUT", "COMPLETED", "REPLIED", "QUALIFIED", "HUMAN_HANDOFF"}:
+            return False
+        history = candidate.get("history")
+        if not isinstance(history, list) or not history:
+            return False
+        prompt = str(campaign.get("objective") or DEFAULT_MARKETING_PROMPT).strip()
+        prompt += "\n营销活动规则：只发送与活动目标相关、可核实且简短的文字；不要编造价格、库存、优惠或承诺。"
+        if not campaign.get("allow_image_send"):
+            prompt += " 不要主动发送产品图片。"
+        prompt = prompt[:4000]
+        try:
+            generated = self.message_generator(session, chat_id, history, prompt)
+            message, mode = self._generated_message(generated)
+        except Exception:
+            self._safe_log("WARN", "marketing.generate_failed", "AI 营销文案生成失败，已跳过", session)
+            return False
+        if mode not in {"ai", "glm_vision"} or not message or len(message) > MARKETING_MAX_MESSAGE_CHARS:
+            return False
+        period = datetime.fromtimestamp(int(now), SHANGHAI_TZ).strftime("%Y-%m")
+        campaign_key = f"campaign:{campaign['campaign_id']}:{period}"
+        reservation = self._reserve(session, chat_key, campaign_key, message, now)
+        if reservation["state"] != "PENDING":
+            return False
+        request_id = reservation["request_id"]
+        try:
+            # Re-check reply, opt-out and takeover immediately before sending.
+            refreshed = self._prepare_campaign_contact(session, campaign, candidate, now)
+            if not refreshed or str(refreshed.get("stage") or "").upper() not in {"ELIGIBLE", "FOLLOW_UP_DUE"}:
+                self._finish(request_id, "FAILED", now, "MARKETING_STOPPED")
+                return False
+            result = self.chat_service.send_automated_text(session, chat_id, message, request_id)
+            state_name = str(result.get("state") if isinstance(result, dict) else "").upper()
+            if state_name != "SENT":
+                code = "WAHA_SEND_UNKNOWN" if state_name == "UNKNOWN" else "WAHA_SEND_FAILED"
+                self._finish(request_id, "UNKNOWN" if state_name == "UNKNOWN" else "FAILED", now, code)
+                return False
+            self._finish(request_id, "SENT", now, message_ref=(result.get("message_ref") if isinstance(result, dict) else None))
+            self.transition_contact(refreshed, "contacted", now)
+            self._safe_log("INFO", "marketing.sent", "已发送一条活动营销消息", session)
+            return True
+        except Exception as error:
+            error_state = str(getattr(error, "state", "") or "").upper()
+            state_name = "UNKNOWN" if error_state == "UNKNOWN" else "FAILED"
+            code = str(getattr(error, "code", "") or "")
+            if not re.fullmatch(r"[A-Za-z0-9_.-]{1,80}", code):
+                code = "WAHA_SEND_UNKNOWN" if state_name == "UNKNOWN" else "WAHA_SEND_FAILED"
+            self._finish(request_id, state_name, now, code)
+            self._safe_log("WARN", "marketing.send_failed", "活动营销消息发送未完成", session)
+            return False
+
+    def _run_campaign(self, session, campaign, settings, now, remaining):
+        rules = campaign.get("target_rules") if isinstance(campaign.get("target_rules"), dict) else {}
+        idle_days = _bounded_int(rules.get("idle_days", settings.get("ai_marketing_idle_days", 7)), 7, 1, 365)
+        try:
+            candidates = self.chat_service.marketing_candidates(session, now, idle_days, limit=200)
+        except Exception:
+            self._safe_log("WARN", "marketing.scan_failed", "营销客户扫描失败，下一周期重试", session)
+            return 0
+        sent = 0
+        for candidate in candidates if isinstance(candidates, list) else []:
+            if sent >= remaining:
+                break
+            if self._process_campaign_candidate(session, candidate, settings, campaign, now):
+                sent += 1
+        return sent
+
     def _process_candidate(self, session, candidate, settings, campaign_key, now):
         if not isinstance(candidate, dict):
             return False
@@ -316,6 +1046,20 @@ class MarketingAutomationService:
         used = self._daily_sent_count(name, now)
         if used >= daily_limit:
             return 0
+        campaigns = self.list_campaigns(include_inactive=False).get("items", [])
+        if campaigns:
+            total = 0
+            for campaign in campaigns:
+                if used + total >= daily_limit:
+                    break
+                total += self._run_campaign(
+                    name,
+                    campaign,
+                    settings,
+                    now,
+                    daily_limit - used - total,
+                )
+            return total
         idle_days = _bounded_int(self._settings_value(settings, "ai_marketing_idle_days", 7), 7, 1, 365)
         try:
             candidates = self.chat_service.marketing_candidates(name, now, idle_days, limit=200)
