@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 
 from panel.app import init_db
+from panel.chat_service import ChatSendError
 from panel.marketing_automation import MarketingAutomationError, MarketingAutomationService
 
 
@@ -38,6 +39,8 @@ class _FakeChat:
 
     def send_automated_text(self, session, chat_id, text, client_request_id):
         self.sent.append((session, chat_id, text, client_request_id))
+        if getattr(self, "send_error", None) is not None:
+            raise self.send_error
         return {"request_id": client_request_id, "state": "SENT", "kind": "text"}
 
 
@@ -208,6 +211,27 @@ class MarketingCampaignTests(unittest.TestCase):
         self.assertEqual(len(rows), 2)
         self.assertTrue(all(row[1] == "SENT" for row in rows))
         self.assertNotEqual(rows[0][0], rows[1][0])
+
+    def test_campaign_touch_retry_keeps_the_same_key_across_month_boundary(self):
+        campaign = self.service.create_campaign({"name": "跨月重试", "objective": "跟进", "max_touches": 2})
+        self.chat.send_error = ChatSendError("failed", "FAILED", "WAHA_SEND_FAILED")
+        self.service._last_scan.clear()
+        self.assertEqual(self.service.run_once(self.clock[0]), 0)
+        self.chat.send_error = None
+        self.service._last_scan.clear()
+        self.clock[0] += 31 * DAY
+        self.assertEqual(self.service.run_once(self.clock[0]), 1)
+        connection = sqlite3.connect(self.database)
+        try:
+            rows = connection.execute(
+                "SELECT campaign_key,state FROM ai_marketing_send_requests "
+                "WHERE session_name=? AND chat_key_hmac=? ORDER BY id",
+                ("default", "customer-key-1"),
+            ).fetchall()
+        finally:
+            connection.close()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0][1], "SENT")
 
     def test_quiet_hours_and_daily_limit_skip_campaign_contacts(self):
         campaign = self.service.create_campaign({

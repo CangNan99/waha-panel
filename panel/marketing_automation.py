@@ -910,9 +910,11 @@ class MarketingAutomationService:
             refreshed = self._prepare_campaign_contact(session, campaign, candidate, now)
             if not refreshed or str(refreshed.get("stage") or "").upper() not in {"ELIGIBLE", "FOLLOW_UP_DUE"}:
                 return False
-            period = datetime.fromtimestamp(int(now), SHANGHAI_TZ).strftime("%Y-%m")
             touch_number = int(refreshed.get("touch_count") or 0) + 1
-            campaign_key = f"campaign:{campaign['campaign_id']}:{period}:touch:{touch_number}"
+            # The touch sequence is stable across calendar boundaries.  A
+            # month component would create a second ledger row when a pending
+            # or failed touch is retried after midnight on the first day.
+            campaign_key = f"campaign:{campaign['campaign_id']}:touch:{touch_number}"
             reservation = self._reserve(session, chat_key, campaign_key, message, now)
             if reservation["state"] != "PENDING":
                 return False
