@@ -713,7 +713,13 @@ class MarketingDeliveryService:
         reservation = self.reserve(delivery)
         delivery_id = reservation["delivery_id"]
         if not reservation.get("reserved"):
-            if reservation.get("state") in {"PENDING", "SENT", "UNKNOWN", "FAILED", "STOPPED", "SKIPPED"}:
+            if reservation.get("state") == "PENDING":
+                # A worker may have reserved the bundle and crashed before
+                # calling the transport.  Reconcile the generic text ledger
+                # first; if it already confirms SENT, reconciliation can also
+                # continue a REQUESTED image after a process restart.
+                return self.reconcile(delivery_id)
+            if reservation.get("state") in {"SENT", "UNKNOWN", "FAILED", "STOPPED", "SKIPPED"}:
                 return reservation
         row = self._get(delivery_id)
         if row is None:

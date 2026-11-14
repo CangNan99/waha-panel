@@ -682,6 +682,20 @@ class MarketingAutomationService:
         return value[:200]
 
     @staticmethod
+    def _delivery_id(session, chat_key, campaign_id, touch_number):
+        """Derive a per-contact delivery key without persisting raw chat ids."""
+        raw = "\x00".join(
+            (
+                "marketing-delivery-v1",
+                str(session or "").strip(),
+                str(chat_key or "").strip(),
+                str(campaign_id or "").strip(),
+                str(int(touch_number or 0)),
+            )
+        ).encode("utf-8")
+        return "delivery-" + hashlib.sha256(raw).hexdigest()[:48]
+
+    @staticmethod
     def _day_start(timestamp):
         current = datetime.fromtimestamp(int(timestamp), SHANGHAI_TZ)
         return int(current.replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
@@ -1099,7 +1113,12 @@ class MarketingAutomationService:
             campaign_key = f"campaign:{campaign['campaign_id']}:touch:{touch_number}"
             if self.delivery_service is not None:
                 delivery = {
-                    "delivery_id": campaign_key,
+                    "delivery_id": self._delivery_id(
+                        session,
+                        chat_key,
+                        campaign["campaign_id"],
+                        touch_number,
+                    ),
                     "campaign_id": campaign["campaign_id"],
                     "session_name": session,
                     "chat_id": chat_id,

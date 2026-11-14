@@ -199,11 +199,64 @@ class MarketingDeliveryTests(unittest.TestCase):
             self.images,
             clock=lambda: self.clock[0],
         )
-        result = recovered.reconcile("delivery-restart")
+        result = recovered.send_text_and_optional_image(self._base(delivery_id="delivery-restart"))
         self.assertEqual(result["state"], "SENT")
         self.assertEqual(result["text_state"], "SENT")
         self.assertEqual(result["image_state"], "SENT")
         self.assertEqual(len(self.chat.image_calls), 1)
+
+    def test_marketing_automation_derives_distinct_delivery_ids_per_customer(self):
+        captured = []
+
+        class _Delivery:
+            def send_text_and_optional_image(self, payload):
+                captured.append(dict(payload))
+                return {"delivery_id": payload["delivery_id"], "state": "SENT"}
+
+        from panel.marketing_automation import MarketingAutomationService
+
+        chat = _Chat()
+        service = MarketingAutomationService(
+            self.database,
+            chat,
+            settings_loader=lambda _session: {
+                "marketing_product_image_enabled": "1",
+                "product_image_global_kill_switch": "0",
+                "ai_marketing_cooldown_days": "1",
+            },
+            sessions_loader=lambda: [],
+            message_generator=lambda *_args: ("您好，继续为您介绍 product-1", "ai"),
+            clock=lambda: self.clock[0],
+            delivery_service=_Delivery(),
+        )
+        campaign = service.create_campaign({
+            "campaign_id": "campaign-delivery-key",
+            "name": "营销图片",
+            "objective": "跟进产品",
+            "allow_image_send": True,
+            "product_scope": ["product-1"],
+            "max_touches": 2,
+        })
+        settings = {
+            "ai_marketing_cooldown_days": "1",
+            "marketing_product_image_enabled": "1",
+            "product_image_global_kill_switch": "0",
+        }
+        for suffix in ("one", "two"):
+            candidate = {
+                "chat_id": f"customer-{suffix}@c.us",
+                "chat_key_hmac": f"chat-key-{suffix}",
+                "last_inbound_at": self.clock[0] - DAY,
+                "last_outbound_at": self.clock[0] - 2 * DAY,
+                "history": [{"from_me": False, "body": "我想了解 product-1"}],
+            }
+            self.assertTrue(
+                service._process_campaign_candidate(
+                    "default", candidate, settings, campaign, self.clock[0], daily_limit=20
+                )
+            )
+        self.assertEqual(len(captured), 2)
+        self.assertNotEqual(captured[0]["delivery_id"], captured[1]["delivery_id"])
 
     def test_confirmed_image_failure_requires_explicit_reconciliation(self):
         self.chat.image_state = "FAILED"
