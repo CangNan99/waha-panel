@@ -739,7 +739,11 @@ class MarketingAutomationService:
                             (automated["waha_message_id"], int(now), int(row["id"])),
                         )
                         connection.commit()
-                        return {"state": "SENT", "request_id": row["client_request_id"]}
+                        return {
+                            "state": "SENT",
+                            "request_id": row["client_request_id"],
+                            "reconciled": True,
+                        }
                     if automated_state in {"FAILED", "UNKNOWN"}:
                         connection.execute(
                             "UPDATE ai_marketing_send_requests SET state=?,error_code=?,updated_at=? WHERE id=?",
@@ -785,12 +789,13 @@ class MarketingAutomationService:
             connection.close()
 
     def _finish(self, request_id, state, now, error_code=None, message_ref=None):
+        final_state = str(state).upper()
         connection = self._connect()
         try:
             connection.execute(
                 "UPDATE ai_marketing_send_requests SET state=?,waha_message_id=?,error_code=?,updated_at=? "
-                "WHERE client_request_id=?",
-                (str(state).upper(), message_ref, error_code, int(now), str(request_id)),
+                "WHERE client_request_id=? AND NOT (state='SENT' AND ? <> 'SENT')",
+                (final_state, message_ref, error_code, int(now), str(request_id), final_state),
             )
             connection.commit()
         finally:
@@ -820,7 +825,11 @@ class MarketingAutomationService:
         try:
             start_hour, start_minute = [int(item) for item in str(quiet["start"]).split(":", 1)]
             end_hour, end_minute = [int(item) for item in str(quiet["end"]).split(":", 1)]
-            current = datetime.fromtimestamp(int(now), SHANGHAI_TZ)
+            try:
+                timezone = ZoneInfo(str(quiet.get("timezone") or "Asia/Shanghai"))
+            except Exception:
+                timezone = SHANGHAI_TZ
+            current = datetime.fromtimestamp(int(now), timezone)
             minute = current.hour * 60 + current.minute
             start = start_hour * 60 + start_minute
             end = end_hour * 60 + end_minute
@@ -877,18 +886,32 @@ class MarketingAutomationService:
         chat_id = self._candidate_id(candidate)
         if not chat_id:
             return "INVALID_CHAT"
+        # A newly created contact has no last_contact_at yet. Use the
+        # candidate snapshot as the baseline so a reply arriving between the
+        # idle scan and the send-time check is still detected. The candidate's
+        # own inbound message is excluded because has_inbound_since uses a
+        # strict greater-than cutoff.
+        try:
+            since_timestamp = int(state.get("last_contact_at") or 0)
+        except (TypeError, ValueError):
+            since_timestamp = 0
+        if since_timestamp <= 0:
+            try:
+                since_timestamp = int(candidate.get("last_inbound_at") or 0)
+            except (TypeError, ValueError):
+                since_timestamp = 0
         helper = getattr(self.chat_service, "marketing_stop_reason", None)
         if callable(helper):
             try:
                 return str(helper(
                     session,
                     chat_id,
-                    since_timestamp=int(state.get("last_contact_at") or 0),
+                    since_timestamp=since_timestamp,
                     history=candidate.get("history"),
                 ) or "")
             except TypeError:
                 try:
-                    return str(helper(session, chat_id, int(state.get("last_contact_at") or 0), candidate.get("history")) or "")
+                    return str(helper(session, chat_id, since_timestamp, candidate.get("history")) or "")
                 except Exception:
                     return "STOP_CHECK_FAILED"
             except Exception:
@@ -898,8 +921,8 @@ class MarketingAutomationService:
                 return "HUMAN_TAKEOVER"
             if self.chat_service.is_marketing_opted_out(session, chat_id, history=candidate.get("history")):
                 return "OPT_OUT"
-            if state.get("last_contact_at") and self.chat_service.has_inbound_since(
-                    session, chat_id, int(state.get("last_contact_at"))):
+            if since_timestamp > 0 and self.chat_service.has_inbound_since(
+                    session, chat_id, since_timestamp):
                 return "CUSTOMER_REPLIED"
         except Exception:
             return "STOP_CHECK_FAILED"
@@ -989,6 +1012,22 @@ class MarketingAutomationService:
             reservation = self._reserve(
                 session, chat_key, campaign_key, message, now, daily_limit=daily_limit
             )
+            if reservation.get("state") == "SENT" and reservation.get("reconciled"):
+                # The generic automated ledger confirmed a transport success
+                # after a previous worker crashed. Advance the contact state
+                # without sending a duplicate or counting this scan twice.
+                latest = self._prepare_campaign_contact(session, campaign, candidate, now)
+                if latest and str(latest.get("stage") or "").upper() in {"ELIGIBLE", "FOLLOW_UP_DUE"}:
+                    try:
+                        self.transition_contact(latest, "contacted", now)
+                    except Exception:
+                        self._safe_log(
+                            "WARN",
+                            "marketing.contact_state_failed",
+                            "营销发送已恢复，但客户状态更新未完成",
+                            session,
+                        )
+                return False
             if reservation["state"] != "PENDING":
                 return False
             request_id = reservation["request_id"]
@@ -1031,7 +1070,18 @@ class MarketingAutomationService:
 
     def _run_campaign(self, session, campaign, settings, now, remaining):
         rules = campaign.get("target_rules") if isinstance(campaign.get("target_rules"), dict) else {}
-        idle_days = _bounded_int(rules.get("idle_days", settings.get("ai_marketing_idle_days", 7)), 7, 1, 365)
+        if rules.get("idle_days") is not None:
+            scan_idle_days = rules.get("idle_days")
+        elif rules.get("min_idle_days") is not None:
+            scan_idle_days = rules.get("min_idle_days")
+        elif rules.get("max_idle_days") is not None:
+            # The candidate scan is lower-bound based. Use the upper bound so
+            # contacts inside a max-only window are not filtered out before
+            # _candidate_target_matches applies the upper limit.
+            scan_idle_days = rules.get("max_idle_days")
+        else:
+            scan_idle_days = settings.get("ai_marketing_idle_days", 7)
+        idle_days = _bounded_int(scan_idle_days, 7, 1, 365)
         try:
             candidates = self.chat_service.marketing_candidates(session, now, idle_days, limit=200)
         except Exception:

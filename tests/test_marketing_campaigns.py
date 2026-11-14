@@ -253,6 +253,16 @@ class MarketingCampaignTests(unittest.TestCase):
         connection = sqlite3.connect(self.database)
         try:
             row = connection.execute(
+                "SELECT state,client_request_id FROM ai_marketing_send_requests WHERE session_name=? AND chat_key_hmac=?",
+                ("default", "customer-key-1"),
+            ).fetchone()
+        finally:
+            connection.close()
+        self.assertEqual(row[0], "SENT")
+        self.service._finish(row[1], "UNKNOWN", self.clock[0] + 1, "late-worker")
+        connection = sqlite3.connect(self.database)
+        try:
+            row = connection.execute(
                 "SELECT state FROM ai_marketing_send_requests WHERE session_name=? AND chat_key_hmac=?",
                 ("default", "customer-key-1"),
             ).fetchone()
@@ -282,9 +292,9 @@ class MarketingCampaignTests(unittest.TestCase):
         settings = dict(self.settings)
         settings["ai_marketing_daily_limit"] = "1"
         chat_a = _FakeChat()
-        chat_a.candidates = [candidates[0]]
+        chat_a.marketing_candidates = lambda _session, _now, _idle_days, limit=200: [candidates[0]]
         chat_b = _FakeChat()
-        chat_b.candidates = [candidates[1]]
+        chat_b.marketing_candidates = lambda _session, _now, _idle_days, limit=200: [candidates[1]]
         service_a = MarketingAutomationService(
             self.database, chat_a, settings_loader=lambda _session: dict(settings),
             sessions_loader=lambda: ["default"],
@@ -336,6 +346,44 @@ class MarketingCampaignTests(unittest.TestCase):
         self.service.message_generator = generate_and_pause
         self.service._last_scan.clear()
         self.assertEqual(self.service.run_once(self.clock[0]), 0)
+        self.assertEqual(self.chat.sent, [])
+
+    def test_new_contact_reply_since_scan_baseline_stops_first_touch(self):
+        self.service.create_campaign({"name": "扫描后回复", "objective": "跟进"})
+        self.chat.recent.add("customer-1@c.us")
+
+        def stop_reason(_session, chat_id, since_timestamp=0, history=None):
+            return "CUSTOMER_REPLIED" if chat_id in self.chat.recent and since_timestamp > 0 else ""
+
+        self.chat.marketing_stop_reason = stop_reason
+        self.service._last_scan.clear()
+        self.assertEqual(self.service.run_once(self.clock[0]), 0)
+        self.assertEqual(self.chat.sent, [])
+
+    def test_generic_transport_reconciliation_advances_contact_without_duplicate(self):
+        campaign = self.service.create_campaign({"name": "恢复发送", "objective": "跟进"})
+        campaign_key = f"campaign:{campaign['campaign_id']}:touch:1"
+        request_id = self.service._request_id("default", "customer-key-1", campaign_key)
+        now = self.clock[0]
+        connection = sqlite3.connect(self.database)
+        try:
+            connection.execute(
+                "INSERT INTO ai_marketing_send_requests(session_name,chat_key_hmac,campaign_key,client_request_id,message_hash,state,created_at,updated_at) "
+                "VALUES (?,?,?,?,?,'PENDING',?,?)",
+                ("default", "customer-key-1", campaign_key, request_id, "hash", now, now),
+            )
+            connection.execute(
+                "INSERT INTO automated_send_requests(client_request_id,session_name,chat_id,payload_hash,state,waha_message_id,error_code,updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                (request_id, "default", "customer-1@c.us", "hash", "SENT", "waha-ref", None, now),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        self.service._last_scan.clear()
+        self.assertEqual(self.service.run_once(now), 0)
+        state = self.service.contact_state("default", "customer-key-1", campaign["campaign_id"])
+        self.assertEqual((state["stage"], state["touch_count"]), ("CONTACTED", 1))
         self.assertEqual(self.chat.sent, [])
 
     def test_suppressed_contact_cannot_be_reset_to_eligible_by_transition(self):
