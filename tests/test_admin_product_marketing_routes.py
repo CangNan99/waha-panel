@@ -200,6 +200,18 @@ class AdminProductMarketingRouteTests(unittest.TestCase):
         )
         self.assertEqual(status, 400)
         status, _ = self.request(
+            "/api/marketing/campaigns",
+            method="POST",
+            payload={
+                "campaign_id": "raw-contact-campaign",
+                "name": "原始联系人测试",
+                "objective": "测试",
+                "target_rules": {"contact_ref": "12345@c.us"},
+            },
+            csrf=True,
+        )
+        self.assertEqual(status, 400)
+        status, _ = self.request(
             "/api/product-catalog",
             method="POST",
             payload={

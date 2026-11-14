@@ -6490,7 +6490,7 @@ class PanelHandler(BaseHTTPRequestHandler):
         if isinstance(value, str):
             text = value.strip()
             if re.search(
-                r"(?:https?://|data:image/|(?:[A-Za-z]:[\\/]|^/|\\\\)|-----BEGIN|\b(?:token|secret|password|api[_ -]?key)\s*[:=])",
+                r"(?:https?://|data:image/|(?:[A-Za-z]:[\\/]|^/|\\\\)|-----BEGIN|\b(?:token|secret|password|api[_ -]?key)\s*[:=]|\b\+?[0-9][0-9 .()_-]{4,24}@(c|g)\.us\b)",
                 text,
                 re.IGNORECASE,
             ):
@@ -6508,7 +6508,7 @@ class PanelHandler(BaseHTTPRequestHandler):
             return any(cls._contains_sensitive_value(item) for item in value)
         if isinstance(value, str):
             return bool(re.search(
-                r"(?:https?://|data:image/|(?:[A-Za-z]:[\\/]|^/|\\\\)|-----BEGIN|\b(?:token|secret|password|api[_ -]?key)\s*[:=])",
+                r"(?:https?://|data:image/|(?:[A-Za-z]:[\\/]|^/|\\\\)|-----BEGIN|\b(?:token|secret|password|api[_ -]?key)\s*[:=]|\b\+?[0-9][0-9 .()_-]{4,24}@(c|g)\.us\b)",
                 value,
                 re.IGNORECASE,
             ))
