@@ -4,11 +4,14 @@ import re
 import sqlite3
 import threading
 import time
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 LEVELS = frozenset({'INFO', 'WARNING', 'WARN', 'ERROR', 'CRITICAL', 'DEBUG'})
 SESSION_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$')
 EMPTY_AUTOMATION = dict.fromkeys(('human_takeover','pending','overdue','running','failed','unknown'))
+SHANGHAI_TZ = ZoneInfo('Asia/Shanghai')
 
 
 def safe_log_message(value, secrets=()):
@@ -113,6 +116,7 @@ class MonitoringService:
         result = {'scope':selected_session or 'all','generated_at':now,
                   'services':{'waha':snapshot['service'],'database':{'ok':False,'checked_at':now}},
                   'session_counts':{'total':None,'connected':None,'scan_qr':None,'failed':None},
+                  'customer_counts':{'total':None,'new_today':None},
                   'sessions':[],'automation_counts':dict(EMPTY_AUTOMATION),'recent_error_count':None,
                   'recent_errors':[],'partial_errors':errors}
         connection = None
@@ -137,12 +141,39 @@ class MonitoringService:
                     'checked_at':snapshot['checked_at'], 'auto_reply':{'enabled':enabled,'all_day':all_day,
                     'mode':'all_day' if all_day else 'scheduled' if enabled else 'off',
                     'ai_configured':bool(values.get('ai_api_key') and values.get('ai_base_url') and values.get('ai_model')),
-                    'customer_memory_enabled':truth('customer_memory_enabled')}})
+                    'customer_memory_enabled':truth('customer_memory_enabled')},
+                    'customer_counts':{'total':0,'new_today':0}})
             result['session_counts']['total']=len(rows)
             if snapshot['remote'] is not None:
                 result['session_counts'].update(connected=sum(x['state'] in {'WORKING','CONNECTED'} for x in result['sessions']),
                                                scan_qr=sum(x['state']=='SCAN_QR_CODE' for x in result['sessions']),
                                                failed=sum(x['state']=='FAILED' for x in result['sessions']))
+            try:
+                day_start = int(
+                    datetime.fromtimestamp(now, SHANGHAI_TZ)
+                    .replace(hour=0, minute=0, second=0, microsecond=0)
+                    .timestamp()
+                )
+                customer_rows = connection.execute(
+                    f"SELECT session_name, COUNT(*) AS total, "
+                    f"SUM(CASE WHEN first_inbound_at >= ? AND first_inbound_at <= ? THEN 1 ELSE 0 END) AS new_today "
+                    f"FROM customer_first_seen WHERE session_name IN ({placeholders}) GROUP BY session_name",
+                    [day_start, now, *names],
+                ).fetchall()
+                counts_by_session = {
+                    row['session_name']:{'total':int(row['total'] or 0),'new_today':int(row['new_today'] or 0)}
+                    for row in customer_rows
+                }
+                for item in result['sessions']:
+                    item['customer_counts'] = counts_by_session.get(item['name'], {'total':0,'new_today':0})
+                result['customer_counts'] = {
+                    'total':sum(item['customer_counts']['total'] for item in result['sessions']),
+                    'new_today':sum(item['customer_counts']['new_today'] for item in result['sessions']),
+                }
+            except sqlite3.Error:
+                for item in result['sessions']:
+                    item['customer_counts'] = {'total':None,'new_today':None}
+                errors.append({'component':'customers','message':'客户统计暂不可用'})
             try:
                 human=connection.execute(f"SELECT COUNT(*) FROM chat_takeovers WHERE session_name IN ({placeholders}) AND state='HUMAN_TAKEOVER' AND (auto_resume_at IS NULL OR auto_resume_at>?)",[*names,now]).fetchone()[0]
                 tasks={row['state']:row['amount'] for row in connection.execute(f'SELECT state,COUNT(*) AS amount FROM follow_up_tasks WHERE session_name IN ({placeholders}) GROUP BY state',names)}
@@ -159,6 +190,7 @@ class MonitoringService:
                 errors.append({'component':'logs','message':'异常日志统计暂不可用'})
         except sqlite3.Error:
             result['services']['database']['ok']=False
+            result['customer_counts']={'total':None,'new_today':None}
             errors.append({'component':'database','message':'数据库暂不可访问'})
         finally:
             if connection is not None:

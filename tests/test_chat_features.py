@@ -276,22 +276,22 @@ class QrAndReleaseTests(unittest.TestCase):
         readme = (root / "README.md").read_text(encoding="utf-8")
         readme_zh = (root / "README.zh-CN.md").read_text(encoding="utf-8")
 
-        self.assertEqual(release["tag"], "1.0.26")
-        self.assertEqual(release["version"], "1.0.26")
-        self.assertIn("${PANEL_IMAGE:-docker.io/cangnan88/waha-panel:1.0.26}", compose)
-        self.assertIn("${PANEL_VERSION:-1.0.26}", compose)
-        self.assertIn('os.environ.get("PANEL_VERSION", "1.0.26")', (root / "panel" / "app.py").read_text(encoding="utf-8"))
+        self.assertEqual(release["tag"], "1.0.28")
+        self.assertEqual(release["version"], "1.0.28")
+        self.assertIn("${PANEL_IMAGE:-docker.io/cangnan88/waha-panel:1.0.28}", compose)
+        self.assertIn("${PANEL_VERSION:-1.0.28}", compose)
+        self.assertIn('os.environ.get("PANEL_VERSION", "1.0.28")', (root / "panel" / "app.py").read_text(encoding="utf-8"))
         self.assertIn("mem_limit: 512m", compose)
         for installer in (env_example, install_sh, install_ps1):
-            self.assertIn("PANEL_IMAGE=docker.io/cangnan88/waha-panel:1.0.26", installer)
-            self.assertIn("PANEL_VERSION=1.0.26", installer)
+            self.assertIn("PANEL_IMAGE=docker.io/cangnan88/waha-panel:1.0.28", installer)
+            self.assertIn("PANEL_VERSION=1.0.28", installer)
             self.assertNotIn("PANEL_IMAGE=docker.io/cangnan88/waha-panel:1.0.2\n", installer)
             self.assertNotIn("PANEL_VERSION=1.0.2\n", installer)
-        self.assertIn("docker.io/cangnan88/waha-panel:1.0.26", install_docs)
+        self.assertIn("docker.io/cangnan88/waha-panel:1.0.28", install_docs)
         self.assertIn("1.0.2", release_plan)
         self.assertIn("1.0.2", release_design)
-        self.assertIn("docker.io/cangnan88/waha-panel:1.0.26", readme)
-        self.assertIn("docker.io/cangnan88/waha-panel:1.0.26", readme_zh)
+        self.assertIn("docker.io/cangnan88/waha-panel:1.0.28", readme)
+        self.assertIn("docker.io/cangnan88/waha-panel:1.0.28", readme_zh)
         for backup in ((root / "backup.sh").read_text(encoding="utf-8"), (root / "backup.ps1").read_text(encoding="utf-8")):
             self.assertIn("product-images", backup)
             self.assertIn("panel_data", backup)
@@ -309,7 +309,7 @@ class QrAndReleaseTests(unittest.TestCase):
         self.assertIn("(INSTALL.zh-CN.md)", readme_zh)
 
     def test_update_service_defaults_to_panel_1_0_26(self):
-        self.assertEqual(UpdateService().current["panel"], "1.0.26")
+        self.assertEqual(UpdateService().current["panel"], "1.0.28")
         self.assertEqual(UpdateService().current["waha"], "latest-2026.9.1")
 
 
@@ -371,6 +371,24 @@ class ChatPageRegressionTests(unittest.TestCase):
         self.assertIn("handleDrop", page)
         self.assertIn("客户备注", page)
         self.assertIn("sessionSelect", page)
+
+    def test_page_contains_protected_customer_image_preview_controls(self):
+        page = chat_management_page("default")
+        for control_id in (
+            "imagePreviewDialog",
+            "imagePreviewZoomIn",
+            "imagePreviewZoomOut",
+            "imagePreviewReset",
+            "imagePreviewClose",
+        ):
+            self.assertIn(f'id="{control_id}"', page)
+        for helper in ("openMessageImage", "closeMessageImage"):
+            self.assertIn(f"function {helper}", page)
+        self.assertIn("message-image", page)
+        self.assertIn("/media?", page)
+        self.assertIn("event.key==='Escape'", page)
+        self.assertIn("pointermove", page)
+        self.assertIn("deltaY", page)
 
     def test_page_contains_chat_engagement_controls(self):
         page = chat_management_page("default")

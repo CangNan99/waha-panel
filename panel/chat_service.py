@@ -8,6 +8,7 @@ import threading
 import time
 import uuid
 import warnings
+import unicodedata
 from collections import OrderedDict, defaultdict, deque
 from pathlib import Path
 from urllib.parse import quote, urlencode
@@ -42,6 +43,11 @@ IMAGE_TYPES = {
 }
 MEDIA_LABELS = {"image": "图片", "video": "视频", "audio": "音频", "file": "文件"}
 CONTEXT_FIELD_LIMIT = 512
+MARKETING_OPT_OUT_RE = re.compile(
+    r"退订|取消订阅|不再联系|停止(?:营销|联系)|不要(?:再)?(?:发|联系)|别再发|别发了|"
+    r"unsubscribe|stop(?:\s+messaging)?|do\s+not\s+contact|don't\s+contact|remove\s+me|no\s+more\s+messages",
+    re.IGNORECASE,
+)
 
 
 def sanitize_context_content(value, limit=65535):
@@ -414,6 +420,126 @@ class ChatService:
         items.sort(key=lambda item: (item["timestamp"], item["message_id"]))
         return items[-page_limit:]
 
+    def marketing_candidates(self, session, now, idle_days, limit=200):
+        """Return internal-only idle private chats with recent message history.
+
+        The caller is the background marketing worker; this method intentionally
+        returns raw chat ids only inside the service boundary. HTTP handlers use
+        ``overview`` instead, which always returns encrypted references.
+        """
+        name = _session_name(session)
+        try:
+            current = int(now)
+        except (TypeError, ValueError):
+            current = int(self.clock())
+        try:
+            days = max(1, min(365, int(idle_days)))
+        except (TypeError, ValueError):
+            days = 7
+        maximum = max(1, min(int(limit), 500))
+        cutoff = current - days * 24 * 60 * 60
+        candidates = []
+        offset = 0
+        while len(candidates) < maximum and offset < 1000:
+            page_size = min(100, maximum - len(candidates))
+            try:
+                raw_items = self.client.get_chats(name, page_size, offset)
+            except Exception:
+                break
+            if not isinstance(raw_items, list):
+                break
+            if not raw_items:
+                break
+            for raw in raw_items:
+                if not isinstance(raw, dict):
+                    continue
+                chat_id = _value_id(raw.get("id") or raw.get("chatId")).strip()
+                if not chat_id or chat_id.endswith("@g.us"):
+                    continue
+                try:
+                    history = self.history_for_id(name, chat_id, 20)
+                except Exception:
+                    continue
+                if not history:
+                    continue
+                inbound = [
+                    int(item.get("timestamp") or 0)
+                    for item in history
+                    if isinstance(item, dict) and not bool(item.get("from_me"))
+                ]
+                outbound = [
+                    int(item.get("timestamp") or 0)
+                    for item in history
+                    if isinstance(item, dict) and bool(item.get("from_me"))
+                ]
+                last_inbound = max(inbound or [0])
+                last_outbound = max(outbound or [0])
+                latest_activity = max(last_inbound, last_outbound)
+                if last_inbound <= 0 or latest_activity <= 0 or latest_activity > cutoff:
+                    continue
+                chat_key = self._chat_key(name, chat_id)
+                labels = []
+                label_connection = None
+                try:
+                    label_connection = sqlite3.connect(self.database_path)
+                    labels = [str(item[0]) for item in label_connection.execute(
+                        "SELECT label FROM customer_labels WHERE session_name=? AND chat_key_hmac=? "
+                        "UNION ALL SELECT label FROM customer_system_labels WHERE session_name=? AND chat_key_hmac=?",
+                        (name, chat_key, name, chat_key),
+                    ).fetchall()]
+                except sqlite3.Error:
+                    labels = []
+                finally:
+                    try:
+                        if label_connection is not None:
+                            label_connection.close()
+                    except Exception:
+                        pass
+                candidates.append({
+                    "chat_id": chat_id,
+                    "chat_key_hmac": chat_key,
+                    "last_inbound_at": last_inbound,
+                    "last_outbound_at": last_outbound,
+                    "labels": labels,
+                    "history": history,
+                })
+                if len(candidates) >= maximum:
+                    break
+            offset += len(raw_items)
+            if len(raw_items) < page_size:
+                break
+        return candidates
+
+    def is_marketing_opted_out(self, session, chat_id, history=None):
+        """Return true for explicit opt-out labels or recent opt-out text."""
+        name = _session_name(session)
+        value = str(chat_id or "").strip()
+        if not value:
+            return True
+        key = self._chat_key(name, value)
+        connection = sqlite3.connect(self.database_path)
+        try:
+            rows = connection.execute(
+                "SELECT label FROM customer_labels WHERE session_name=? AND chat_key_hmac=? "
+                "UNION ALL SELECT label FROM customer_system_labels WHERE session_name=? AND chat_key_hmac=?",
+                (name, key, name, key),
+            ).fetchall()
+        finally:
+            connection.close()
+        for (label,) in rows:
+            normalized = unicodedata.normalize("NFKC", str(label or "")).strip()
+            if MARKETING_OPT_OUT_RE.search(normalized):
+                return True
+        for item in list(history or []):
+            if not isinstance(item, dict) or bool(item.get("from_me")):
+                continue
+            text = unicodedata.normalize(
+                "NFKC", str(item.get("body") or item.get("caption") or "")
+            ).strip()
+            if MARKETING_OPT_OUT_RE.search(text):
+                return True
+        return False
+
     def has_inbound_since(self, session, chat_id, since_timestamp):
         name = _session_name(session); chat_id = str(chat_id)
         cutoff = int(since_timestamp or 0)
@@ -440,6 +566,29 @@ class ChatService:
                 break
             offset += len(raw_items)
         return False
+
+    def marketing_stop_reason(self, session, chat_id, since_timestamp=0, history=None):
+        """Return a redacted stop-condition code for campaign scheduling.
+
+        This helper keeps takeover, opt-out and reply checks in the chat service,
+        where raw chat identifiers are already available. Marketing tables only
+        receive the caller's HMAC key.
+        """
+        name = _session_name(session)
+        value = str(chat_id or "").strip()
+        if not value or value.endswith("@g.us"):
+            return "INVALID_CHAT"
+        if self.is_human_takeover(name, value):
+            return "HUMAN_TAKEOVER"
+        if self.is_marketing_opted_out(name, value, history=history):
+            return "OPT_OUT"
+        try:
+            cutoff = int(since_timestamp or 0)
+        except (TypeError, ValueError):
+            cutoff = 0
+        if cutoff > 0 and self.has_inbound_since(name, value, cutoff):
+            return "CUSTOMER_REPLIED"
+        return ""
 
     def _note_for_id(self, session, chat_id):
         name = _session_name(session)
@@ -768,6 +917,27 @@ class ChatService:
         return str(parsed)
 
     @staticmethod
+    def _automated_request_id(value):
+        """Accept UUIDs and legacy stable automation keys safely.
+
+        Browser initiated sends still require UUIDs. Follow-up tasks created by
+        older releases used stable names such as ``iptv-manual-follow-up:...``;
+        those keys are already protected by the automated-send ledger and must
+        remain reusable after an upgrade.
+        """
+        request_id = str(value or "").strip()
+        if (
+            not request_id
+            or len(request_id) > 200
+            or any(ord(char) < 32 or ord(char) == 127 for char in request_id)
+        ):
+            raise ChatSendError("发送请求编号无效", "FAILED", "INVALID_REQUEST_ID")
+        try:
+            return str(uuid.UUID(request_id))
+        except (ValueError, AttributeError):
+            return request_id
+
+    @staticmethod
     def _payload_hash(kind, *values):
         digest = hashlib.sha256()
         digest.update(str(kind).encode("utf-8"))
@@ -899,7 +1069,7 @@ class ChatService:
             raise ChatSendError("请输入要发送的文字", "FAILED", "EMPTY_TEXT")
         if len(message) > 65535:
             raise ChatSendError("文字消息过长", "FAILED", "TEXT_TOO_LONG")
-        request_id = self._request_id(client_request_id)
+        request_id = self._automated_request_id(client_request_id)
         payload_hash = self._payload_hash("automated_text", message)
         connection = sqlite3.connect(self.database_path)
         connection.row_factory = sqlite3.Row

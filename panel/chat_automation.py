@@ -35,13 +35,14 @@ class AutomationError(ChatServiceError):
 
 class ChatAutomationService:
     def __init__(self, database_path, chat_service, translation_service, logger=None,
-                 clock=time.time, scan_interval=15):
+                 clock=time.time, scan_interval=15, marketing_service=None):
         self.database_path = Path(database_path)
         self.chat_service = chat_service
         self.translation_service = translation_service
         self.logger = logger
         self.clock = clock
         self.scan_interval = max(0.1, float(scan_interval))
+        self.marketing_service = marketing_service
         codec = getattr(chat_service, "codec", None)
         self.cipher = getattr(codec, "cipher", None)
         if not self.cipher or not callable(getattr(self.cipher, "encrypt_json", None)) \
@@ -421,6 +422,12 @@ class ChatAutomationService:
                 self.resume_expired_takeovers()
             except Exception:
                 pass
+            marketing = self.marketing_service
+            if marketing is not None and hasattr(marketing, "run_once"):
+                try:
+                    marketing.run_once()
+                except Exception:
+                    pass
             self._stop_event.wait(self.scan_interval)
 
     def start(self):

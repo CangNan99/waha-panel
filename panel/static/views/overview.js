@@ -21,14 +21,17 @@ export function createView(){
       add('连接状态',el('span','state-chip '+tone,states[item.state]||'未知'));
       add('自动回复',el('span','',{all_day:'全时段',scheduled:'按时间段',off:'已关闭'}[item.auto_reply?.mode]||'暂不可用'));
       add('AI 设置',el('span','',item.auto_reply?.ai_configured?'已配置':'未配置'));
+      add('今日新客户',el('span','',number(item.customer_counts?.new_today)));
+      add('总客户数',el('span','',number(item.customer_counts?.total)));
       add('检查时间',el('span','event-meta',time(item.checked_at)));
       const actions=el('td','table-actions');
       for(const [label,url]of [['控制','/?session='+encodeURIComponent(item.name)],['聊天','/sessions/'+encodeURIComponent(item.name)+'/chats'],['设置','/settings?session='+encodeURIComponent(item.name)]]){const a=el('a','',label);a.href=url;actions.append(a);}row.append(actions);body.append(row);
     }
-    if(!rows.length){const row=el('tr');const cell=el('td','monitor-empty',data?'没有符合条件的会话':'会话状态暂不可用');cell.colSpan=6;row.append(cell);body.append(row);}
+    if(!rows.length){const row=el('tr');const cell=el('td','monitor-empty',data?'没有符合条件的会话':'会话状态暂不可用');cell.colSpan=8;row.append(cell);body.append(row);}
   }
   function render(){
     for(const node of root.querySelectorAll('[data-overview-count]'))node.textContent=number(data?.session_counts?.[node.dataset.overviewCount]);
+    for(const node of root.querySelectorAll('[data-overview-customer-count]'))node.textContent=number(data?.customer_counts?.[node.dataset.overviewCustomerCount]);
     const waha=data?.services?.waha;
     setChip($('overviewWaha'),waha?.state==='available'?'good':waha?.state==='degraded'?'warn':'bad',waha?.state==='available'?'接口可用':waha?.state==='degraded'?'部分异常':'暂不可用');
     $('overviewWahaDetail').textContent='健康接口：'+(waha?.health?.ok?'响应正常':'暂不可用')+' · 版本读取：'+(waha?.version_check?.ok?(waha.version_check.version||'正常'):'暂不可用');

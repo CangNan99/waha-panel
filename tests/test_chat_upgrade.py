@@ -270,6 +270,75 @@ class SettingsAndContextTests(UpgradeTestCase):
         self.assertFalse(self.state.settings_payload("default")["customer_memory_enabled"])
         self.assertTrue(self.state.settings_payload("sales")["customer_memory_enabled"])
 
+    def test_ai_marketing_defaults_disabled_and_round_trips_per_session(self):
+        defaults = self.state.settings_payload("default")
+        self.assertFalse(defaults["ai_marketing_enabled"])
+        self.assertEqual(defaults["ai_marketing_idle_days"], 7)
+        self.assertEqual(defaults["ai_marketing_daily_limit"], 20)
+        self.assertEqual(defaults["ai_marketing_scan_interval_minutes"], 15)
+        self.assertEqual(defaults["ai_marketing_cooldown_days"], 30)
+        saved = self.state.save_settings({
+            "ai_marketing_enabled": True,
+            "ai_marketing_idle_days": 14,
+            "ai_marketing_daily_limit": 50,
+            "ai_marketing_scan_interval_minutes": 30,
+            "ai_marketing_cooldown_days": 45,
+            "ai_marketing_prompt": "介绍新套餐",
+        }, "sales")
+        self.assertTrue(saved["ai_marketing_enabled"])
+        self.assertEqual(saved["ai_marketing_idle_days"], 14)
+        self.assertEqual(saved["ai_marketing_daily_limit"], 50)
+        self.assertEqual(saved["ai_marketing_scan_interval_minutes"], 30)
+        self.assertEqual(saved["ai_marketing_cooldown_days"], 45)
+        self.assertEqual(saved["ai_marketing_prompt"], "介绍新套餐")
+        self.assertFalse(self.state.settings_payload("default")["ai_marketing_enabled"])
+
+    def test_invalid_ai_marketing_settings_do_not_overwrite(self):
+        self.state.save_settings({"ai_marketing_idle_days": 9, "ai_marketing_daily_limit": 21}, "default")
+        before = self.state.settings_payload("default")
+        for key, value in (
+            ("ai_marketing_idle_days", 0),
+            ("ai_marketing_idle_days", 366),
+            ("ai_marketing_daily_limit", 0),
+            ("ai_marketing_daily_limit", 1001),
+            ("ai_marketing_scan_interval_minutes", 4),
+            ("ai_marketing_scan_interval_minutes", 1441),
+            ("ai_marketing_cooldown_days", 0),
+            ("ai_marketing_cooldown_days", 366),
+            ("ai_marketing_daily_limit", "20.0"),
+        ):
+            with self.assertRaises(ValueError):
+                self.state.save_settings({key: value}, "default")
+            self.assertEqual(self.state.settings_payload("default"), before)
+
+    def test_settings_page_contains_ai_marketing_controls(self):
+        page = settings_page()
+        for marker in (
+            "marketingEnabled", "marketingIdleDays", "marketingDailyLimit",
+            "marketingScanInterval", "marketingCooldownDays", "marketingPrompt",
+        ):
+            self.assertIn(marker, page)
+
+    def test_marketing_generator_uses_history_without_reply_tools(self):
+        calls = []
+
+        def fake_reply(_settings, incoming, **kwargs):
+            calls.append((incoming, kwargs))
+            return "主动营销文案", "ai"
+
+        self.state._ai_reply = fake_reply
+        result = self.state._generate_marketing_message(
+            "default",
+            "chat-1@c.us",
+            [{"timestamp": 10, "from_me": False, "body": "想了解价格", "message_id": "m1"}],
+            "介绍新套餐",
+        )
+        self.assertEqual(result, ("主动营销文案", "ai"))
+        self.assertEqual(len(calls), 1)
+        self.assertIn("介绍新套餐", calls[0][0])
+        self.assertIn("客户：想了解价格", calls[0][1]["conversation_context"])
+        self.assertFalse(calls[0][1]["include_tools"])
+
     def test_reply_delay_scale_defaults_and_round_trips_per_session(self):
         self.assertEqual(self.state.settings_payload("default")["auto_reply_delay_scale"], 100)
         self.assertEqual(self.state.settings_payload("sales")["auto_reply_delay_scale"], 100)
@@ -719,6 +788,38 @@ class WebhookArchiveTests(UpgradeTestCase):
         self.assertEqual(self.client.send_calls, 1)
         self.assertEqual(self.count_message_id("in-1"), 1)
 
+    def test_customer_first_seen_records_non_group_inbound_once(self):
+        event = self.event(body="客户问题", message_id="customer-first-seen")
+        self.state.handle_webhook(event, dispatch=False)
+        self.state.handle_webhook(event, dispatch=False)
+        self.state.handle_webhook(
+            self.event(
+                body="群聊消息",
+                chat_id="group@g.us",
+                is_group=True,
+                message_id="customer-group",
+            ),
+            dispatch=False,
+        )
+        self.state.handle_webhook(
+            self.event(
+                body="状态消息",
+                chat_id="status@broadcast",
+                message_type="status",
+                message_id="customer-status",
+            ),
+            dispatch=False,
+        )
+        with sqlite3.connect(self.database) as connection:
+            rows = connection.execute(
+                "SELECT session_name,customer_key_hmac,first_inbound_at,last_inbound_at "
+                "FROM customer_first_seen"
+            ).fetchall()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0][0], "default")
+        self.assertNotIn("chat-1@c.us", rows[0][1])
+        self.assertLessEqual(rows[0][2], rows[0][3])
+
     def test_auto_reply_is_archived_with_auto_ai_origin(self):
         result = self.state.handle_webhook(
             self.event(body="客户问题", message_id="in-auto-origin"), dispatch=True
@@ -730,6 +831,66 @@ class WebhookArchiveTests(UpgradeTestCase):
                 "AND content='测试回复'"
             ).fetchone()[0]
         self.assertEqual(origin, "auto_ai")
+
+    def test_auto_reply_marks_purchase_intent_as_a_system_label(self):
+        result = self.state.handle_webhook(
+            self.event(body="我现在想购买并付款", message_id="purchase-intent"),
+            dispatch=True,
+        )
+        self.assertEqual(result["action"], "replied")
+        labels = self.state.chat.customer_labels("default", self.chat_ref)
+        self.assertIn("购买意向", labels["system"])
+
+    def test_intent_labels_are_idempotent_and_label_errors_do_not_block_reply(self):
+        self.assertEqual(
+            self.state.handle_webhook(
+                self.event(body="我想购买", message_id="purchase-intent-1"),
+                dispatch=True,
+            )["action"],
+            "replied",
+        )
+        self.assertEqual(
+            self.state.handle_webhook(
+                self.event(body="我想购买并付款", message_id="purchase-intent-2"),
+                dispatch=True,
+            )["action"],
+            "replied",
+        )
+        labels = self.state.chat.customer_labels("default", self.chat_ref)
+        self.assertEqual(labels["system"].count("购买意向"), 1)
+
+        with patch.object(
+            self.state.chat,
+            "add_system_label_by_chat_id",
+            side_effect=RuntimeError("label store unavailable"),
+        ):
+            result = self.state.handle_webhook(
+                self.event(body="我现在想购买", message_id="purchase-intent-3"),
+                dispatch=True,
+            )
+        self.assertEqual(result["action"], "replied")
+
+    def test_intent_labels_are_not_created_when_ai_has_no_reply(self):
+        self.state._ai_reply = lambda _settings, _incoming, **_kwargs: ("", "AI_CONNECTION_ERROR")
+        result = self.state.handle_webhook(
+            self.event(body="我现在想购买并付款", message_id="purchase-intent-error"),
+            dispatch=True,
+        )
+        self.assertEqual(result["action"], "ignored")
+        labels = self.state.chat.customer_labels("default", self.chat_ref)
+        self.assertNotIn("购买意向", labels["system"])
+
+    def test_automated_send_accepts_legacy_stable_follow_up_request_ids(self):
+        request_id = "iptv-manual-follow-up:card-1"
+        first = self.state.chat.send_automated_text(
+            "default", "chat-1@c.us", "自动跟进", request_id
+        )
+        second = self.state.chat.send_automated_text(
+            "default", "chat-1@c.us", "自动跟进", request_id
+        )
+        self.assertEqual(first["state"], "SENT")
+        self.assertEqual(second["state"], "SENT")
+        self.assertEqual(self.client.send_calls, 1)
 
     def test_enabled_image_vision_fetches_customer_image_without_archiving_bytes(self):
         self.state.save_settings({

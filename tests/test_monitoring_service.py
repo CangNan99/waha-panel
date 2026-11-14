@@ -4,8 +4,10 @@ import sqlite3
 import tempfile
 import unittest
 from contextlib import closing
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
 from panel.app import init_db
 try:
@@ -82,6 +84,38 @@ class MonitoringTests(unittest.TestCase):
         self.assertEqual(result['recent_error_count'],3)
         self.assertEqual(result['sessions'][0]['auto_reply']['mode'],'all_day')
         self.assertTrue(result['sessions'][0]['auto_reply']['customer_memory_enabled'])
+
+    def test_customer_first_seen_counts_are_scoped_and_use_shanghai_day(self):
+        day_start = int(
+            datetime.fromtimestamp(NOW, ZoneInfo("Asia/Shanghai"))
+            .replace(hour=0, minute=0, second=0, microsecond=0)
+            .timestamp()
+        )
+        with closing(sqlite3.connect(self.database)) as connection, connection:
+            tables = {
+                row[0]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                )
+            }
+            self.assertIn("customer_first_seen", tables)
+            connection.executemany(
+                "INSERT INTO customer_first_seen(session_name,customer_key_hmac,first_inbound_at,last_inbound_at,created_at,updated_at) VALUES (?,?,?,?,?,?)",
+                [
+                    ("default", "default-old", day_start - 1, NOW, NOW, NOW),
+                    ("default", "default-today", day_start, NOW, NOW, NOW),
+                    ("support", "support-today", day_start + 1, NOW, NOW, NOW),
+                ],
+            )
+
+        result = self.service.overview(["default", "support"], now=NOW)
+        self.assertEqual(result["customer_counts"], {"total": 3, "new_today": 2})
+        per_session = {item["name"]: item["customer_counts"] for item in result["sessions"]}
+        self.assertEqual(per_session["default"], {"total": 2, "new_today": 1})
+        self.assertEqual(per_session["support"], {"total": 1, "new_today": 1})
+
+        selected = self.service.overview(["default", "support"], "default", NOW)
+        self.assertEqual(selected["customer_counts"], {"total": 2, "new_today": 1})
 
     def test_takeover_expiry_and_automation_states_are_separate(self):
         result=self.service.overview(['default','support'],'default',NOW)

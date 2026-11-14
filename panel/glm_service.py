@@ -9,7 +9,7 @@ import threading
 import time
 from dataclasses import dataclass
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
 
 try:
@@ -168,8 +168,20 @@ class GLMService:
 
     @staticmethod
     def _endpoint(profile, suffix):
-        base_url = GLMService._profile_value(profile, "base_url").rstrip("/")
-        return base_url + suffix
+        configured = GLMService._profile_value(profile, "base_url").rstrip("/")
+        try:
+            parsed = urlsplit(configured)
+        except ValueError as error:
+            raise GLMError("GLM 配置地址无效", "AI_INVALID_URL") from error
+        if parsed.query or parsed.fragment:
+            raise GLMError("GLM 配置地址无效", "AI_INVALID_URL")
+        path = parsed.path.rstrip("/")
+        for known_suffix in ("/chat/completions", "/images/generations"):
+            if path.endswith(known_suffix):
+                path = path[: -len(known_suffix)].rstrip("/")
+                break
+        endpoint_suffix = "/" + str(suffix or "").lstrip("/")
+        return urlunsplit((parsed.scheme, parsed.netloc, path + endpoint_suffix, "", ""))
 
     @staticmethod
     def _prompt(value):
@@ -324,6 +336,56 @@ class GLMService:
             payload,
             session_name=profile.get("session_name") if isinstance(profile, dict) else None,
         ))
+
+    def classify_product_image(self, profile, prompt, image_bytes, mime_type, reference_images=None):
+        """Run the bounded vision request used by product matching.
+
+        The model is asked for JSON, but the response is still treated as
+        untrusted text and parsed by ``ProductMatchService``. Reference images
+        are accepted only as validated data URLs (or server-side bytes which
+        are converted to data URLs); model supplied URLs and paths never enter
+        the request or result.
+        """
+        try:
+            from .product_match_service import ProductMatchService
+        except ImportError:
+            from product_match_service import ProductMatchService
+        references = []
+        for item in (reference_images or [])[: ProductMatchService.MAX_REFERENCE_IMAGES]:
+            if not isinstance(item, dict):
+                continue
+            data_url = str(item.get("data_url") or "").strip()
+            if data_url:
+                if not ProductMatchService.valid_data_url(data_url):
+                    raise GLMError("参考图片格式无效", "INVALID_REFERENCE_IMAGE")
+                try:
+                    header, encoded_ref = data_url.split(",", 1)
+                    ref_bytes = base64.b64decode(encoded_ref, validate=True)
+                    declared_ref = header[5:].split(";", 1)[0]
+                    ChatService._validated_image("reference" + IMAGE_EXTENSIONS[declared_ref], declared_ref, ref_bytes)
+                except (ValueError, KeyError, TypeError, ImageValidationError) as error:
+                    raise GLMError("参考图片内容无效", "INVALID_REFERENCE_IMAGE") from error
+                references.append({"type": "image_url", "image_url": {"url": data_url}})
+                continue
+            raw_data = item.get("data")
+            if raw_data is not None and not isinstance(raw_data, (bytes, bytearray, memoryview)):
+                raise GLMError("参考图片内容类型无效", "INVALID_REFERENCE_IMAGE")
+            data = bytes(raw_data or b"")
+            declared = str(item.get("mime_type") or "").lower().strip()
+            if not data or declared not in IMAGE_EXTENSIONS:
+                continue
+            try:
+                _name, normalized = ChatService._validated_image("reference" + IMAGE_EXTENSIONS[declared], declared, data)
+            except ImageValidationError as error:
+                raise GLMError(error.public_message, getattr(error, "code", "INVALID_IMAGE")) from error
+            encoded = base64.b64encode(data).decode("ascii")
+            references.append({"type": "image_url", "image_url": {"url": f"data:{normalized};base64,{encoded}"}})
+        context = {"system": ProductMatchService.SYSTEM_PROMPT}
+        if references:
+            context["messages"] = [{"role": "user", "content": references}]
+        result = self.chat_vision(profile, prompt, image_bytes, mime_type, context=context)
+        raw = result.content
+        return ProductMatchService().parse_result(raw)
 
     def _fetch_generated_url(self, profile, url):
         parsed = urlsplit(str(url or ""))

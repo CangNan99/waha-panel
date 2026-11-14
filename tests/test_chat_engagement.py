@@ -1079,6 +1079,8 @@ class PanelEngagementRouteTests(unittest.TestCase):
             state = PanelState(database, _Client(), "redacted", admin_username="admin", admin_password="secret")
             state.enable_chat_services(Fernet.generate_key().decode("ascii"))
             self.assertIsNotNone(state.automation)
+            self.assertIsNotNone(state.marketing)
+            self.assertIs(state.automation.marketing_service, state.marketing)
             state.start_background_services()
             worker = state.automation._thread
             state.start_background_services()

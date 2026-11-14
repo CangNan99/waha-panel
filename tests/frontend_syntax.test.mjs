@@ -5,8 +5,92 @@ import vm from 'node:vm';
 import { checkInlineScripts } from '../scripts/check_frontend_syntax.mjs';
 
 const appSource = await readFile(new URL('../panel/app.py', import.meta.url), 'utf8');
+const productImageSource = await readFile(new URL('../panel/product_image_page.py', import.meta.url), 'utf8');
+const marketingSource = await readFile(new URL('../panel/marketing_page.py', import.meta.url), 'utf8');
 const chatSource = await readFile(new URL('../panel/chat_page.py', import.meta.url), 'utf8');
+const overviewSource = await readFile(new URL('../panel/static/views/overview.js', import.meta.url), 'utf8');
 const scripts = [...appSource.matchAll(/<script>\s*([\s\S]*?)\s*<\/script>/g)];
+
+
+test('product image library exposes roles, variants, catalog CRUD, flags, search, and non-sending diagnostics', () => {
+  for (const token of ['productId','variant','allowVisual','allowAuto','reference_role','matchForm','product-image-match-test','productForm','catalogKey','confidenceThreshold','cooldownSeconds','shadowMode']) assert.match(productImageSource, new RegExp(token));
+  assert.match(productImageSource, /不会发送 WhatsApp/);
+});
+
+test('marketing administration page exposes campaign controls and valid inline JavaScript', () => {
+  for (const token of ['campaignForm','allowImageSend','marketing/campaigns','pause','resume','contacts','product_image_global_kill_switch']) assert.match(marketingSource, new RegExp(token));
+  assert.doesNotThrow(() => checkInlineScripts(marketingSource, 'panel/marketing_page.py'));
+});
+
+test('product image search and match diagnostics wire real browser behavior', async () => {
+  const script = productImageSource.match(/<script>\s*([\s\S]*?)\s*<\/script>/)?.[1];
+  assert.ok(script, 'expected product image page script');
+  const calls = [];
+  const nodes = new Map();
+  const makeNode = (id) => {
+    const node = {
+      id, value: '', checked: false, files: [], textContent: '', className: '', children: [],
+      listeners: new Map(), classList: { add() {}, remove() {} },
+      addEventListener(type, callback) { this.listeners.set(type, callback); },
+      replaceChildren(...children) { this.children = children; },
+      append(...children) { this.children.push(...children); },
+      setAttribute() {},
+    };
+    nodes.set(id, node);
+    return node;
+  };
+  for (const id of ['tagFilter', 'productSearch', 'assets', 'tagList', 'autoSend', 'dailyLimit', 'confidenceThreshold', 'cooldownSeconds', 'shadowMode', 'matchForm', 'matchImage', 'matchProduct', 'matchNotice', 'uploadNotice', 'settingsNotice', 'newTag', 'catalogItems', 'productForm', 'catalogKey', 'catalogName', 'catalogSku', 'catalogAliases', 'catalogDescription', 'catalogAiImage', 'catalogMarketingImage', 'catalogReset', 'catalogNotice']) makeNode(id);
+  const response = (payload) => ({
+    ok: true,
+    headers: { get: () => 'application/json' },
+    json: async () => payload,
+    text: async () => JSON.stringify(payload),
+  });
+  class FakeFormData {
+    constructor() { this.fields = new Map(); }
+    set(name, value) { this.fields.set(name, value); }
+  }
+  const fetch = async (url, options = {}) => {
+    calls.push({ url, options });
+    if (url === '/api/security/csrf') return response({ csrf_token: 'fixture-csrf' });
+    if (url.startsWith('/api/product-images?')) return response({ items: [], total: 0 });
+    if (url === '/api/product-tags') return response({ items: [] });
+    if (url.startsWith('/api/product-image-settings')) return response({ auto_send_enabled: true, daily_limit: 20, product_image_confidence_threshold: 0.85, product_image_cooldown_seconds: 0 });
+    if (url.startsWith('/api/product-catalog')) return response({ items: [], total: 0 });
+    if (url === '/api/product-image-match-test') return response({ status: 'MATCHED', candidates: [{ asset_id: 'asset-1' }] });
+    throw new Error(`unexpected fetch ${url}`);
+  };
+  const context = vm.createContext({
+    console, fetch, Headers, FormData: FakeFormData,
+    document: {
+      getElementById: (id) => nodes.get(id) || makeNode(id),
+      createElement: (tag) => ({ tagName: tag, className: '', textContent: '', children: [], classList: { add() {}, remove() {} }, append(...children) { this.children.push(...children); }, appendChild(child) { this.children.push(child); }, setAttribute() {}, addEventListener() {} }),
+      createTextNode: (text) => ({ textContent: text }),
+    },
+    encodeURIComponent,
+  });
+  vm.runInContext(script, context);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  nodes.get('productSearch').value = 'G5 Plus';
+  await nodes.get('productSearch').listeners.get('input')();
+  const searchCall = calls.find((item) => item.url.startsWith('/api/product-images?') && item.url.includes('product='));
+  assert.ok(searchCall, 'product search must reload the API');
+  assert.match(searchCall.url, /product=G5%20Plus/);
+
+  nodes.get('matchProduct').value = 'product-1';
+  nodes.get('matchImage').files = [{ name: 'probe.png' }];
+  let prevented = false;
+  await nodes.get('matchForm').listeners.get('submit')({ preventDefault() { prevented = true; } });
+  assert.equal(prevented, true);
+  const matchCall = calls.find((item) => item.url === '/api/product-image-match-test');
+  assert.ok(matchCall, 'diagnostic submit must call the match endpoint');
+  assert.equal(matchCall.options.method, 'POST');
+  assert.equal(matchCall.options.body.constructor, FakeFormData);
+  assert.equal(matchCall.options.body.fields.get('candidate_product_id'), 'product-1');
+  assert.equal(matchCall.options.body.fields.get('image').name, 'probe.png');
+  assert.match(nodes.get('matchNotice').textContent, /不会发送 WhatsApp/);
+});
 
 test('IPTV shared playback server is labeled, restored, and included in settings saves', () => {
   assert.ok(/<label for="iptvPlaybackServer">播放服务器地址<\/label><input id="iptvPlaybackServer" type="url"/.test(appSource), 'expected a labeled playback server URL input');
@@ -45,6 +129,26 @@ test('administrator save handlers close their forEach and addEventListener calls
 
 test('chat management inline JavaScript has valid syntax', () => {
   assert.doesNotThrow(() => checkInlineScripts(chatSource, 'panel/chat_page.py'));
+});
+
+test('customer message images expose a protected preview with bounded zoom controls', () => {
+  for (const id of ['imagePreviewDialog', 'imagePreviewZoomIn', 'imagePreviewZoomOut', 'imagePreviewReset', 'imagePreviewClose']) {
+    assert.match(chatSource, new RegExp(`id="${id}"`));
+  }
+  assert.match(chatSource, /function openMessageImage\(/);
+  assert.match(chatSource, /function closeMessageImage\(/);
+  assert.match(chatSource, /message-image/);
+  assert.match(chatSource, /\/media\?/);
+  assert.match(chatSource, /event\.key==='Escape'/);
+  assert.match(chatSource, /pointermove/);
+  assert.match(chatSource, /deltaY/);
+  assert.match(chatSource, /prefers-reduced-motion:reduce/);
+});
+
+test('overview renders per-account customer statistics from the monitoring payload', () => {
+  assert.match(overviewSource, /customer_counts/);
+  assert.match(overviewSource, /new_today/);
+  assert.match(overviewSource, /total/);
 });
 
 test('stale QR requests cannot update a newly selected session', async () => {
@@ -440,3 +544,4 @@ test('overview metrics use session data and navigation follows the selected sess
   assert.equal(getNode('chatLink').href, '#');
   assert.equal(getNode('chatLink').attributes['aria-disabled'], 'true');
 });
+

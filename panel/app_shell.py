@@ -146,6 +146,7 @@ def app_shell_page(initial_path="/"):
         for view, href, label, symbol in (
             ("dashboard", "/", "工作台", "ui-home"), ("chat", f"/sessions/{html.escape(session)}/chats", "聊天管理", "ui-chat"),
             ("settings", "/settings", "自动回复", "ui-bolt"), ("product-images", "/product-images", "产品图片", "ui-image"),
+            ("marketing", "/marketing", "营销活动", "ui-chart"),
             ("overview", "/overview?scope=all", "状态概览", "ui-chart"),
             ("logs", "/logs", "系统日志", "ui-file"),
         )

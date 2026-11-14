@@ -144,6 +144,45 @@ class GLMServiceTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, "AI_RESPONSE_INVALID")
         self.assertNotIn("secret-key", str(caught.exception))
 
+    def test_configured_full_glm_endpoints_are_normalized_without_duplicate_suffixes(self):
+        root = "https://example.com/api/paas/v4"
+        configured_urls = [
+            root,
+            root + "/",
+            root + "/chat/completions",
+            root + "/images/generations",
+            root + "/tenant-a",
+        ]
+        encoded = base64.b64encode(png_bytes()).decode("ascii")
+
+        def opener(request, timeout=0):
+            self.requests.append((request, timeout))
+            if request.full_url.endswith("/images/generations"):
+                return Response({"data": [{"b64_json": encoded}]})
+            return Response({"choices": [{"message": {"content": "回答"}}]})
+
+        for configured in configured_urls:
+            with self.subTest(configured=configured):
+                self.requests.clear()
+                service = GLMService(opener=opener)
+                profile = {**PROFILE, "base_url": configured}
+                service.chat_text(profile, [{"role": "user", "content": "你好"}])
+                service.generate_image(profile, "一只白猫")
+                urls = [request.full_url for request, _ in self.requests]
+                expected_root = configured.rstrip("/")
+                for known_suffix in ("/chat/completions", "/images/generations"):
+                    if expected_root.endswith(known_suffix):
+                        expected_root = expected_root[: -len(known_suffix)]
+                self.assertEqual(
+                    urls,
+                    [
+                        expected_root + "/chat/completions",
+                        expected_root + "/images/generations",
+                    ],
+                )
+                self.assertEqual(urls[0].count("/chat/completions"), 1)
+                self.assertEqual(urls[1].count("/images/generations"), 1)
+
 
 class GeneratedImageStoreTests(unittest.TestCase):
     def setUp(self):
