@@ -126,7 +126,12 @@ class ProductMatchService:
         return "low"
 
     @classmethod
-    def evaluate(cls, candidates, catalog, intent, match_status="matched", needs_clarification=False):
+    def evaluate(cls, candidates, catalog, intent, match_status="matched", needs_clarification=False, confidence_threshold=None):
+        try:
+            threshold = float(cls.HIGH_CONFIDENCE if confidence_threshold is None else confidence_threshold)
+        except (TypeError, ValueError):
+            threshold = cls.HIGH_CONFIDENCE
+        threshold = max(0.0, min(1.0, threshold))
         catalog = catalog if isinstance(catalog, list) else []
         index = {}
         for product in catalog:
@@ -163,7 +168,7 @@ class ProductMatchService:
         elif len(matches) > 1 and abs(matches[0][0] - matches[1][0]) < 0.05:
             decision = "ASK_CLARIFICATION"
             reason = "AMBIGUOUS_MATCH"
-        elif matches[0][0] >= cls.HIGH_CONFIDENCE:
+        elif matches[0][0] >= threshold:
             decision = "AUTO_SEND"
             reason = "HIGH_CONFIDENCE_UNIQUE"
         elif matches[0][0] >= 0.60:
@@ -182,4 +187,4 @@ class ProductMatchService:
                 for asset in (product.get("reference_assets") or [])
                 if isinstance(asset, dict) and str(asset.get("reference_role") or "")[:32]
             ][:4]
-        return {"decision": decision, "reason_code": reason, "product": safe_product, "variant": str((top[2] or {}).get("variant") or "") if top[2] else "", "confidence": top[0], "confidence_bucket": cls.classify_confidence(top[0]), "intent": intent}
+        return {"decision": decision, "reason_code": reason, "product": safe_product, "variant": str((top[2] or {}).get("variant") or "") if top[2] else "", "confidence": top[0], "confidence_threshold": threshold, "confidence_bucket": cls.classify_confidence(top[0]), "intent": intent}

@@ -215,7 +215,7 @@ DEFAULT_SETTINGS = {
     "chat_product_image_enabled": "1",
     "marketing_product_image_enabled": "1",
     "product_image_shadow_mode": "0",
-    "product_image_confidence_threshold": "0.85",
+    "product_image_confidence_threshold": "0.90",
     "product_image_cooldown_seconds": "0",
     "product_image_global_kill_switch": "0",
     "auto_reply_media_types": json.dumps(
@@ -1686,6 +1686,18 @@ class PanelState:
                 }
             finally:
                 connection.close()
+        # The kill switch is a singleton safety control.  Always read its
+        # authoritative value from the legacy global settings table so a
+        # change made while another session is selected takes effect there too.
+        connection = sqlite3.connect(self.database_path)
+        try:
+            row = connection.execute(
+                "SELECT value FROM settings WHERE key='product_image_global_kill_switch'"
+            ).fetchone()
+        finally:
+            connection.close()
+        if row is not None:
+            values["product_image_global_kill_switch"] = row[0]
         return values
 
     def ai_profiles_payload(self, session_name=DEFAULT_SESSION_NAME):
@@ -1747,7 +1759,7 @@ class PanelState:
             "context_message_count": 0,
         }
 
-    def classify_product_image(self, profile, image_bytes, mime_type, catalog, customer_text="", conversation_context="", reference_images=None):
+    def classify_product_image(self, profile, image_bytes, mime_type, catalog, customer_text="", conversation_context="", reference_images=None, confidence_threshold=None):
         """Stable Task 4 entry point for structured recognition and policy evaluation."""
         prompt = self.product_match.build_prompt(catalog or {}, customer_text, conversation_context)
         parsed = self.glm.classify_product_image(profile, prompt, image_bytes, mime_type, reference_images=reference_images)
@@ -1755,13 +1767,22 @@ class PanelState:
         return self.product_match.evaluate(
             parsed["candidates"], items, parsed["intent"],
             match_status=parsed["match_status"], needs_clarification=parsed["needs_clarification"],
+            confidence_threshold=confidence_threshold,
         )
+
+    def _product_image_global_kill_switch(self):
+        try:
+            return as_bool(self._settings(DEFAULT_SESSION_NAME).get("product_image_global_kill_switch", "0"))
+        except Exception:
+            # An unreadable global stop control must fail closed: a settings
+            # or database error cannot silently re-enable image sending.
+            return True
 
     def product_image_policy(self, settings, session_name, chat_id, product_id, asset_id, history=None):
         """Return the server-side gates for a customer-image product send."""
         settings = settings if isinstance(settings, dict) else {}
         name = normalize_session_name(session_name)
-        if as_bool(settings.get("product_image_global_kill_switch", False)):
+        if self._product_image_global_kill_switch() or as_bool(settings.get("product_image_global_kill_switch", False)):
             return {"allowed": False, "reason_code": "GLOBAL_KILL_SWITCH"}
         if not as_bool(settings.get("chat_product_image_enabled", True)):
             return {"allowed": False, "reason_code": "CHAT_SWITCH_OFF"}
@@ -1826,6 +1847,7 @@ class PanelState:
         name = normalize_session_name(session_name)
         settings = self._settings(name)
         if (not as_bool(settings.get("customer_image_recognition_enabled", "1")) or
+                self._product_image_global_kill_switch() or
                 as_bool(settings.get("product_image_global_kill_switch", "0"))):
             return {"action": "continue", "decision": "TEXT_ONLY", "reason_code": "RECOGNITION_SWITCH_OFF"}
         if not as_bool(settings.get("product_image_auto_send_enabled", True)):
@@ -1864,7 +1886,18 @@ class PanelState:
                         continue
                 if len(reference_images) >= 4:
                     break
-            decision = self.classify_product_image(profile, image_bytes, mime_type, catalog, incoming_text, context, reference_images=reference_images)
+            decision = self.classify_product_image(
+                profile,
+                image_bytes,
+                mime_type,
+                catalog,
+                incoming_text,
+                context,
+                reference_images=reference_images,
+                confidence_threshold=self._normalize_product_image_confidence(
+                    settings.get("product_image_confidence_threshold", "0.90")
+                ),
+            )
             digest = hashlib.sha256(image_bytes).hexdigest()
             if dispatch:
                 self.product_images.record_match_audit({
@@ -1872,7 +1905,7 @@ class PanelState:
                     "variant": decision.get("variant", "") if isinstance(decision, dict) else "",
                     "mime_type": mime_type,
                     "image_sha256": digest,
-                    "result": {k: decision.get(k) for k in ("decision", "reason_code", "confidence", "confidence_bucket", "intent") if isinstance(decision, dict) and k in decision},
+                    "result": {k: decision.get(k) for k in ("decision", "reason_code", "confidence", "confidence_threshold", "confidence_bucket", "intent") if isinstance(decision, dict) and k in decision},
                 })
         except Exception as error:
             self.log("WARN", "product_image.match_failed", "客户图片识别失败，继续文字回复", name)
@@ -1888,6 +1921,14 @@ class PanelState:
         asset = self.product_images.resolve_product_asset(product["product_id"], decision.get("variant", ""), "primary")
         if asset.get("status") != "FOUND":
             return {"action": "continue", "decision": "TEXT_ONLY", "reason_code": "ASSET_NOT_UNIQUE"}
+        if as_bool(settings.get("product_image_shadow_mode", "0")):
+            return {
+                "action": "shadow",
+                "decision": outcome,
+                "reason_code": "SHADOW_MODE",
+                "asset_id": asset.get("asset_id"),
+                "product_id": product.get("product_id"),
+            }
         history = [{"from_me": False, "body": str(incoming_text or "")}]
         try:
             connection = sqlite3.connect(self.database_path)
@@ -1999,7 +2040,7 @@ class PanelState:
         return result
 
     @staticmethod
-    def _normalize_product_image_confidence(value, default=0.85):
+    def _normalize_product_image_confidence(value, default=0.90):
         try:
             parsed = float(str(value).strip())
         except (TypeError, ValueError):
@@ -2055,7 +2096,7 @@ class PanelState:
             "marketing_product_image_enabled": as_bool(values.get("marketing_product_image_enabled", "1")),
             "product_image_shadow_mode": as_bool(values.get("product_image_shadow_mode", "0")),
             "product_image_confidence_threshold": self._normalize_product_image_confidence(
-                values.get("product_image_confidence_threshold", "0.85")
+                values.get("product_image_confidence_threshold", "0.90")
             ),
             "product_image_cooldown_seconds": self._normalize_product_image_cooldown(
                 values.get("product_image_cooldown_seconds", "0")
@@ -2236,6 +2277,12 @@ class PanelState:
                     "INSERT INTO settings(key, value, updated_at) VALUES (?, ?, ?) "
                     "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
                     [(key, value, now) for key, value in updates.items()],
+                )
+            elif "product_image_global_kill_switch" in updates:
+                connection.execute(
+                    "INSERT INTO settings(key, value, updated_at) VALUES (?, ?, ?) "
+                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+                    ("product_image_global_kill_switch", updates["product_image_global_kill_switch"], now),
                 )
             connection.commit()
         finally:
@@ -3439,6 +3486,14 @@ class PanelState:
                 code = str(resolved.get("code") or resolved.get("status") or "NOT_FOUND")
                 self.log("INFO", "product_image." + code.lower(), "产品图片未找到唯一匹配", session)
                 return {"action": "ignored", "reason": "没有唯一可发送的产品图片", "session": session}
+            if as_bool(session_settings.get("product_image_shadow_mode", "0")):
+                return {
+                    "action": "shadow",
+                    "reason": "SHADOW_MODE",
+                    "session": session,
+                    "product_id": validated["product"].get("product_id"),
+                    "asset_id": resolved.get("asset_id"),
+                }
             policy = self.product_image_policy(
                 {**session_settings, "chat_product_image_enabled": True}, session, chat_id,
                 validated["product"]["product_id"], resolved["asset_id"],
@@ -4242,7 +4297,7 @@ class PanelState:
         """Return the server-owned product image tool contract."""
         settings = settings if isinstance(settings, dict) else {}
         enabled = as_bool(settings.get("chat_product_image_enabled", settings.get("product_image_auto_send_enabled", True)))
-        if as_bool(settings.get("product_image_global_kill_switch", False)) or not enabled:
+        if self._product_image_global_kill_switch() or as_bool(settings.get("product_image_global_kill_switch", False)) or not enabled:
             return []
         try:
             if not self.product_images.list_assets().get("total"):
@@ -4299,7 +4354,7 @@ class PanelState:
         if not isinstance(arguments, dict):
             return {"action": "ignored", "reason": "产品图片工具参数无效", "session": session}
         settings = self.settings_payload(session)
-        if as_bool(settings.get("product_image_global_kill_switch")) or not as_bool(settings.get("chat_product_image_enabled")):
+        if self._product_image_global_kill_switch() or as_bool(settings.get("product_image_global_kill_switch")) or not as_bool(settings.get("chat_product_image_enabled")):
             return {"action": "ignored", "reason": "聊天产品图片功能已关闭", "session": session}
         incoming_text = str(incoming_text or "")
         checked = self.validate_product_image_tool_call(arguments, incoming_text, context)
@@ -6311,6 +6366,31 @@ class PanelHandler(BaseHTTPRequestHandler):
         )
         self.send_json(result)
 
+    def _validate_product_image_settings_payload(self, payload):
+        if not isinstance(payload, dict):
+            raise ValueError("图片库设置格式无效")
+        if "daily_limit" in payload:
+            try:
+                daily_limit = int(payload["daily_limit"])
+            except (TypeError, ValueError) as error:
+                raise ValueError("每日上限必须是整数") from error
+            if not 1 <= daily_limit <= 1000:
+                raise ValueError("每日上限必须在 1 至 1000 之间")
+        if "product_image_confidence_threshold" in payload:
+            try:
+                confidence = float(payload["product_image_confidence_threshold"])
+            except (TypeError, ValueError) as error:
+                raise ValueError("图片匹配置信度必须是 0 至 1 的数字") from error
+            if not 0 <= confidence <= 1:
+                raise ValueError("图片匹配置信度必须是 0 至 1 的数字")
+        if "product_image_cooldown_seconds" in payload:
+            try:
+                cooldown = int(payload["product_image_cooldown_seconds"])
+            except (TypeError, ValueError) as error:
+                raise ValueError("图片发送冷却时间必须是整数秒") from error
+            if not 0 <= cooldown <= PRODUCT_IMAGE_COOLDOWN_MAX:
+                raise ValueError("图片发送冷却时间超出范围")
+
     def send_product_image_post(self, route):
         self.require_csrf()
         service = self.state.product_images
@@ -6334,6 +6414,7 @@ class PanelHandler(BaseHTTPRequestHandler):
         service = self.state.product_images
         if route == "/api/product-image-settings":
             payload = self.read_api_json()
+            self._validate_product_image_settings_payload(payload)
             result = service.save_settings(payload)
             policy_keys = (
                 "customer_image_recognition_enabled", "chat_product_image_enabled",
@@ -6379,7 +6460,62 @@ class PanelHandler(BaseHTTPRequestHandler):
         raise ValueError("产品图片删除路径不正确")
 
     @staticmethod
-    def _product_catalog_public(product):
+    def _public_sensitive_key(key):
+        normalized = re.sub(r"[^a-z0-9]+", "_", str(key or "").strip().casefold()).strip("_")
+        if normalized in {
+            "chat_id", "chat_ids", "customer_id", "customer_ids", "phone", "phones",
+            "token", "access_token", "refresh_token", "secret", "secrets", "password",
+            "api_key", "apikey", "authorization", "credential", "credentials", "path",
+            "file_path", "relative_path", "asset_url", "url", "filename", "original_filename",
+            "sha256", "private_key",
+        }:
+            return True
+        return any(part in normalized for part in ("token", "secret", "password", "credential"))
+
+    @classmethod
+    def _public_safe_value(cls, value, depth=0):
+        if depth > 8:
+            return None
+        if isinstance(value, dict):
+            result = {}
+            for key, item in value.items():
+                if cls._public_sensitive_key(key):
+                    continue
+                safe = cls._public_safe_value(item, depth + 1)
+                if safe is not None:
+                    result[str(key)[:120]] = safe
+            return result
+        if isinstance(value, (list, tuple, set)):
+            return [safe for item in value if (safe := cls._public_safe_value(item, depth + 1)) is not None][:200]
+        if isinstance(value, str):
+            text = value.strip()
+            if re.search(
+                r"(?:https?://|data:image/|(?:[A-Za-z]:[\\/]|^/|\\\\)|-----BEGIN|\b(?:token|secret|password|api[_ -]?key)\s*[:=])",
+                text,
+                re.IGNORECASE,
+            ):
+                return None
+            return text[:4000]
+        if isinstance(value, (bool, int, float)) or value is None:
+            return value
+        return str(value)[:4000]
+
+    @classmethod
+    def _contains_sensitive_value(cls, value):
+        if isinstance(value, dict):
+            return any(cls._public_sensitive_key(key) or cls._contains_sensitive_value(item) for key, item in value.items())
+        if isinstance(value, (list, tuple, set)):
+            return any(cls._contains_sensitive_value(item) for item in value)
+        if isinstance(value, str):
+            return bool(re.search(
+                r"(?:https?://|data:image/|(?:[A-Za-z]:[\\/]|^/|\\\\)|-----BEGIN|\b(?:token|secret|password|api[_ -]?key)\s*[:=])",
+                value,
+                re.IGNORECASE,
+            ))
+        return False
+
+    @classmethod
+    def _product_catalog_public(cls, product):
         if not isinstance(product, dict):
             return {}
         allowed = {
@@ -6388,7 +6524,13 @@ class PanelHandler(BaseHTTPRequestHandler):
             "language_content", "active", "allow_ai_image_send", "allow_marketing_image_send",
             "created_at", "updated_at",
         }
-        return {key: value for key, value in product.items() if key in allowed}
+        return {
+            key: safe
+            for key, value in product.items()
+            if key in allowed
+            for safe in [cls._public_safe_value(value)]
+            if safe is not None
+        }
 
     @staticmethod
     def _campaign_public(campaign, stats=None):
@@ -6399,24 +6541,33 @@ class PanelHandler(BaseHTTPRequestHandler):
             "allow_image_send", "cadence", "max_touches", "quiet_hours", "language_policy",
             "active", "paused_reason", "created_at", "updated_at",
         }
-        result = {key: value for key, value in campaign.items() if key in allowed}
+        result = {
+            key: safe
+            for key, value in campaign.items()
+            if key in allowed
+            for safe in [PanelHandler._public_safe_value(value)]
+            if safe is not None
+        }
         if stats is not None:
             result["stats"] = stats
         return result
 
     @staticmethod
-    def _campaign_has_raw_customer_identifier(value):
-        forbidden = {
-            "chat_id", "chat_ids", "customer_id", "customer_ids", "phone", "phones",
-        }
+    def _campaign_has_raw_customer_identifier(value, depth=0):
         if isinstance(value, dict):
+            if depth > 0:
+                return True
             for key, item in value.items():
-                if str(key).strip().casefold() in forbidden:
+                if PanelHandler._public_sensitive_key(key):
                     return True
-                if PanelHandler._campaign_has_raw_customer_identifier(item):
+                if PanelHandler._campaign_has_raw_customer_identifier(item, depth + 1):
                     return True
         elif isinstance(value, (list, tuple, set)):
-            return any(PanelHandler._campaign_has_raw_customer_identifier(item) for item in value)
+            return any(PanelHandler._campaign_has_raw_customer_identifier(item, depth + 1) for item in value)
+        elif isinstance(value, str) and re.fullmatch(r"\+?\d[\d -]{6,}", value.strip()):
+            return True
+        elif PanelHandler._contains_sensitive_value(value):
+            return True
         return False
 
     def _marketing_stats(self, campaign_id):
@@ -6500,7 +6651,10 @@ class PanelHandler(BaseHTTPRequestHandler):
             path for root in aliases for path in (root, root + "/", root + "/products", root + "/products/")
         }
         if method == "POST" and route in collection:
-            self.send_json(self._product_catalog_public(service.save_product(self.read_api_json())), HTTPStatus.CREATED)
+            payload = self.read_api_json()
+            if self._contains_sensitive_value(payload.get("language_content")):
+                raise ProductCatalogError("产品多语言内容包含受保护字段或敏感值", "SENSITIVE_PRODUCT_METADATA")
+            self.send_json(self._product_catalog_public(service.save_product(payload)), HTTPStatus.CREATED)
             return
         product_id = ""
         prefixes = tuple(prefix for root in aliases for prefix in (root + "/products/", root + "/"))
@@ -6512,6 +6666,8 @@ class PanelHandler(BaseHTTPRequestHandler):
             raise ValueError("产品编号无效")
         if method in {"PUT", "PATCH"}:
             payload = self.read_api_json()
+            if self._contains_sensitive_value(payload.get("language_content")):
+                raise ProductCatalogError("产品多语言内容包含受保护字段或敏感值", "SENSITIVE_PRODUCT_METADATA")
             current = service.get_product(product_id, include_inactive=True)
             merged = dict(current)
             merged.update(payload)
@@ -6579,7 +6735,11 @@ class PanelHandler(BaseHTTPRequestHandler):
             raise MarketingAutomationError("营销服务暂不可用", "MARKETING_UNAVAILABLE")
         if method == "POST" and route in {base, base + "/"}:
             payload = self.read_api_json()
-            if self._campaign_has_raw_customer_identifier(payload.get("target_rules")):
+            if (
+                self._campaign_has_raw_customer_identifier(payload.get("target_rules"))
+                or self._campaign_has_raw_customer_identifier(payload.get("product_scope"))
+                or self._campaign_has_raw_customer_identifier(payload.get("language_policy"))
+            ):
                 raise MarketingAutomationError("目标规则不能包含客户原始标识", "RAW_CUSTOMER_ID_FORBIDDEN")
             self.send_json(self._campaign_public(service.create_campaign(payload)), HTTPStatus.CREATED)
             return
@@ -6597,7 +6757,11 @@ class PanelHandler(BaseHTTPRequestHandler):
             raise ValueError("营销活动写入路径不正确")
         if method in {"PUT", "PATCH"}:
             payload = self.read_api_json()
-            if self._campaign_has_raw_customer_identifier(payload.get("target_rules")):
+            if (
+                self._campaign_has_raw_customer_identifier(payload.get("target_rules"))
+                or self._campaign_has_raw_customer_identifier(payload.get("product_scope"))
+                or self._campaign_has_raw_customer_identifier(payload.get("language_policy"))
+            ):
                 raise MarketingAutomationError("目标规则不能包含客户原始标识", "RAW_CUSTOMER_ID_FORBIDDEN")
             self.send_json(self._campaign_public(service.update_campaign(campaign_id, payload)))
             return

@@ -385,6 +385,7 @@ class MarketingDeliveryService:
         allow_image = _as_bool(normalized.get("allow_image_send"), False)
         allow_image = allow_image and _as_bool(normalized.get("marketing_product_image_enabled"), True)
         allow_image = allow_image and not _as_bool(normalized.get("product_image_global_kill_switch"), False)
+        allow_image = allow_image and not _as_bool(normalized.get("product_image_shadow_mode"), False)
         if product_id and scope and product_id not in scope:
             allow_image = False
         if not product_id or not scope:
@@ -567,6 +568,8 @@ class MarketingDeliveryService:
             return False, "GLOBAL_KILL_SWITCH"
         if not _as_bool(delivery.get("marketing_product_image_enabled"), True):
             return False, "MARKETING_IMAGE_DISABLED"
+        if _as_bool(delivery.get("product_image_shadow_mode"), False):
+            return False, "SHADOW_MODE"
         if callable(self.settings_loader):
             try:
                 settings = self.settings_loader(str(delivery.get("session_name") or "")) or {}
@@ -576,6 +579,8 @@ class MarketingDeliveryService:
                 return False, "MARKETING_IMAGE_DISABLED"
             if _as_bool(settings.get("product_image_global_kill_switch"), False):
                 return False, "GLOBAL_KILL_SWITCH"
+            if _as_bool(settings.get("product_image_shadow_mode"), False):
+                return False, "SHADOW_MODE"
         service = self.product_image_service
         getter = getattr(service, "settings_payload", None) if service is not None else None
         if callable(getter):

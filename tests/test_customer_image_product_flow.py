@@ -106,6 +106,25 @@ class CustomerImageProductFlowTests(unittest.TestCase):
         self.assertEqual(self.client.image_calls, 1)
         self.assertEqual(self.state.product_images.daily_sent_count(), 1)
 
+    def test_shadow_mode_records_match_but_never_sends_image(self):
+        connection = sqlite3.connect(self.database)
+        try:
+            connection.execute(
+                "UPDATE session_settings SET value='1' WHERE session_name='default' AND key='product_image_shadow_mode'"
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        result = self._run({"decision": "AUTO_SEND", "reason_code": "HIGH_CONFIDENCE_UNIQUE", "confidence": .97, "confidence_bucket": "high", "product": {"product_id": self.product["product_id"], "product_key": "g5-plus", "product_name": "G5 Plus"}, "variant": "", "intent": "identify"})
+        self.assertEqual(result["action"], "shadow")
+        self.assertEqual(result["reason_code"], "SHADOW_MODE")
+        self.assertEqual(self.client.image_calls, 0)
+        connection = sqlite3.connect(self.database)
+        try:
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM product_image_match_audits").fetchone()[0], 1)
+        finally:
+            connection.close()
+
     def test_medium_match_asks_without_sending(self):
         result = self._run({"decision": "ASK_CLARIFICATION", "reason_code": "MEDIUM_CONFIDENCE", "confidence": .7, "confidence_bucket": "medium", "product": {"product_id": self.product["product_id"]}, "variant": "", "intent": "identify"})
         self.assertEqual(result["mode"], "product_match_clarification")

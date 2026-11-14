@@ -12,6 +12,7 @@ from urllib.request import Request, urlopen
 from cryptography.fernet import Fernet
 
 from panel.app import PanelHandler, PanelState, init_db
+from panel.product_match_service import ProductMatchService
 
 
 class _Client:
@@ -151,6 +152,64 @@ class AdminProductMarketingRouteTests(unittest.TestCase):
         for key in payload:
             self.assertEqual(loaded[key], payload[key], key)
         self.assertEqual(self.state.product_image_tool_schema("default", loaded), [])
+
+    def test_confidence_threshold_and_global_kill_are_server_authoritative(self):
+        catalog = [{"product_id": "p1", "product_key": "g5-plus", "product_name": "G5 Plus", "allow_ai_image_send": True}]
+        decision = ProductMatchService.evaluate(
+            [{"product_key": "g5-plus", "confidence": 0.92}], catalog, "identify",
+            confidence_threshold=0.95,
+        )
+        self.assertNotEqual(decision["decision"], "AUTO_SEND")
+        self.state.save_settings({"product_image_global_kill_switch": True}, "default")
+        self.state.ensure_managed_session("sales")
+        self.assertTrue(self.state.settings_payload("sales")["product_image_global_kill_switch"])
+        self.assertEqual(
+            self.state.product_image_tool_schema(
+                "sales", {"chat_product_image_enabled": True, "product_image_global_kill_switch": False}
+            ),
+            [],
+        )
+
+    def test_invalid_mixed_image_settings_do_not_partially_write(self):
+        before = self.request("/api/product-image-settings")[1]
+        status, _ = self.request(
+            "/api/product-image-settings?session=default",
+            method="PUT",
+            payload={
+                "auto_send_enabled": False,
+                "daily_limit": 7,
+                "product_image_confidence_threshold": 2,
+            },
+            csrf=True,
+        )
+        self.assertEqual(status, 400)
+        after = self.request("/api/product-image-settings")[1]
+        self.assertEqual(after, before)
+
+    def test_nested_sensitive_campaign_and_catalog_metadata_is_rejected(self):
+        status, _ = self.request(
+            "/api/marketing/campaigns",
+            method="POST",
+            payload={
+                "campaign_id": "sensitive-campaign",
+                "name": "敏感数据测试",
+                "objective": "测试",
+                "target_rules": {"nested": {"token": "SECRET", "path": "C:\\private\\customer"}},
+            },
+            csrf=True,
+        )
+        self.assertEqual(status, 400)
+        status, _ = self.request(
+            "/api/product-catalog",
+            method="POST",
+            payload={
+                "product_key": "sensitive-product",
+                "product_name": "测试产品",
+                "language_content": {"en": {"token": "SECRET", "path": "/private/x", "chat_id": "raw"}},
+            },
+            csrf=True,
+        )
+        self.assertEqual(status, 400)
 
 
 if __name__ == "__main__":

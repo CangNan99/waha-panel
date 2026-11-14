@@ -1135,6 +1135,7 @@ class MarketingAutomationService:
                     "daily_limit": daily_limit,
                     "cooldown_days": self._settings_value(settings, "ai_marketing_cooldown_days", 30),
                     "marketing_product_image_enabled": self._settings_value(settings, "marketing_product_image_enabled", True),
+                    "product_image_shadow_mode": self._settings_value(settings, "product_image_shadow_mode", False),
                     "product_image_global_kill_switch": self._settings_value(settings, "product_image_global_kill_switch", False),
                     "history": history,
                     "campaign_active_checker": self._campaign_is_active,
